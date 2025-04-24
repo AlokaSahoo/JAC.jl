@@ -1,10 +1,8 @@
 
 
-[![Documentation](https://img.shields.io/badge/Documentation-dev-blue)](https://openjac.github.io/JAC.jl)
-[![codecov](https://codecov.io/gh/OpenJAC/JAC.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/OpenJAC/JAC.jl)
-[![Build Status](https://github.com/OpenJAC/JAC.jl/workflows/CI/badge.svg)](https://github.com/OpenJAC/JAC.jl/actions)
-
-[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/OpenJAC/JAC.jl/master)  ... use JAC immediately with Binder in the cloud.
+| **Documentation**                                                               | **Build Status**                                                                                | **Try JAC in Cloud** 
+|:-------------------------------------------------------------------------------:|:-----------------------------------------------------------------------------------------------:|:-----------------------------------------------------------------------------------------------:|
+| [![Documentation](https://img.shields.io/badge/Documentation-dev-blue)](https://openjac.github.io/JAC.jl/dev) | [![codecov](https://codecov.io/gh/OpenJAC/JAC.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/OpenJAC/JAC.jl) [![Build Status](https://github.com/OpenJAC/JAC.jl/workflows/CI/badge.svg)](https://github.com/OpenJAC/JAC.jl/actions) | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/OpenJAC/JAC.jl/master) |
 
 
 # Jena Atomic Calculator (JAC) for the computation of atomic representations, processes and cascades

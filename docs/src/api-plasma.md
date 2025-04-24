@@ -6,23 +6,23 @@ Pages   = ["Plasma.jl"]
 Order   = [:type, :function]
 ```
 
-## Empirical plasma rates
+## Average-atom computations
 ```@autodocs
-Modules = [Cascade]
-Pages   = ["inc-empirical-rates.jl"]
+Modules = [Plasma]
+Pages   = ["inc-average-atom.jl"]
 Order   = [:type, :function]
 ```
 
 ## Line-shift computations
 ```@autodocs
-Modules = [Cascade]
+Modules = [Plasma]
 Pages   = ["inc-line-shifts.jl"]
 Order   = [:type, :function]
 ```
 
 ## Saha-Boltzmann computations of ionic mixtures
 ```@autodocs
-Modules = [Cascade]
+Modules = [Plasma]
 Pages   = ["inc-saha-boltzmann-mixture.jl"]
 Order   = [:type, :function]
 ```

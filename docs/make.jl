@@ -32,5 +32,5 @@ makedocs(;
 )
 
 deploydocs(;
-    repo     = "github.com/OpenJAC/JAC.jl"
+    repo     = "github.com/AlokaSahoo/JAC.jl"
 )
