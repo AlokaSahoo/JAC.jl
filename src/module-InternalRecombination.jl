@@ -1,14 +1,42 @@
 
 """
-`module  JAC.InternalRecombination`  
-... a submodel of JAC that contains all methods for computing internal-recombination rates between some initial 
+`module  JAC.InternalRecombination`
+... a submodel of JAC that contains all methods for computing internal-recombination rates between some initial
     (Rydberg-type) and final-state multiplets.
+
+    STATUS, 10-Aug-2026:  POSTPONED BY THE MAINTAINER for a longer time.  Do not pick this module up, and do
+    not "helpfully" tune its numbers, without asking first.
+
+    What is settled.  The Rydberg orbitals this module generates are now correct: the 10g orbital of the
+    Xe^35+ K-like case comes out at -6.194 Hartree against a hydrogenic -6.129, i.e. 1%, and the mean field
+    screens by exactly Z - N.  Two earlier defects are fixed -- the missing nuclear term in the mean-field
+    potential (3-Aug-2026) and Basics.computeMeanSubshellOccupation returning a sum where it promised a mean,
+    which screened the Rydberg electron with N_csf x N electrons (10-Aug-2026).  The two-electron amplitudes
+    are ~0.013 a.u., matching an independent n^(-3/2) Rydberg estimate.  RELATIVE results -- which channels
+    and levels dominate -- are meaningful.
+
+    What is NOT settled, and why no example branch may be dated "Last successful".  The ABSOLUTE rates are
+    not determined by this code, for two reasons that are not bugs but open modelling questions.  First, at
+    resonance the rate is 2*pi*|V|^2 / (gamma/2) and therefore DIVERGES as gamma -> 0; `gamma` is a free
+    parameter with no first-principles value here, so every absolute number depends on a knob.  Second,
+    `determineLines` balances an N-electron against an (N+1)-electron level while omitting the Rydberg
+    electron's own binding energy; `resonanceEnergyShift` is a hand-set stand-in for it, and the example uses
+    -0.5 Hartree where the computed 10g energy is -6.194.  The module is left callable rather than raising,
+    because the relative picture is sound and the arbitrary absolute scale is a modelling choice that this
+    docstring now states plainly -- not a hidden defect.
+
+    What is NOT progress.  Do not read agreement, or disagreement, with the May-2024 reference numbers as a
+    test of anything: that reference was produced by a since-deleted orbital pathway, and it also contained
+    the spurious 2.2e3 display factor removed on 10-Aug-2026, so it cancels on both sides of any comparison.
+    Chasing it consumed two sessions and settled nothing; the reference-free hydrogenic check settled the
+    same question in minutes.  Likewise, the rate changes recorded in example-Dm.jl across 2-Aug, 3-Aug and
+    10-Aug are the consequences of fixing inputs, not evidence about the physics.
 """
 module InternalRecombination
 
 
-using  Printf, ..AngularMomentum, ..Basics, ..Defaults, ..InteractionStrength, ..ManyElectron, ..Nuclear, 
-                ..Radial, ..SpinAngular, ..TableStrings
+using  Printf, ..AngularMomentum, ..Basics, ..Bsplines, ..Defaults, ..InteractionStrength, ..ManyElectron, ..Nuclear,
+                ..Radial, ..TableStrings
 
 """
 `struct  InternalRecombination.Settings  <:  AbstractProcessSettings`  
@@ -65,12 +93,12 @@ function Settings(set::InternalRecombination.Settings;
     resonanceEnergyShift::Union{Nothing,Float64}=nothing,    gamma::Union{Nothing,Float64}=nothing,  
     lineSelection::Union{Nothing,LineSelection}=nothing,     operator::Union{Nothing,String}=nothing)  
     
-    if  rydbergShells        == nothing  rydbergShellsx        = set.rydbergShells        else  rydbergShellsx        = rydbergShells        end 
-    if  printBefore          == nothing  printBeforex          = set.printBefore          else  printBeforex          = printBefore          end 
-    if  resonanceEnergyShift == nothing  resonanceEnergyShiftx = set.resonanceEnergyShift else  resonanceEnergyShiftx = resonanceEnergyShift end 
-    if  gamma                == nothing  gammax                = set.gamma                else  gammax                = gamma                end 
-    if  lineSelection        == nothing  lineSelectionx        = set.lineSelection        else  lineSelectionx        = lineSelection        end 
-    if  operator             == nothing  operatorx             = set.operator             else  operatorx             = operator             end 
+    if  isnothing(rydbergShells)         rydbergShellsx        = set.rydbergShells        else  rydbergShellsx        = rydbergShells        end 
+    if  isnothing(printBefore)           printBeforex          = set.printBefore          else  printBeforex          = printBefore          end 
+    if  isnothing(resonanceEnergyShift)  resonanceEnergyShiftx = set.resonanceEnergyShift else  resonanceEnergyShiftx = resonanceEnergyShift end 
+    if  isnothing(gamma)                 gammax                = set.gamma                else  gammax                = gamma                end 
+    if  isnothing(lineSelection)         lineSelectionx        = set.lineSelection        else  lineSelectionx        = lineSelection        end 
+    if  isnothing(operator)              operatorx             = set.operator             else  operatorx             = operator             end 
 
     Settings( rydbergShellsx, printBeforex, resonanceEnergyShiftx, gammax, lineSelectionx, operatorx)
 end
@@ -198,7 +226,7 @@ function computeAmplitudesProperties(line::InternalRecombination.Line, nm::Nucle
                                         grid::Radial.Grid, settings::InternalRecombination.Settings; printout::Bool=true) 
     newChannels = InternalRecombination.Channel[];   rateZ = 0.;   rate = 0.;   gHalf = settings.gamma / 2.
     # Define a common subshell list for both multiplets
-    subshellList = Basics.generate("subshells: ordered list for two bases", line.finalLevel.basis, line.initialLevel.basis)
+    subshellList = Basics.generate(OrderedSubshellList(), line.finalLevel.basis, line.initialLevel.basis)
     Defaults.setDefaults("relativistic subshell list", subshellList; printout=false)
     
     for channel in line.channels
@@ -236,8 +264,16 @@ function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, n
     println("")
     # Generate orbitals for all rydberg-subshells
     rydbergSubshells = Basics.generateSubshellList(settings.rydbergShells)
-    meanPot          = Basics.computePotential(Basics.DFSField(1.0), grid, initialMultiplet.levels[1].basis)
-    rydbergOrbitals  = Basics.generateOrbitalsForPotential(grid, meanPot, rydbergSubshells)
+    # Basics.computePotential(DFSField(),...) returns the ELECTRONIC (mean-field screening) potential only;
+    # the nuclear attraction must be added explicitly (as module-BasicsAZ-inc-generate.jl already does for
+    # its own one-shot orbital spectra) -- without it, the Dirac-equation diagonalization below has no real
+    # attractive well, and Bsplines.findPositiveBranchStart cannot separate genuine bound states from the
+    # spurious negative-energy "Dirac sea" branch, silently returning near-threshold numerical artifacts
+    # instead of real Rydberg orbitals (see project_bsplines_spurious_dirac_sea_bug.md, 3-Aug-2026).
+    nuclearPot       = Nuclear.nuclearPotential(nm, grid)
+    meanPot          = Basics.add(nuclearPot, Basics.computePotential(Basics.DFSField(1.0), grid, initialMultiplet.levels[1].basis))
+    primitives       = Bsplines.generatePrimitives(grid)
+    rydbergOrbitals  = Bsplines.generateOrbitals(rydbergSubshells, meanPot, nm, primitives; printout=true)
     #
     lines = InternalRecombination.determineLines(finalMultiplet, initialMultiplet, settings)
     # Display all selected lines before the computations start
@@ -272,7 +308,6 @@ function determineChannels(finalLevel::Level, initialLevel::Level, settings::Int
     subshells = Basics.generateSubshellList(settings.rydbergShells)
     for  subsh in subshells
         tSymmetries = AngularMomentum.allowedTotalSymmetries(symi, subsh.kappa)
-        ##x @show symi, subsh.kappa, tSymmetries
         for  symt in tSymmetries
             if  symt != symf      continue    end
             push!(channels, InternalRecombination.Channel(subsh, symt, Complex(0.)) )
@@ -295,7 +330,6 @@ function  determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
         for  fLevel  in  finalMultiplet.levels
             if  Basics.selectLevelPair(iLevel, fLevel, settings.lineSelection)
                 dEnergy = iLevel.energy - fLevel.energy   + settings.resonanceEnergyShift
-                ##x if   energy < 0.01                                                             continue   end
                 channels = InternalRecombination.determineChannels(fLevel, iLevel, settings) 
                 push!( lines, InternalRecombination.Line(iLevel, fLevel, dEnergy, 0., 0., channels) )
             end
@@ -398,7 +432,7 @@ end
         otherwise.
 """
 function  displayTotalRates(stream::IO, lines::Array{InternalRecombination.Line,1}, settings::InternalRecombination.Settings)
-    nx = 106
+    nx = 81
     println(stream, " ")
     println(stream, "  Total internal-recombination rates for initial levels without and with the resonance shift: \n")
     println(stream, "  Resonance shift [Hartree]:    $(settings.resonanceEnergyShift) ")
@@ -413,7 +447,6 @@ function  displayTotalRates(stream::IO, lines::Array{InternalRecombination.Line,
     sb = sb * TableStrings.center(22, TableStrings.inUnits("rate");  na=3)
     sa = sa * TableStrings.center(16, "Total IDE rate"; na=2);                           
     sb = sb * TableStrings.center(16, TableStrings.inUnits("rate");  na=2)
-    sa = sa * TableStrings.center(22, "A_IDE / A_radiative"; na=3);       
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
     #
     used = falses(length(lines))
@@ -427,14 +460,12 @@ function  displayTotalRates(stream::IO, lines::Array{InternalRecombination.Line,
             end
         end
         #
-        totalZ = 2.2e3 * totalZ;    total = 2.2e3 * total
         isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
         sa = "      " * string(line.initialLevel.index);   sb = "            " * string(isym)
         sa = sa[end-6:end] * sb[end-10:end] * "  "
         sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.initialLevel.energy))  * "       "
         sa = sa * @sprintf("%.6e", Defaults.convertUnits("rate: from atomic", totalZ))                      * "          "
         sa = sa * @sprintf("%.6e", Defaults.convertUnits("rate: from atomic", total))                       * "        "
-        sa = sa * @sprintf("%.6e", rand(1)[1] )                       * "      "
         println(stream, sa)
     end
     println(stream, "  ", TableStrings.hLine(nx))

@@ -8,7 +8,7 @@ module TwoElectronOnePhoton
 
 
 using Printf, ..AngularMomentum, ..AtomicState, ..Basics, ..Defaults, ..InteractionStrength, ..ManyElectron, ..Nuclear, 
-                ..Radial, ..SpinAngular, ..TableStrings
+                ..Radial, ..RadialIntegrals, ..TableStrings
 
 
 """
@@ -56,13 +56,13 @@ function Settings(set::TwoElectronOnePhoton.Settings;
     photonEnergyShift::Union{Nothing,Float64}=nothing,          eeInteraction::Union{Nothing,AbstractEeInteraction}=nothing,
     gMultiplet::Union{Nothing,Multiplet}=nothing)
     
-    if  multipoles          == nothing   multipolesx          = set.multipoles          else  multipolesx          = multipoles         end 
-    if  gauges              == nothing   gaugesx              = set.gauges              else  gaugesx              = gauges             end 
-    if  printBefore         == nothing   printBeforex         = set.printBefore         else  printBeforex         = printBefore        end 
-    if  lineSelection       == nothing   lineSelectionx       = set.lineSelection       else  lineSelectionx       = lineSelection      end 
-    if  photonEnergyShift   == nothing   photonEnergyShiftx   = set.photonEnergyShift   else  photonEnergyShiftx   = photonEnergyShift  end 
-    if  eeInteraction       == nothing   eeInteractionx       = set.eeInteraction       else  eeInteractionx       = eeInteraction      end 
-    if  gMultiplet          == nothing   gMultipletx          = set.gMultiplet          else  gMultipletx          = gMultiplet         end 
+    if  isnothing(multipoles)            multipolesx          = set.multipoles          else  multipolesx          = multipoles         end 
+    if  isnothing(gauges)                gaugesx              = set.gauges              else  gaugesx              = gauges             end 
+    if  isnothing(printBefore)           printBeforex         = set.printBefore         else  printBeforex         = printBefore        end 
+    if  isnothing(lineSelection)         lineSelectionx       = set.lineSelection       else  lineSelectionx       = lineSelection      end 
+    if  isnothing(photonEnergyShift)     photonEnergyShiftx   = set.photonEnergyShift   else  photonEnergyShiftx   = photonEnergyShift  end 
+    if  isnothing(eeInteraction)         eeInteractionx       = set.eeInteraction       else  eeInteractionx       = eeInteraction      end 
+    if  isnothing(gMultiplet)            gMultipletx          = set.gMultiplet          else  gMultipletx          = gMultiplet         end 
         
     Settings( multipolesx, gaugesx, printBeforex, lineSelectionx, photonEnergyShiftx, eeInteractionx, gMultipletx)
 end
@@ -145,21 +145,42 @@ end
 
 
 """
-`TwoElectronOnePhoton.amplitude(Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level, 
-                                gMultiplet::Multiplet, grid::Radial.Grid; display::Bool=false, printout::Bool=false)`  
-    ... to compute the TEOP emission amplitude  
-    
-                <alpha_f J_f || O^(Mp, emission) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>  
-            +   <alpha_f J_f || V^(e-e) || alpha_n J_f> <alpha_n J_f || O^(Mp, emission) || alpha_i J_i> 
-            
-        emission amplitude for the interaction with the photon field of multipolarity Mp and for the given transition energy 
+`TwoElectronOnePhoton.amplitude(::Emission, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level,
+                                gMultiplet::Multiplet, kind::AbstractEeInteraction, grid::Radial.Grid,
+                                nuclearPotential::Radial.Potential; display::Bool=false, printout::Bool=false)`
+    ... to compute the TEOP emission amplitude
+
+                <alpha_f J_f || O^(Mp, emission) || alpha_n J_i> <alpha_n J_i || H - E || alpha_i J_i>
+            +   <alpha_f J_f || H - E || alpha_n J_f> <alpha_n J_f || O^(Mp, emission) || alpha_i J_i>
+
+        emission amplitude for the interaction with the photon field of multipolarity Mp and for the given transition energy
         and gauge. A value::ComplexF64 is returned. The amplitude value is printed to screen if display=true.
+
+        THE ELECTRON-ELECTRON FACTOR CARRIES `H - E` AND NOT `V^(e-e)` ALONE, and in this process that is not a refinement
+        but the difference between a mean field counted once and counted twice.  Each of the two paths above is a product of
+        a ONE-BODY photon operator and ONE electron-electron factor, while the initial and final states differ in TWO
+        orbitals;  the photon operator moves one of them, so the electron-electron factor is ALWAYS a ONE-orbital
+        transition a -> b.  Exactly there `V^(e-e)` returns the whole spectator mean field `<b|U_HF|a>`, which the one-body
+        part of `H - E` cancels (Brillouin) down to the residual `<b|(U_HF - U)|a>`.  A FIRST-order amplitude is exempt,
+        because it connects states differing in two orbitals where a one-body operator cannot contribute -- which is why
+        this never surfaced in the validated PhotoEmission and Auger paths.  See ManyElectron.matrixElement_HminusE, whose
+        docstring carries the measurement, and `tools/probeTeaJunctionOperator.jl`.
+
+        `kind` MUST BE THE ELECTRON-ELECTRON INTERACTION OF THE HAMILTONIAN THAT PRODUCED THE LEVELS, since the
+        cancellation is referenced to their energy;  it is `settings.eeInteraction`, which until 29-Oct-2026 this function
+        ignored in favour of a hard-wired `CoulombInteraction()`.  `nuclearPotential` must be the nuclear potential on
+        `grid` and enters the one-body integral of the electron-electron factor.
 """
-function amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level, 
-                    gMultiplet::Multiplet, grid::Radial.Grid; display::Bool=false, printout::Bool=false)
+function amplitude(::Emission, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level,
+                    gMultiplet::Multiplet, kind::AbstractEeInteraction, grid::Radial.Grid,
+                    nuclearPotential::Radial.Potential; display::Bool=false, printout::Bool=false)
     #
-    # Always ensure the same subshell list for all initial, intermediate and final levels
+    # Always ensure the same subshell list for all initial, intermediate and final levels. The gMultiplet must take
+    # part in this merge: a physically-motivated Green-function space generally introduces orbitals that occur in
+    # neither the initial nor the final configurations (e.g. the 2p of the near-degenerate 1s2p4s partner for the
+    # Li-like O5+ 1s2s5p --> 1s^2 4s transition), and merging only initial and final makes those cases unusable.
     subshells  = Basics.merge(initialLevel.basis.subshells, finalLevel.basis.subshells)
+    subshells  = Basics.merge(subshells, gMultiplet.levels[1].basis.subshells)
     iLevel     = Level(initialLevel, subshells)
     fLevel     = Level(finalLevel, subshells)
     nMultiplet = Multiplet(gMultiplet, subshells)
@@ -167,8 +188,15 @@ function amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64
     nf = length(fLevel.basis.csfs);    symf = LevelSymmetry(fLevel.J, fLevel.parity)
     ni = length(iLevel.basis.csfs);    symi = LevelSymmetry(iLevel.J, iLevel.parity);    eni = iLevel.energy
     nn = length(nMultiplet.levels[1].basis.csfs)
-    
-    if  printout   printstyled("Compute TEOP $(Mp) amplitude for the transition [$(iLevel.index)-$(fLevel.index)] ... ", 
+    efinal = eni - omega
+    #
+    # Second-order perturbation theory requires the intermediate (Green-function) level n to be genuinely
+    # DIFFERENT from the initial or final level itself; a formally coincident n -- which can occur if the
+    # gMultiplet's reference configurations overlap with the initial- or final-state configurations -- would
+    # give a spurious, ill-defined 1/(eni-enn) or 1/(efinal-enn) singularity and must be excluded from the sum.
+    selfTolerance = 1.0e-8
+
+    if  printout   printstyled("Compute TEOP $(Mp) amplitude for the transition [$(iLevel.index)-$(fLevel.index)] ... ",
                                 color=:light_green)    end
     amplitude = ComplexF64(0.)
     #
@@ -177,26 +205,38 @@ function amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64
         for  s = 1:ni
             syms = LevelSymmetry(iLevel.basis.csfs[s].J, iLevel.basis.csfs[s].parity);  if  syms != symi    continue    end
             for  nLevel in nMultiplet.levels
-                symn = LevelSymmetry(nLevel.J, nLevel.parity);    enn = nLevel.energy;   @show symn
+                symn = LevelSymmetry(nLevel.J, nLevel.parity);    enn = nLevel.energy
                 #
-                #   Compute <alpha_f J_f || O^(Mp, kind) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>
-                if  symn != symi     continue    end
-                for  t = 1:nn
-                    if  nLevel.mc[t] == 0.  continue    end
-                    Vee       = ManyElectron.matrixElement_Vee(CoulombInteraction(), nLevel.basis, t, iLevel.basis, s, grid)
-                    OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, fLevel.basis, r, nLevel.basis, t, grid)
-                    amplitude = amplitude + fLevel.mc[r] * OMp * nLevel.mc[t]^2 * Vee * iLevel.mc[s] / (eni - enn)
-                    @show  t, eni, (eni - enn), amplitude
+                #   Compute <alpha_f J_f || O^(Mp, kind) || alpha_n J_i> <alpha_n J_i || H - E || alpha_i J_i>
+                #   The intermediate Green-function level is, in general, multi-configurational; the two matrix
+                #   elements therefore run over two INDEPENDENT CSF indices t, tp of that same level.
+                #   The electron-electron factor carries H - E, not V^(e-e) alone: it is a ONE-orbital transition
+                #   here, which is the one case where the two differ by the whole spectator mean field.
+                if  symn == symi  &&  abs(enn - eni) > selfTolerance
+                    for  t = 1:nn
+                        if  nLevel.mc[t] == 0.  continue    end
+                        OMp = ManyElectron.matrixElement_Mab(Mp, gauge, omega, fLevel.basis, r, nLevel.basis, t, grid)
+                        for  tp = 1:nn
+                            if  nLevel.mc[tp] == 0.  continue    end
+                            Vee       = ManyElectron.matrixElement_HminusE(Basics.HminusE(kind), nLevel.basis, tp,
+                                                                           iLevel.basis, s, grid, nuclearPotential)
+                            amplitude = amplitude + fLevel.mc[r] * OMp * nLevel.mc[t] * nLevel.mc[tp] * Vee * iLevel.mc[s] / (eni - enn)
+                        end
+                    end
                 end
                 #
-                #   Compute <alpha_f J_f || V^(e-e) || alpha_n J_f> <alpha_n J_f || O^(Mp, kind) || alpha_i J_i>
-                if  symn != symf     continue    end
-                for  t = 1:nn
-                    if  nLevel.mc[t] == 0.  continue    end
-                    OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, nLevel.basis, t, iLevel.basis, s, grid)
-                    Vee       = ManyElectron.matrixElement_Vee(CoulombInteraction(), fLevel.basis, r, nLevel.basis, t, grid)
-                    amplitude = amplitude + fLevel.mc[r] * Vee * nLevel.mc[t]^2 * OMp * iLevel.mc[s] / (eni - omega - enn)
-                    @show  t, eni, (eni - omega - enn), amplitude
+                #   Compute <alpha_f J_f || H - E || alpha_n J_f> <alpha_n J_f || O^(Mp, kind) || alpha_i J_i>
+                if  symn == symf  &&  abs(enn - efinal) > selfTolerance
+                    for  t = 1:nn
+                        if  nLevel.mc[t] == 0.  continue    end
+                        Vee = ManyElectron.matrixElement_HminusE(Basics.HminusE(kind), fLevel.basis, r,
+                                                                 nLevel.basis, t, grid, nuclearPotential)
+                        for  tp = 1:nn
+                            if  nLevel.mc[tp] == 0.  continue    end
+                            OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, nLevel.basis, tp, iLevel.basis, s, grid)
+                            amplitude = amplitude + fLevel.mc[r] * Vee * nLevel.mc[t] * nLevel.mc[tp] * OMp * iLevel.mc[s] / (eni - omega - enn)
+                        end
+                    end
                 end
             end
         end
@@ -205,27 +245,110 @@ function amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64
     
     if  display  
         println("    < level=$(finalLevel.index) [J=$(finalLevel.J)$(string(finalLevel.parity))] ||" *
-                " TEOP^($Mp, $kind) ($omega a.u., $gauge) ||" *
+                " TEOP^($Mp, emission) ($omega a.u., $gauge) ||" *
                 " $(initialLevel.index) [$(initialLevel.J)$(string(initialLevel.parity))] >  = $amplitude  ")
     end
     
     return( amplitude )
 end
-        
+
 
 """
-`TwoElectronOnePhoton.computeAmplitudesProperties(line::TwoElectronOnePhoton.Line, grid::Radial.Grid, 
-                                                    settings::TwoElectronOnePhoton.Settings; printout::Bool=true)`  
-    ... to compute all amplitudes and properties of the given line; a line::TwoElectronOnePhoton.Line is returned for which the 
-        amplitudes and properties are now evaluated.
+`TwoElectronOnePhoton.checkSecondOrderConditions(finalMultiplet::Multiplet, initialMultiplet::Multiplet, gMultiplet::Multiplet,
+                                                 grid::Radial.Grid)`
+    ... tests the TWO conditions under which this module's explicit second-order amplitude means what it says, and NAMES what it
+        finds rather than letting a wrong number through in silence.  An array::Array{String,1} of problem descriptions is
+        returned, EMPTY where both conditions hold.
+
+        CONDITION (a):  THE GREEN SPACE MUST BE DISJOINT FROM THE INITIAL AND FINAL CI SPACES.  Second-order perturbation theory
+        corrects a ZEROTH-order reference state by a sum over intermediates;  where that reference state's own CI space already
+        contains a Green-space configuration, its admixture is counted ONCE by the CI and AGAIN by the sum.  The `selfTolerance`
+        guard inside `amplitude` cannot see this, because it compares ENERGIES and the double-counted level is degenerate with
+        nothing -- the reference state merely CONTAINS it.  Measured 01-Nov-2026 on the He-like Ne case of
+        `TestFrames.testModule_TwoElectronOnePhoton`, whose Green space `[1s2p, 1s2s]` shared `1s2s` with its final space
+        `[1s^2, 1s2s, 2p^2]`:  a factor 6.1 too large, and on the time ordering that carries 160-400x the other.
+
+        CONDITION (b):  ALL THREE MULTIPLETS MUST SHARE ONE ORBITAL SET.  `ManyElectron.matrixElement_HminusE` drops the overlap
+        term `-E <r|s>` on a stated orthonormality assumption, and its ONE-BODY part is precisely what cannot survive that
+        assumption failing:  for two nearly-equal orbitals `<b|h_D|a> ~ eps <b|a>`, a large number that only the dropped term
+        cancels.  Measured on the same case with three separate SCF sets:  `<1s_green|2s_initial> = -0.0115`, and the one-body
+        integral came out `+0.1143` where the single-set value must be `-0.1856` -- the WRONG SIGN, so it ANTI-cancels the
+        two-body term instead of cancelling it.  A factor 9.  `V^(e-e)` alone carries no one-body part and never felt this,
+        which is why the condition went unnoticed for as long as that operator was in use.
+
+        WITH BOTH CONDITIONS MET the explicit second order reproduces the same rate obtained by full CI to 0.3 % on that case.
+        These are therefore the conditions under which the module is VALIDATED, not a counsel of perfection, and the two errors
+        can hide each other:  the test above read 3.70 with both violated, 6.10 with only (a), and 0.997 with neither.  Build
+        the three multiplets on one orbital set with `Hamiltonian.performCIwithFrozenOrbitals`.
 """
-function  computeAmplitudesProperties(line::TwoElectronOnePhoton.Line, grid::Radial.Grid, settings::TwoElectronOnePhoton.Settings; 
-                                        printout::Bool=true)
+function checkSecondOrderConditions(finalMultiplet::Multiplet, initialMultiplet::Multiplet, gMultiplet::Multiplet,
+                                    grid::Radial.Grid)
+    problems = String[]
+    if  length(gMultiplet.levels) == 0      return( problems )      end
+
+    # Condition (a).  The occupation vectors are only comparable on ONE subshell list, so they are merged first, exactly as
+    # amplitude() merges them before evaluating the sum
+    subshells = Basics.merge(initialMultiplet.levels[1].basis.subshells, finalMultiplet.levels[1].basis.subshells)
+    subshells = Basics.merge(subshells, gMultiplet.levels[1].basis.subshells)
+    gOcc      = Set( csf.occupation  for csf in Multiplet(gMultiplet, subshells).levels[1].basis.csfs )
+    for  (name, mp)  in  ( ("initial", initialMultiplet), ("final", finalMultiplet) )
+        shared = intersect(gOcc, Set( csf.occupation  for csf in Multiplet(mp, subshells).levels[1].basis.csfs ))
+        if  !isempty(shared)
+            push!(problems, "TEOP condition (a) VIOLATED: the Green space shares $(length(shared)) configuration(s) with the " *
+                            "$name CI space over the subshells $subshells, e.g. the occupation $(first(shared)).  The "        *
+                            "second-order sum then counts an admixture that the $name state already carries;  measured cost "  *
+                            "on the He-like Ne test case, a factor 6.1.  Drop the shared configuration from the $name space "  *
+                            "or from the Green space -- see TwoElectronOnePhoton.checkSecondOrderConditions.")
+        end
+    end
+
+    # Condition (b).  One orbital set means every same-subshell overlap is 1 and every same-kappa cross overlap is 0;  the
+    # worst departure from that is reported, since it is the quantity the dropped -E<r|s> term would have cancelled
+    worst = 0.;    worstName = ""
+    for  (name, bA, bB)  in  ( ("Green/initial", gMultiplet.levels[1].basis, initialMultiplet.levels[1].basis),
+                               ("Green/final",   gMultiplet.levels[1].basis, finalMultiplet.levels[1].basis),
+                               ("initial/final", initialMultiplet.levels[1].basis, finalMultiplet.levels[1].basis) )
+        for  sha in keys(bA.orbitals),  shb in keys(bB.orbitals)
+            if  sha.kappa != shb.kappa      continue     end
+            ov  = RadialIntegrals.overlap(bA.orbitals[sha], bB.orbitals[shb], grid)
+            dev = sha == shb  ?  abs(abs(ov) - 1.)  :  abs(ov)
+            if  dev > worst
+                worst = dev;    worstName = "$name  <$(string(sha))|$(string(shb))> = $(round(ov, digits=6))"
+            end
+        end
+    end
+    if  worst > 1.0e-4
+        push!(problems, "TEOP condition (b) VIOLATED: the three multiplets do not share one orbital set -- worst departure "   *
+                        "$(round(worst, digits=6)) at $worstName.  ManyElectron.matrixElement_HminusE drops the -E<r|s> "      *
+                        "overlap term and its one-body part cannot survive that;  measured cost on the He-like Ne test case, " *
+                        "a factor 9, with the one-body integral coming out of the WRONG SIGN.  Build the three multiplets on " *
+                        "one orbital set with Hamiltonian.performCIwithFrozenOrbitals.")
+    end
+
+    return( problems )
+end
+
+
+"""
+`TwoElectronOnePhoton.computeAmplitudesProperties(line::TwoElectronOnePhoton.Line, nm::Nuclear.Model, grid::Radial.Grid,
+                                                    settings::TwoElectronOnePhoton.Settings; printout::Bool=true,
+                                                    nuclearPot::Union{Nothing,Radial.Potential}=nothing)`
+    ... to compute all amplitudes and properties of the given line; a line::TwoElectronOnePhoton.Line is returned for which the 
+        amplitudes and properties are now evaluated.  `nm` is needed because the electron-electron factor of the second-order
+        amplitude carries `H - E`, whose one-body part is the bare Dirac operator in the nuclear potential;  `nuclearPot` lets
+        a caller that builds that potential once for a whole computation pass it in, and omitting it reproduces the same
+        potential from `nm` here.
+"""
+function  computeAmplitudesProperties(line::TwoElectronOnePhoton.Line, nm::Nuclear.Model, grid::Radial.Grid,
+                                        settings::TwoElectronOnePhoton.Settings; printout::Bool=true,
+                                        nuclearPot::Union{Nothing,Radial.Potential}=nothing)
+    nucPot = isnothing(nuclearPot) ? Nuclear.nuclearPotential(nm, grid) : nuclearPot
     newChannels = TwoElectronOnePhoton.Channel[];    rateC = 0.;    rateB = 0.
     for channel in line.channels
         #
-        amplitude = TwoElectronOnePhoton.amplitude("emission", channel.multipole, channel.gauge, line.omega, 
-                                                    line.finalLevel, line.initialLevel, settings.gMultiplet, grid, printout=printout)
+        amplitude = TwoElectronOnePhoton.amplitude(Emission(), channel.multipole, channel.gauge, line.omega,
+                                                    line.finalLevel, line.initialLevel, settings.gMultiplet,
+                                                    settings.eeInteraction, grid, nucPot, printout=printout)
         #
         push!( newChannels, TwoElectronOnePhoton.Channel( channel.multipole, channel.gauge, amplitude) )
         #
@@ -252,7 +375,7 @@ end
 function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
                         settings::TwoElectronOnePhoton.Settings; output=true) 
     # Define a common subshell list for both multiplets
-    subshellList = Basics.generate("subshells: ordered list for two bases", finalMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
+    subshellList = Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
     Defaults.setDefaults("relativistic subshell list", subshellList; printout=true)
     #
     println("")
@@ -262,10 +385,19 @@ function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, n
     lines = TwoElectronOnePhoton.determineLines(finalMultiplet, initialMultiplet, settings)
     # Display all selected lines before the computations start
     if  settings.printBefore    TwoElectronOnePhoton.displayLines(lines)    end
+    # The two conditions under which an explicit second-order amplitude means what it says are checked ONCE here, rather than
+    # per line, and reported rather than enforced: a violation is a factor of 6 to 9 on this module's own test case, and the
+    # two can hide one another, so a silent number is the one outcome that must not happen
+    for  problem in TwoElectronOnePhoton.checkSecondOrderConditions(finalMultiplet, initialMultiplet, settings.gMultiplet, grid)
+        @warn problem
+    end
+    # The nuclear potential is a constant of the whole computation -- it enters the one-body part of the H - E
+    # electron-electron factor -- so it is built once here rather than per line
+    nuclearPot = Nuclear.nuclearPotential(nm, grid)
     # Calculate all amplitudes and requested properties
     newLines = TwoElectronOnePhoton.Line[]
     for  line in lines
-        newLine = TwoElectronOnePhoton.computeAmplitudesProperties(line, grid, settings) 
+        newLine = TwoElectronOnePhoton.computeAmplitudesProperties(line, nm, grid, settings; nuclearPot=nuclearPot)
         push!( newLines, newLine)
     end
     # Print all results to screen
@@ -324,8 +456,9 @@ function  determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
         for  fLevel  in  finalMultiplet.levels
             if  Basics.selectLevelPair(iLevel, fLevel, settings.lineSelection)
                 omega = iLevel.energy - fLevel.energy   + settings.photonEnergyShift
-
-                channels = TwoElectronOnePhoton.determineChannels(fLevel, iLevel, settings) 
+                if  omega <= 0.   continue   end    # no emission line for a final level above the initial one
+                #
+                channels = TwoElectronOnePhoton.determineChannels(fLevel, iLevel, settings)
                 if   length(channels) == 0   continue   end
                 push!( lines, TwoElectronOnePhoton.Line(iLevel, fLevel, omega, EmProperty(0., 0.), channels) )
             end
@@ -426,7 +559,6 @@ function  displayLifetimes(stream::IO, lines::Array{TwoElectronOnePhoton.Line,1}
         sa = sa * "Coulomb          " * @sprintf("%.6e",              1.0/irates[ii].Coulomb)     * "  "
         sa = sa * @sprintf("%.6e", Defaults.convertUnits("time: from atomic",   1.0/irates[ii].Coulomb) )   * "    "
         sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic",     irates[ii].Coulomb) )
-        ##x @show 1.0/Defaults.convertUnits("rate: from atomic",  irates[ii].Coulomb), irates[ii].Coulomb
         println(stream, sa)
         sa = repeat(" ", length(istr[ii]) )
         sa = sa * "Babushkin        " * @sprintf("%.6e",              1.0/irates[ii].Babushkin)   * "  "
@@ -460,7 +592,7 @@ function  displayRates(stream::IO, lines::Array{TwoElectronOnePhoton.Line,1}, se
     sa = sa * TableStrings.center(11, "Gauge"    ; na=4);                         sb = sb * TableStrings.hBlank(17)
     sa = sa * TableStrings.center(26, "A--Einstein--B"; na=3);       
     sb = sb * TableStrings.center(26, TableStrings.inUnits("rate")*"          "*TableStrings.inUnits("rate"); na=2)
-    sa = sa * TableStrings.center(11, "Osc. strength"    ; na=3);                 sb = sb * TableStrings.hBlank(17)
+    sa = sa * TableStrings.center(11, "gf"               ; na=3);                 sb = sb * TableStrings.hBlank(17)
     sa = sa * TableStrings.center(12, "Decay widths"; na=3);       
     sb = sb * TableStrings.center(12, TableStrings.inUnits("energy"); na=4)
     sa = sa * TableStrings.center(13, "Line strength"; na=4);       
@@ -477,12 +609,12 @@ function  displayRates(stream::IO, lines::Array{TwoElectronOnePhoton.Line,1}, se
             sa = sa * TableStrings.center(9,  string(ch.multipole); na=4)
             sa = sa * TableStrings.flushleft(11, string(ch.gauge);  na=2)
             chRate =  8pi * Defaults.getDefaults("alpha") * line.omega / (Basics.twice(line.initialLevel.J) + 1) * (abs(ch.amplitude)^2) 
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to Einstein A",    line, chRate)) * "  "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to Einstein B",    line, chRate)) * "    "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to g_f",           line, chRate)) * "    "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to decay width",   line, chRate)) * "    "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToEinsteinA(),    line, chRate)) * "  "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToEinsteinB(),    line, chRate)) * "    "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToOscillatorGf(),           line, chRate)) * "    "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToDecayWidth(),   line, chRate)) * "    "
             if  ch.multipole == E1
-                    sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to S",     line, chRate)) * "    "
+                    sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToLineStrengthS(),     line, chRate)) * "    "
             else    sa = sa * "  --  " 
             end
             println(stream, sa)

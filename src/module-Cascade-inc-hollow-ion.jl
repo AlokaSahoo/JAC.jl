@@ -7,10 +7,10 @@
     ... computes in turn all the requested (decay) transition amplitudes as well as AutoIonization.Line's, etc. for all 
         pre-specified decay steps of the cascade. When compared with standard computations of these atomic 
         processes, however, the amount of output is largely reduced and often just printed into the summary file. 
-        A set of  data::Cascade.DecayData  is returned.
+        A set of  data::Array{Cascade.Data,1}  is returned.
 """
 function computeSteps(scheme::Cascade.HollowIonScheme, comp::Cascade.Computation, stepList::Array{Cascade.Step,1})
-    linesA = AutoIonization.Line[];    linesR = PhotoEmission.Line[];    linesC = ElectronCapture.Line[];    cOrbitals = Dict{Subshell, Orbital}()
+    linesA = AutoIonization.Line[];    linesR = PhotoEmission.Line[];    linesC = ElectronCapture.Line[];    cOrbitals = Dict{Subshell, Orbital}();    cPhases = Dict{Subshell, Float64}()
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     nt = 0;   st = 0;   previousMeanEn = 0.
     for  step  in  stepList
@@ -35,7 +35,7 @@ function computeSteps(scheme::Cascade.HollowIonScheme, comp::Cascade.Computation
             if  abs(meanEn - previousMeanEn) / meanEn  < 0.15   # no new continuum orbitals
                 println(">> No new continum orbitals are generated for $(keys(cOrbitals)) and for the energy $meanEn ")
             else
-                previousMeanEn = meanEn;    cOrbitals = Dict{Subshell, Orbital}()
+                previousMeanEn = meanEn;    cOrbitals = Dict{Subshell, Orbital}();    cPhases = Dict{Subshell, Float64}()
                 for kappa = -step.settings.maxKappa-1:step.settings.maxKappa        if   kappa == 0     continue    end
                     sh           = Subshell(101, kappa);     nrContinuum = Continuum.gridConsistency(meanEn, comp.grid)
                     contSettings = Continuum.Settings(false, nrContinuum);   
@@ -44,16 +44,22 @@ function computeSteps(scheme::Cascade.HollowIonScheme, comp::Cascade.Computation
                     ## wp2 = compute("radial potential: Hartree-Slater", grid, wLevel)
                     ## wp3 = compute("radial potential: Kohn-Sham", grid, wLevel)
                     ## wp           = Basics.compute("radial potential: Dirac-Fock-Slater", comp.grid, step.finalMultiplet.levels[1].basis)
-                    wp           = Basics.computePotentialDFS(comp.grid, step.finalMultiplet.levels[1])
+                    ## Basics.computePotentialDFS does not exist.  The working pattern is the one of
+                    ## module-Cascade-inc-dielectronic-recombination.jl: dispatch on the self-consistent field of
+                    ## the settings, which also honours a non-DFS choice instead of hard-wiring one.
+                    ## The same dead call used to sit in module-Cascade-inc-stepwise-decay.jl and
+                    ## module-PhotoDoubleIonization.jl; both were repaired on 10-Aug-2026, the latter only in
+                    ## passing -- that module is postponed, see its own docstring.
+                    wp           = Basics.computePotential(comp.asfSettings.scField, comp.grid, step.finalMultiplet.levels[1])
                     pot          = Basics.add(npot, wp)
                     cOrbital, phase, normF  = Continuum.generateOrbitalLocalPotential(meanEn, sh, pot, contSettings)
-                    cOrbitals[sh] = cOrbital
+                    cOrbitals[sh] = cOrbital;    cPhases[sh] = phase
                 end
                 println(">> Generate continum orbitals in DFS potential for $(keys(cOrbitals)) and for the energy $meanEn ")
             end
         
             newLines = AutoIonization.computeLinesFromOrbitals(step.finalMultiplet, step.initialMultiplet, comp.nuclearModel, comp.grid, 
-                                                                step.settings, cOrbitals, output=true, printout=false) 
+                                                                step.settings, cOrbitals, cPhases, output=true, printout=false) 
             append!(linesA, newLines);    nt = length(linesA)
         elseif  step.process == Basics.Auger() 
             # Compute continuum orbitals independently for all transitions in the given block.
@@ -71,7 +77,9 @@ function computeSteps(scheme::Cascade.HollowIonScheme, comp::Cascade.Computation
         println(sa);    if  printSummary   println(iostream, sa)   end 
     end
     #
-    data = Cascade.DecayData(linesR, linesA)
+    ## Cascade.DecayData no longer exists; the generalised Cascade.Data{T} replaced the per-scheme data types,
+    ## exactly as in module-Cascade-inc-stepwise-decay.jl.
+    data = [ Cascade.Data{PhotoEmission.Line}(linesR), Cascade.Data{AutoIonization.Line}(linesA) ]
 end
 
 """
@@ -137,12 +145,12 @@ function generateBlocks(scheme::Cascade.HollowIonScheme, comp::Cascade.Computati
         for  confa  in confs
             print("  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")
             if  printSummary   println(iostream, "\n*  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")   end
-                ##x @show confa, comp.asfSettings
-                ##x basis     = Basics.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-                basis     = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-                ##x multiplet = Basics.perform("computation: mutiplet from orbitals, no CI, CSF diagonal", [confa],  basis.orbitals, 
-                ##x                             comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-                multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa],  basis.orbitals, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
+                ## SelfConsistent.performSCF returns a Multiplet, not a Basis; the orbitals sit one level deeper.
+                ## The same stale assumption was found in module-Cascade-inc-impact-excitation.jl.
+                scfMultiplet = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
+                multiplet    = Hamiltonian.performCIwithFrozenOrbitals([confa], scfMultiplet.levels[1].basis.orbitals, comp.nuclearModel,
+                                                                       comp.grid, Cascade.asfSettingsForApproach(comp.approach, comp.asfSettings);
+                                                                       printout=false)
             push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
             println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
         end
@@ -159,8 +167,6 @@ function generateBlocks(scheme::Cascade.HollowIonScheme, comp::Cascade.Computati
         for  confa  in confs
             print("  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")
             if  printSummary   println(iostream, "\n*  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")   end
-            ##x basis     = Basics.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            ##x multiplet = Basics.performCI(basis,    comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
             multiplet = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
             push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
             println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
@@ -173,17 +179,17 @@ end
 
 
 """
-`Cascade.generateConfigurationsForHollowIons(initialConfigs::Array{Configurations,1}, intoShells::Array{Shell,1}, 
+`Cascade.generateConfigurationsForHollowIons(initialConfigs::Array{Configuration,1}, intoShells::Array{Shell,1}, 
                                                 decayShells::Array{Shell,1}, noElectrons::Int64)`  
     ... generates all possible configurations as obtained by the capture of noElectrons into the intoShells. 
         A confList::Array{Configuration,1} is returned.
 """
 function generateConfigurationsForHollowIons(initialConfigs::Array{Configuration,1}, intoShells::Array{Shell,1}, 
                                                 decayShells::Array{Shell,1}, noElectrons::Int64)
-    # Generate all configurations with additional noElectrons in the intoShells 
+    # Generate all configurations with additional noElectrons in the intoShells
     newConfigs = copy(initialConfigs)
     for  ne = 1:noElectrons
-        newConfigs = Basics.generateConfigurationsWithElectronCapture(newConfigs,Shell[],intoShells,0)
+        newConfigs = Basics.generateConfigurationsForExcitationScheme(newConfigs, Basics.ExciteByCapture(), Shell[], Shell[], intoShells, 0)
     end
     #
     # Build configurations with all decayShells 'in between', even if zero occupation
@@ -194,11 +200,38 @@ function generateConfigurationsForHollowIons(initialConfigs::Array{Configuration
         push!(newConfigs, Configuration(nshells, conf.NoElectrons))
     end
     #
+    # Generate the configurations that are REACHED BY DECAY, i.e. with one or several electrons moved from the
+    # captured (into) shells DOWN into the decayShells.  Without this step the decayShells were only ever
+    # emptied by RemoveElectrons below, never filled, so `decayShells` did not mean what its name says: for a
+    # hollow ion started with an empty K shell no configuration with an occupied 1s was generated at all, and
+    # neither the dominant 2p -> 1s radiative channel nor the Auger decay into the ground state of the next
+    # ion could appear.  The transfer is iterated, since a cascade moves the electrons down one at a time, and
+    # it terminates because each transfer strictly reduces the occupation of the into-shells.
+    ## NB the electron number has to be enforced explicitly.  intoShells and decayShells generally OVERLAP --
+    ## for a K-empty hollow ion one naturally writes intoShells = [2s,2p], decayShells = [1s,2s,2p] -- and
+    ## Basics.generateConfigurations then also returns configurations with an electron ADDED rather than moved
+    ## (e.g. 1s^1 2s^2 or 2p^3 from a two-electron parent).  A radiative transition conserves the electron
+    ## number, so only the configurations that keep it are decay targets.
+    ## Count the electrons from the OCCUPATIONS, not from Configuration.NoElectrons: that field is not kept in
+    ## step with the shells by the generators used here, which is why the final loop of this function recomputes
+    ## it as well.  Filtering on the field silently lets three-electron configurations through.
+    neOf(c)     = sum(values(c.shells))
+    neCaptured  = length(newConfigs) > 0 ? neOf(newConfigs[1]) : 0
+    transferred = Configuration[];    tConfigs = copy(newConfigs)
+    for  nt = 1:noElectrons + length(decayShells)
+        tConfigs = Basics.generateConfigurations(tConfigs, intoShells, decayShells, 1)
+        tConfigs = [c for c in unique(tConfigs)  if neOf(c) == neCaptured]
+        tConfigs = setdiff(tConfigs, unique(vcat(newConfigs, transferred)))
+        if  length(tConfigs) == 0    break    end
+        append!(transferred, tConfigs)
+    end
+    append!(newConfigs, transferred);    newConfigs = unique(newConfigs)
+    #
     # Now add all decay configurations
     decayConfigs = Configuration[];    dConfigs = copy(newConfigs)
     further = true
     while  further
-        dConfigs = Cascade.generateConfigurationsWith2OuterHoles(dConfigs, decayShells)
+        dConfigs = Basics.generateConfigurations(Basics.RemoveElectrons(2, decayShells), dConfigs)
         if length(dConfigs) > 0     append!(decayConfigs, dConfigs)     else   further = false      end
     end
     decayConfigs = unique(decayConfigs)
@@ -206,7 +239,7 @@ function generateConfigurationsForHollowIons(initialConfigs::Array{Configuration
     dConfigs = copy(newConfigs);   append!(dConfigs, decayConfigs)
     further = true
     while  further
-        dConfigs = Cascade.generateConfigurationsWith1OuterHole(dConfigs, decayShells)
+        dConfigs = Basics.generateConfigurations(Basics.RemoveElectrons(1, decayShells), dConfigs)
         if length(dConfigs) > 0     append!(decayConfigs, dConfigs)     else   further = false      end
     end
     decayConfigs = unique(decayConfigs)
@@ -220,6 +253,10 @@ function generateConfigurationsForHollowIons(initialConfigs::Array{Configuration
     for  conf  in  dConfigs  
         nshells = Dict{Shell,Int64}();      ne = 0
         for  (sh,occ) in conf.shells   if  occ > 0     nshells[sh] = occ;  ne = ne + occ    end     end
+        ## Skip the fully-stripped ion: repeated RemoveElectrons eventually empties the configuration, and a
+        ## bare nucleus is not a cascade block -- it has no levels.  Left in, it reaches Hamiltonian.performCI
+        ## and aborts there in Basics.merge with a bare error("stop a").
+        if  ne == 0    continue    end
         push!(nconfList, Configuration( nshells, ne))
     end
     #
@@ -230,55 +267,6 @@ function generateConfigurationsForHollowIons(initialConfigs::Array{Configuration
 end
 
 
-#==
-"""
-`Cascade.generateConfigurationsForDielectronicCapture(multiplets::Array{Multiplet,1},  scheme::HollowIonScheme, 
-                                                    nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... generates all possible doubly-excited configurations due to (dielectronic) electron capture into the given multiplets.
-        The number and type of such doubly-generated configurations depend on (1) the maximum (electron) energy for capturing an electron
-        that is closely related to the (maximum) temperature of the plasma; (2) the fromShells from which (and how many displacements)
-        are accepted as well as (3) the maximum principle and orbital angular quantum number of the additional (to-) shellsthe fromShells
-        into which electrons excited and/or captured. A Tuple(initialConfList::Array{Configuration,1}, confList::Array{Configuration,1}) 
-        is returned.
-"""
-function generateConfigurationsForDielectronicCapture(multiplets::Array{Multiplet,1},  scheme::HollowIonScheme, 
-                                                    nm::Nuclear.Model, grid::Radial.Grid)
-    # Determine all (reference) configurations from multiplets and generate the 'excited' configurations due to the specificed excitations
-    initialConfList = Configuration[]
-    for mp  in  multiplets   
-        confList = Basics.extractNonrelativisticConfigurations(mp.levels[1].basis)
-        for  conf in confList   if  conf in initialConfList   nothing   else   push!(initialConfList, conf)      end      end
-    end
-    captureConfList = copy(initialConfList)
-    for nc = 1:scheme.NoCapturedElectrons
-        captureConfList = Basics.generateConfigurationsWithElectronCapture(captureConfList, Shell[], scheme.intoShells, 0);   @show nc, captureConfList
-    end
-    shellList       = Basics.extractNonrelativisticShellList(multiplets)
-    shellList       = Basics.merge(scheme.intoShells, scheme.decayShells);  @show shellList
-    blockConfList   = copy(initialConfList)
-    for nc = 1:scheme.NoCapturedElectrons
-        blockConfList   = Basics.generateConfigurationsWithElectronCapture(blockConfList, Shell[], shellList, 0);   @show nc, blockConfList
-    end
-    @show initialConfList
-    @show blockConfList
-    @warn("blockConfList does not yet support the autoionization of the high-n electrons.")
-    #
-    # Determine first a hydrogenic spectrum for all subshells of the initial and doubly-excited states
-    allConfList   = Configuration[];      append!(allConfList, initialConfList);      append!(allConfList, blockConfList)
-    allSubshells  = Basics.extractRelativisticSubshellList(allConfList)
-    primitives    = Bsplines.generatePrimitives(grid)
-    orbitals      = Bsplines.generateOrbitalsHydrogenic(primitives, nm, allSubshells, printout=true)
-    # Exclude configurations with too high mean energies
-    en            = Float64[];   
-    for conf in initialConfList
-        wen = Basics.determineMeanEnergy(conf, orbitals, nm, grid)
-        push!(en, wen)
-    end
-    initialMean = sum(en) / length(en)
-    println(">>> initial configuration(s) have mena energies  $initialMean  [a.u.].")
-
-    return( (initialConfList, blockConfList)  )
-end  ==#
 
 
 """
@@ -291,18 +279,16 @@ end  ==#
         these DR plasma rate computation are comprised into (output) data::ExcitationData, while these data are only printed during 
         the generation and nothing is returned.
 
-`Cascade.perform(scheme::HollowIonScheme, comp::Cascade.Computation; output=true, outputToFile::Bool=true)`   
+`Cascade.perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)`   
     ... to perform the same but to return the complete output in a dictionary that is written to disk and can be used in subsequent
         cascade simulation. The particular output depends on the specifications of the cascade.
 """
-function perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)
+function perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true, outputDirectory::String="")
     if  output    results = Dict{String, Any}()    else    results = nothing    end
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     #
     # Perform the SCF and CI computation for the intial-state multiplets if initial configurations are given
     if  comp.initialConfigs != Configuration[]
-        ##x basis      = Basics.performSCF(comp.initialConfigs, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-        ##x multiplet  = Basics.performCI(basis, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
         multiplet  = SelfConsistent.performSCF(comp.initialConfigs, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
         multiplets = [Multiplet("initial states", multiplet.levels)]
     else
@@ -316,7 +302,7 @@ function perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Boo
     wa = Cascade.generateConfigurationsForHollowIons(comp.initialConfigs, comp.scheme.intoShells, comp.scheme.decayShells, 
                                                         comp.scheme.NoCapturedElectrons)
     # Display and group all configuration together
-    wb = Cascade.groupDisplayConfigurationList(comp.nuclearModel.Z, wa, sa="hollow ion configurations ")
+    wb = Basics.displayConfigurations(comp.nuclearModel.Z, wa, sa="hollow ion configurations ")
     #
     # Determine first all configuration 'blocks' and from them the individual steps of the cascade
     wc = Cascade.generateBlocks(scheme, comp::Cascade.Computation, wb, printout=false)
@@ -336,7 +322,11 @@ function perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Boo
         results = Base.merge( results, Dict("cascade scheme"                        => comp.scheme) ) 
         results = Base.merge( results, Dict("initial multiplets:"                   => multiplets) )    
         results = Base.merge( results, Dict("generated multiplets:"                 => gMultiplets) )    
+        ## The simulations read their line data from "cascade data:" (Cascade.reviewData); storing it only under
+        ## "hollow-ion line data:" meant that NO Cascade.Simulation could consume a hollow-ion cascade at all.
+        ## Both keys are written: the descriptive one for direct access, the standard one for the simulations.
         results = Base.merge( results, Dict("hollow-ion line data:" => data) )
+        results = Base.merge( results, Dict("cascade data:"         => data) )
         #
         #  Write out the result to file to later continue with simulations on the cascade data
         filename = "zzz-cascade-hollow-ion-computations-" * string(Dates.now())[1:13] * ".jld"
@@ -344,8 +334,8 @@ function perform(scheme::HollowIonScheme, comp::Cascade.Computation; output::Boo
                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file.")
         if  printSummary   println(iostream, "\n* Write all results to disk; use:\n   JLD2.save(''$filename'', results) \n   using JLD2 " *
                                                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file." )      end      
-        JLD2.@save filename results
+        Cascade.writeDataFile(filename, results)
     end
-    ## return( results )
-    return( results )
+    ## return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end

@@ -8,10 +8,10 @@ module Cascade
 
 
 using Dates, JLD2, Printf, FastGaussQuadrature, Distributed, ProgressMeter,
-        ..AngularMomentum, ..AutoIonization, ..Basics, ..BsplinesN, ..Continuum, ..Defaults, 
-        ..DecayYield, ..DielectronicRecombination, ..ElectronCapture, ..Empirical, ..Hamiltonian, ..ImpactExcitation, ..Radial, ..ManyElectron, ..Nuclear, 
-        ..PeriodicTable, ..PhotoEmission, ..PhotoExcitation, ..PhotoIonization, ..PhotoRecombination, 
-        ..SelfConsistent, ..Semiempirical, ..TableStrings
+        ..AngularMomentum, ..AtomicState, ..AutoIonization, ..Basics, ..Bsplines, ..Continuum, ..Defaults,
+        ..DecayYield, ..DielectronicRecombination, ..Distribution, ..ElectronCapture, ..Empirical, ..Hamiltonian, ..ImpactExcitation, ..Radial, ..ManyElectron, ..Nuclear, 
+        ..PeriodicTable, ..PhotoEmission, ..PhotoExcitation, ..PhotoIonization, ..PhotoRecombination, ..ResonantImpactIonization,
+        ..ResultKeys, ..SelfConsistent, ..Semiempirical, ..TableStrings
 
 
 """
@@ -116,10 +116,10 @@ end
 
 
 """
-`Cascade.DielectronicCaptureScheme()`  ... constructor for an 'default' instance of a Cascade.DielectronicCaptureScheme.
+`Cascade.DielectronicCaptureScheme()`  ... constructor for a 'default' instance of a Cascade.DielectronicCaptureScheme.
 """
 function DielectronicCaptureScheme()
-    DielectronicCaptureScheme(1.0, 0., 1, Shell[], Shell[], Shell[], Shell[] )
+    DielectronicCaptureScheme(0., 0., 0, Shell[], Shell[], Shell[] )
 end
 
 
@@ -235,13 +235,41 @@ end
             EIE cross sections, effective collision strengths, EIE plasma rate coefficients, and others.
 
     + processes             ::Array{Basics.AbstractProcess,1} 
-        ... List of the atomic processes that are supported and should be included into the cascade.
+        ... List of the atomic processes that are supported and should be included into the cascade; Basics.ImpactExc()
+            selects the DIRECT channel and Basics.ImpactExcAuto() the RESONANT one.
+    + fromShells            ::Array{Shell,1}
+        ... List of shells from which the impact excitation proceeds.
+    + toShells              ::Array{Shell,1}
+        ... List of shells into which the impact excitation proceeds.
     + electronEnergies      ::Array{Float64,1}                
         ... List of electron energies for which this electron-impact excitation scheme is to be calculated.
+    + lValues               ::Array{Int64,1}
+        ... Orbital angular momenta of the incoming/outgoing free electron to be included.
+    + NoFreeElectronEnergies ::Int64
+        ... Number of free-electron energies of the internal (Gauss-Legendre) grid.
+    + maxFreeElectronEnergy ::Float64
+        ... Maximum free-electron energy [in a.u.] of that grid.
+    + electronEnergyShift   ::Float64
+        ... Energy shift of all electron energies, in the user-selected units.
+
+        These are the same configuration data that a Cascade.ImpactExcitationScheme carries, because the direct channel IS
+        an impact excitation and delegates to that scheme. Until 16-Aug-2026 this struct held only `processes` and
+        `electronEnergies`, which left the direct channel with no shells to excite between and therefore unusable.
 """
 struct   ElectronExcitationScheme  <:  Cascade.AbstractCascadeScheme
     processes               ::Array{Basics.AbstractProcess,1}
+    fromShells              ::Array{Shell,1}
+    toShells                ::Array{Shell,1}
     electronEnergies        ::Array{Float64,1}
+    lValues                 ::Array{Int64,1}
+    NoFreeElectronEnergies  ::Int64
+    maxFreeElectronEnergy   ::Float64
+    electronEnergyShift     ::Float64
+    maxExcitationEnergy     ::Float64
+    NoExcitations           ::Int64
+    excitationFromShells    ::Array{Shell,1}
+    excitationToShells      ::Array{Shell,1}
+    intoShells              ::Array{Shell,1}
 end
 
 
@@ -249,7 +277,7 @@ end
 `Cascade.ElectronExcitationScheme()`  ... constructor for an 'default' instance of a Cascade.ElectronExcitationScheme.
 """
 function ElectronExcitationScheme()
-    ElectronExcitationScheme([Eimex], Float64[] )
+    ElectronExcitationScheme([ImpactExc()], Shell[], Shell[], Float64[], Int64[], 0, 0., 0., 0., 0, Shell[], Shell[], Shell[] )
 end
 
 
@@ -264,25 +292,126 @@ end
 function Base.show(io::IO, scheme::ElectronExcitationScheme)
     sa = Base.string(scheme);                 print(io, sa, "\n")
     println(io, "processes:                   $(scheme.processes)  ")
+    println(io, "fromShells:                  $(scheme.fromShells)  ")
+    println(io, "toShells:                    $(scheme.toShells)  ")
     println(io, "electronEnergies:            $(scheme.electronEnergies)  ")
+    println(io, "lValues:                     $(scheme.lValues)  ")
+    println(io, "NoFreeElectronEnergies:      $(scheme.NoFreeElectronEnergies)  ")
+    println(io, "maxFreeElectronEnergy:       $(scheme.maxFreeElectronEnergy)  ")
+    println(io, "electronEnergyShift:         $(scheme.electronEnergyShift)  ")
 end
 
 
 """
 `struct  Cascade.ElectronIonizationScheme  <:  Cascade.AbstractCascadeScheme`  
-        ... to compute electron ionization spectra including the direct (EII) and resonant contributions, i.e. the dielectronic
-            capture with subsequent double-autoionization. For this double autoionization, a branching factor is estimated.
-            Typical electron-ionization properties are energy-dependent EII cross sections, effective collision strengths, 
-            EII plasma rate coefficients, and others (not yet).
+        ... to compute the INDIRECT contribution to electron-impact ionization, i.e. excitation-autoionization (EA):
+            a free electron excites an inner-shell electron into a level that lies above the ionization threshold of
+            the ion, and that level then autoionizes.  The net effect is ionization, and for many ions -- notably
+            along the Li-, Na- and Mg-like sequences -- EA rivals or exceeds the direct channel.
 
-    + processes             ::Array{Basics.AbstractProcess,1} 
-        ... List of the atomic processes that are supported and should be included into the cascade.
+            The scheme is built exactly like Cascade.DielectronicRecombinationScheme, with which it is the mirror
+            image: DR captures an electron and stabilizes radiatively, EA excites an electron and stabilizes by
+            emitting one.  Both therefore generate two kinds of Cascade.Step,
+
+                DR :  Auger (capture, by detailed balance)   +  Radiative (stabilization)
+                EA :  ImpactExc (excitation)                 +  Auger (autoionization)
+
+            A cascade computation returns the ImpactExcitation.Line's and AutoIonization.Line's; combining them
+            into an EA cross section or plasma rate coefficient is the task of a Cascade.Simulation.
+
+            NOT INCLUDED, and deliberately so:
+              + the DIRECT electron-impact ionization channel.  Cascade.ImpactIonizationScheme is reserved for it
+                and is not implemented; see the note there.
+              + the two RESONANT-ELECTRON-CAPTURE channels, in which the incident electron is CAPTURED into a
+                doubly-excited resonance which then sheds two electrons, either one after the other
+                (resonant-electron-capture-with-sequential-double-autoionization, the REDA of the older
+                literature) or both at once (...-with-simultaneous-double-autoionization, READI).  Together with
+                the impact-excitation channel above they make up the resonant part of the ionization; only the
+                impact-excitation one is available here.
+
+                THE OLD NOTE HERE SAID THESE "require the electron-capture scheme that is still outstanding".
+                That has not been true since 16-Aug-2026: Cascade.perform(::DielectronicCaptureScheme) exists and
+                runs, and Cascade.perform(::ElectronExcitationScheme) already delegates to it for its own resonant
+                channel.  What is still missing is the second Auger generation and the strengths, not the capture.
+
     + electronEnergies      ::Array{Float64,1}                
-        ... List of electron energies for which this electron-impact excitation scheme is to be calculated.
+        ... List of impact energies of the incoming electron, in the user-selected units.  The collision strengths
+            are computed AT these energies, so three or more well-spread values are needed if a rate coefficient
+            is to be formed from them afterwards.
+    + excitationFromShells  ::Array{Shell,1}
+        ... List of (inner) shells out of which the electron is excited.
+    + excitationToShells    ::Array{Shell,1}
+        ... List of shells into which it is excited.  Only those excited configurations are kept whose mean energy
+            lies ABOVE the ionization threshold of the ion, since only those can autoionize.
+    + lValues               ::Array{Int64,1}
+        ... Orbital angular momenta of the free electron, i.e. the partial waves summed over in the excitation.
+            maxKappa is taken as maximum(lValues)+1.  A truncated sum does not merely lower the cross section, it
+            can invert its energy dependence, and it does so silently; read the `convergence` column.
+    + NoExcitations         ::Int64
+        ... Number of displaced electrons for the generation of the excited configurations; 1 in nearly all cases.
+    + electronEnergyShift   ::Float64
+        ... Energy shift for all bound-state energies relative to the levels of the reference configuration, taken
+            in the user-defined units.
+    + processes             ::Array{Basics.AbstractProcess,1}
+        ... The channels to be computed, selected exactly as Cascade.ElectronExcitationScheme selects its own.  Any
+            combination may be given, and the cost of the selection varies by three orders of magnitude:
+
+              Basics.ImpactExcAuto()                            impact-excitation with subsequent autoionization
+                  ... the inner-shell excitation channel described above.  EXPENSIVE: it needs a partial-wave sum
+                      over the free electron at every impact energy; ~2800 s for the Li-like carbon of example-Fi.jl.
+              ResonantImpactIonization.SequentialAuger()        resonant-electron-capture-with-sequential-
+                                                                double-autoionization  (REDA in older literature)
+                  ... CHEAP, seconds rather than hours: a capture is the time reverse of an Auger and needs no
+                      partial-wave sum over impact energies at all.
+              ResonantImpactIonization.SimultaneousAuger()      resonant-electron-capture-with-simultaneous-
+                                                                double-autoionization  (READI)
+                  ... rides on the resonances of the sequential channel and adds almost nothing to the cost.
+
+    + intoShells            ::Array{Shell,1}
+        ... Shells into which the incident electron is CAPTURED, for the two resonant channels only; ignored by the
+            impact-excitation channel.  The doubly-excited resonances are built by capturing into these shells while
+            exciting from excitationFromShells into excitationToShells.
+    + dblAugerOverride      ::Float64
+        ... Optional replacement for the computed double-Auger probability of the simultaneous channel.  0. means
+            "not set", in which case the shake-off estimate of ResonantImpactIonization is used; a positive value
+            replaces it and is reported as having done so.
+
+    APPROXIMATIONS, so that it is clear what a computation of this scheme actually delivers:
+
+    + the DIRECT channel is absent
+        ... Cascade.ImpactIonizationScheme is reserved for it and is not implemented, so a total ionization cross
+            section CANNOT be obtained from this scheme alone.  What it gives is the indirect and resonant parts.
+    + single-CSF blocks, no configuration mixing
+        ... in Cascade.AverageSCA() every block is generated from single-CSF levels with orbitals from a
+            Dirac-Fock-Slater potential, computed independently per block.  Level energies are therefore of
+            cascade quality, not of spectroscopic quality.
+    + only the Coulomb interaction in the autoionization
+        ... the Breit interaction is not included in any Auger rate here.
+    + a partial-wave truncation that is silent
+        ... lValues fixes maxKappa for BOTH the impact excitation and the Auger rates.  Too small a value does not
+            merely lower a cross section, it can invert its energy dependence; example-Fi.jl branch b measures that
+            crossover explicitly.  The capture rates of the resonant channels inherit the same truncation.
+    + isolated resonances, for the resonant channels
+        ... resonance strengths are ADDED, with no interference between resonances and no overlap of their widths.
+            Sound while the resonances are narrow against their spacing; it degrades for high capture shells.
+    + branchings that sum to one BY CONSTRUCTION
+        ... every branching ratio is formed from the total rates of the decay steps the cascade actually generated.
+            A decay route left out of the configuration lists is absent from the denominator too, so the branchings
+            still sum to one.  That sum checks the arithmetic; it can never reveal a missing channel.
+    + the simultaneous channel is an ESTIMATE, not a computed rate
+        ... its double-Auger width comes from shake-off in the sudden approximation, whose error has BOTH SIGNS.
+            See ResonantImpactIonization.shakeProbability before quoting anything from it.
 """
 struct   ElectronIonizationScheme  <:  Cascade.AbstractCascadeScheme
-    processes               ::Array{Basics.AbstractProcess,1}
     electronEnergies        ::Array{Float64,1}
+    excitationFromShells    ::Array{Shell,1}
+    excitationToShells      ::Array{Shell,1}
+    lValues                 ::Array{Int64,1}
+    NoExcitations           ::Int64
+    electronEnergyShift     ::Float64
+    processes               ::Array{Basics.AbstractProcess,1}
+    intoShells              ::Array{Shell,1}
+    dblAugerOverride        ::Float64
 end
 
 
@@ -290,7 +419,24 @@ end
 `Cascade.ElectronIonizationScheme()`  ... constructor for an 'default' instance of a Cascade.ElectronIonizationScheme.
 """
 function ElectronIonizationScheme()
-    ElectronIonizationScheme([Eimex], Float64[] )
+    ElectronIonizationScheme(Float64[], Shell[], Shell[], Int64[], 1, 0., Basics.AbstractProcess[Basics.ImpactExcAuto()], Shell[], 0. )
+end
+
+
+"""
+`Cascade.ElectronIonizationScheme(electronEnergies::Array{Float64,1}, excitationFromShells::Array{Shell,1},`
+                                  `excitationToShells::Array{Shell,1}, lValues::Array{Int64,1}, NoExcitations::Int64,`
+                                  `electronEnergyShift::Float64)`
+    ... constructor for the impact-excitation channel alone, i.e. the six arguments this scheme had before the two
+        resonant channels were added; processes defaults to [Basics.ImpactExcAuto()], intoShells to empty and
+        dblAugerOverride to 0.  It exists so that computations written against the earlier six-field struct -- such
+        as the dated branches of example-Fi.jl -- keep running unchanged.
+"""
+function ElectronIonizationScheme(electronEnergies::Array{Float64,1}, excitationFromShells::Array{Shell,1},
+                                  excitationToShells::Array{Shell,1}, lValues::Array{Int64,1}, NoExcitations::Int64,
+                                  electronEnergyShift::Float64)
+    ElectronIonizationScheme(electronEnergies, excitationFromShells, excitationToShells, lValues, NoExcitations,
+                             electronEnergyShift, Basics.AbstractProcess[Basics.ImpactExcAuto()], Shell[], 0. )
 end
 
 
@@ -304,8 +450,15 @@ end
 # `Base.show(io::IO, scheme::ElectronIonizationScheme)`  ... prepares a proper printout of the scheme::ElectronIonizationScheme.
 function Base.show(io::IO, scheme::ElectronIonizationScheme)
     sa = Base.string(scheme);                 print(io, sa, "\n")
-    println(io, "processes:                   $(scheme.processes)  ")
     println(io, "electronEnergies:            $(scheme.electronEnergies)  ")
+    println(io, "excitationFromShells:        $(scheme.excitationFromShells)  ")
+    println(io, "excitationToShells:          $(scheme.excitationToShells)  ")
+    println(io, "lValues:                     $(scheme.lValues)  ")
+    println(io, "NoExcitations:               $(scheme.NoExcitations)  ")
+    println(io, "electronEnergyShift:         $(scheme.electronEnergyShift)  ")
+    println(io, "processes:                   $(scheme.processes)  ")
+    println(io, "intoShells:                  $(scheme.intoShells)  ")
+    println(io, "dblAugerOverride:            $(scheme.dblAugerOverride)  ")
 end
 
 
@@ -323,22 +476,25 @@ end
     + maxPhotonEnergy       ::Float64                 
         ... Maximum photon (transition) energy [in a.u.] that are taken into account for all absorption lines; 
             this transition energy refers to the shortest wavelength for which the opacity is needed.
-    + meanEnergyShift       ::Float64                 
-        ... Energy shift for all excited configurations [in a.u.]; this allows to correct for missing correlation 
-            contributions.
     + NoExcitations         ::Int64                 
         ... (Maximum) Number of electron replacements in the excited configuration with regard to the initial configurations/multiplets.
     + excitationFromShells  ::Array{Shell,1}    
         ... List of shells from which excitations are to be considered.
     + excitationToShells    ::Array{Shell,1}    
         ... List of shells to which excitations are to be considered.
-    + printTransitions      ::Bool      ... Print transition data for comparison, if true.
+    + printTransitions      ::Bool      
+        ... Print the bound-bound line list that the opacity is built from -- wavelength, oscillator strength in
+            both gauges and the lower-level energy -- so that one can see which lines dominate a given bin.
+
+        NB an energy shift is deliberately NOT a field of this scheme.  It adjusts how the computed lines are
+        INTERPRETED, not which lines are computed, and therefore belongs to the simulation side, where
+        Cascade.ExpansionOpacities.transitionEnergyShift provides it.  The former meanEnergyShift here was read
+        nowhere and merely duplicated that field, inviting the two to disagree.
 """
 struct   ExpansionOpacityScheme  <:  Cascade.AbstractCascadeScheme
     multipoles              ::Array{EmMultipole}  
     minPhotonEnergy         ::Float64 
     maxPhotonEnergy         ::Float64   
-    meanEnergyShift         ::Float64                 
     NoExcitations           ::Int64
     excitationFromShells    ::Array{Shell,1}
     excitationToShells      ::Array{Shell,1}
@@ -350,7 +506,7 @@ end
 `Cascade.ExpansionOpacityScheme()`  ... constructor for an 'default' instance of a Cascade.ExpansionOpacityScheme.
 """
 function ExpansionOpacityScheme()
-    ExpansionOpacityScheme([E1], 0., 1.0, 0., 1, Shell[], Shell[], false)
+    ExpansionOpacityScheme([E1], 0., 1.0, 1, Shell[], Shell[], false)
 end
 
 
@@ -367,7 +523,6 @@ function Base.show(io::IO, scheme::ExpansionOpacityScheme)
     println(io, "multipoles:                 $(scheme.multipoles)  ")
     println(io, "minPhotonEnergy:            $(scheme.minPhotonEnergy)  ")
     println(io, "maxPhotonEnergy:            $(scheme.maxPhotonEnergy)  ")
-    println(io, "meanEnergyShift:            $(scheme.meanEnergyShift)  ")
     println(io, "NoExcitations:              $(scheme.NoExcitations)  ")
     println(io, "excitationFromShells:       $(scheme.excitationFromShells)  ")
     println(io, "excitationToShells:         $(scheme.excitationToShells)  ")
@@ -432,16 +587,23 @@ end
 `struct  Cascade.ImpactExcitationScheme  <:  Cascade.AbstractCascadeScheme`  
         ... to compute the (direct) electron-impact excitation spectrum for a list of impact energies (not yet).
 
-    + processes              ::Array{Basics.AbstractProcess,1} 
-        ... List of the atomic processes that are supported and should be included into the cascade.
+        This scheme always computes the DIRECT electron-impact excitation ImpactExc() and carries no list of
+        processes: there is nothing to choose from.  The resonant channel -- capture into a doubly-excited state
+        with subsequent re-autoionization into an excited level of the same ion, which yields the same final
+        state -- belongs to Cascade.ElectronExcitationScheme.
+
     + fromShells             ::Array{Shell,1}    
         ... List of shells from which impact-excitations are to be considered.
     + toShells               ::Array{Shell,1}    
         ... List of shells into which impact-excitations are to be considered, including possibly already occupied shells.
     + electronEnergies       ::Array{Float64,1}                
-        ... List of electron energies for which this electron-impact excitation scheme is to be calculated.
+        ... List of electron energies for which this electron-impact excitation scheme is to be calculated.  The
+            collision strengths are computed AT these energies; a Cascade.EieRateCoefficients simulation later
+            interpolates over them, so three or more well-spread values are needed for any rate coefficient.
     + lValues                ::Array{Int64,1}
-        ... Orbital angular momentum values of the free-electrons, for which partial waves are considered for the RR.
+        ... Orbital angular momentum values of the free electron, i.e. the partial waves that are summed over.
+            maxKappa is taken as maximum(lValues)+1.  NOTE that a truncated sum does not merely lower the collision
+            strength, it can invert its energy dependence, and it does so silently; read the `convergence` column.
     + NoFreeElectronEnergies ::Int64             
         ... Number of free-electron energies that a chosen for a Gauss-Laguerre integration.
     + maxFreeElectronEnergy  ::Float64             
@@ -456,7 +618,6 @@ end
     entries appears for these two subfields.
 """
 struct   ImpactExcitationScheme  <:  Cascade.AbstractCascadeScheme
-    processes               ::Array{Basics.AbstractProcess,1}
     fromShells              ::Array{Shell,1}
     toShells                ::Array{Shell,1}
     electronEnergies        ::Array{Float64,1}
@@ -471,7 +632,7 @@ end
 `Cascade.ImpactExcitationScheme()`  ... constructor for an 'default' instance of a Cascade.ImpactExcitationScheme.
 """
 function ImpactExcitationScheme()
-    ImpactExcitationScheme([Eimex], Shell[], Shell[], Float64[], Int64[], 0, 0., 0. )
+    ImpactExcitationScheme(Shell[], Shell[], Float64[], Int64[], 0, 0., 0. )
 end
 
 
@@ -485,7 +646,6 @@ end
 # `Base.show(io::IO, scheme::ImpactExcitationScheme)`  ... prepares a proper printout of the scheme::ImpactExcitationScheme.
 function Base.show(io::IO, scheme::ImpactExcitationScheme)
     sa = Base.string(scheme);                 print(io, sa, "\n")
-    println(io, "processes:                   $(scheme.processes)  ")
     println(io, "fromShells:                  $(scheme.fromShells)  ")
     println(io, "toShells:                    $(scheme.toShells)  ")
     println(io, "electronEnergies:            $(scheme.electronEnergies)  ")
@@ -501,13 +661,26 @@ end
 
 
 """
-`struct  Cascade.ImpactIonizationScheme  <:  Cascade.AbstractCascadeScheme`  
-        ... to compute the (direct) electron-impact excitation spectrum for a list of impact energies (not yet).
+`struct  Cascade.ImpactIonizationScheme  <:  Cascade.AbstractCascadeScheme`    
+        ... RESERVED FOR THE DIRECT electron-impact ionization channel; NOT IMPLEMENTED, and there is no
+            Cascade.perform for it.  Recorded here so that the gap is visible rather than surprising.
+
+            The obstacle is not effort but shape.  JAC's ImpactIonization module is semi-empirical, not
+            amplitude-based: its Settings are an AbstractEmpiricalSettings, it is driven from an
+            Empirical.Computation rather than an Atomic.Computation, it takes a Basis rather than two multiplets,
+            and it has no Line type at all.  Its elementary datum is an ImpactIonization.CrossSection per
+            (subshell, impact energy), obtained from a BEB, BED or relativistic model.  A cascade built on it
+            would therefore store cross sections rather than lines, and the cascade approaches (AverageSCA, SCA)
+            would influence only the SCF basis behind the binding energies -- not what they mean elsewhere.
+
+            That is a workable design, but it is a different one, and it should be settled deliberately rather
+            than by analogy.  The INDIRECT channel, excitation-autoionization, is implemented and lives in
+            Cascade.ElectronIonizationScheme.
 
     + processes             ::Array{Basics.AbstractProcess,1} 
         ... List of the atomic processes that are supported and should be included into the cascade.
     + electronEnergies      ::Array{Float64,1}                
-        ... List of electron energies for which this electron-impact excitation scheme is to be calculated.
+        ... List of electron energies for which this scheme is to be calculated.
 """
 struct   ImpactIonizationScheme  <:  Cascade.AbstractCascadeScheme
     processes               ::Array{Basics.AbstractProcess,1}
@@ -519,7 +692,11 @@ end
 `Cascade.ImpactIonizationScheme()`  ... constructor for an 'default' instance of a Cascade.ImpactIonizationScheme.
 """
 function ImpactIonizationScheme()
-    ImpactIonizationScheme([Eimex], Float64[] )
+    ## ImpactExc is what this constructor has always named; only the missing () is repaired here, which is what
+    ## made it raise.  Whether an IONIZATION scheme should default to the impact-EXCITATION process is a
+    ## separate question: Basics has no impact-ionization tag at all (the nearest is Coulion, i.e. Coulomb
+    ## ionization by ion impact), so choosing one is a decision for the maintainer and not a repair.
+    ImpactIonizationScheme([ImpactExc()], Float64[] )
 end
 
 
@@ -534,7 +711,13 @@ end
 function Base.show(io::IO, scheme::ImpactIonizationScheme)
     sa = Base.string(scheme);                 print(io, sa, "\n")
     println(io, "processes:                   $(scheme.processes)  ")
+    println(io, "fromShells:                  $(scheme.fromShells)  ")
+    println(io, "toShells:                    $(scheme.toShells)  ")
     println(io, "electronEnergies:            $(scheme.electronEnergies)  ")
+    println(io, "lValues:                     $(scheme.lValues)  ")
+    println(io, "NoFreeElectronEnergies:      $(scheme.NoFreeElectronEnergies)  ")
+    println(io, "maxFreeElectronEnergy:       $(scheme.maxFreeElectronEnergy)  ")
+    println(io, "electronEnergyShift:         $(scheme.electronEnergyShift)  ")
 end
 
 
@@ -767,55 +950,16 @@ function Base.show(io::IO, scheme::PhotoIonizationScheme)
     println(io, "electronEnergyShift:        $(scheme.electronEnergyShift)  ")
     println(io, "minCrossSection:            $(scheme.minCrossSection)  ")
     #
-    if  length(photonEnergies) > 0  &&  length(electronEnergies) > 0    
+    ## These two tests referred to bare `photonEnergies` / `electronEnergies` instead of the fields of the
+    ## given scheme, so that ANY printout of a PhotoIonizationScheme -- and hence of any Cascade.Computation
+    ## carrying one -- raised an UndefVarError.  Every example does println(wa), so the scheme could not be
+    ## used in the documented way at all.
+    if  length(scheme.photonEnergies) > 0  &&  length(scheme.electronEnergies) > 0
         error("Only photon or electron energies can be specified.")
     end
 end
 
 
-#==
-"""
-`struct  Cascade.PhotoIonizationScheme  <:  Cascade.AbstractCascadeScheme`  
-    ... a struct to represent (and generate) a mean-field orbital basis.
-
-    + processes             ::Array{Basics.AbstractProcess,1} 
-        ... List of the atomic processes that are supported and should be included into the cascade.
-    + maxPhotoElectrons     ::Int64                 
-        ... (Maximum) Number of photo-electrons in which the initial-and (photo-ionized) final-state configurations can differ 
-            from each other; this affects the number of ionized multiplets in the cascade.
-    + photonEnergies        ::Array{Float64,1}      
-        ... List of photon energies for which this photo-ionization scheme is to be calculated.
-"""
-struct   PhotoIonizationScheme  <:  Cascade.AbstractCascadeScheme
-    processes               ::Array{Basics.AbstractProcess,1}
-    maxPhotoElectrons       ::Int64
-    photonEnergies          ::Array{Float64,1}
-end
-
-
-"""
-`Cascade.PhotoIonizationScheme()`  ... constructor for an 'default' instance of a Cascade.PhotoIonizationScheme.
-"""
-function PhotoIonizationScheme()
-    PhotoIonizationScheme([PhotoIonization], 0, Float64[] )
-end
-
-
-# `Base.string(scheme::PhotoIonizationScheme)`  ... provides a String notation for the variable scheme::PhotoIonizationScheme.
-function Base.string(scheme::PhotoIonizationScheme)
-    sa = "Photo-ionization (scheme) as prior part of an atomic cascade:"
-    return( sa )
-end
-
-
-# `Base.show(io::IO, scheme::PhotoIonizationScheme)`  ... prepares a proper printout of the scheme::PhotoIonizationScheme.
-function Base.show(io::IO, scheme::PhotoIonizationScheme)
-    sa = Base.string(scheme);                print(io, sa, "\n")
-    println(io, "processes:                  $(scheme.processes)  ")
-    println(io, "maxPhotoElectrons:          $(scheme.maxPhotoElectrons)  ")
-    println(io, "photonEnergies:             $(scheme.photonEnergies)  ")
-end
-==#
 
 
 """
@@ -944,25 +1088,13 @@ end
 #######################################################################################################################################
 
 
-"""
-`abstract type Cascade.AbstractCascadeApproach` 
-    ... defines an abstract and a number of singleton types for the computational approach/model that is applied in order to 
-        generate and evaluate all many-electron amplitudes of a given cascade.
+# Cascade.AbstractCascadeApproach, Cascade.AverageSCA, Cascade.SCA, Cascade.UserMCA moved to
+# Basics.AbstractCascadeApproach / Basics.AverageSCA / Basics.SCA / Basics.UserMCA (module-Basics-inc-abstract.jl),
+# to break a circular dependency with DecayYield.Settings; re-exported here via `using ..Basics` (already imported
+# above) so both bare (AverageSCA()) and self-qualified (Cascade.AverageSCA()) usage throughout this module's
+# included files keep working unchanged.
 
-    + struct AverageSCA         
-    ... all levels in the cascade are described in single-configuration and single-CSF approximation; this (rather crude) approach 
-        neglects all configuration-interactions and also applies just a single set of one-electron orbitals (from the least-ionized charge
-        state) for all considered charge states.
-        
-    + struct SCA                
-    ... all levels in the cascade are described in single-configuration approximation but with 'mixtures' within the configuration;
-        an individual mean-field is generated for each charge state and all continuum orbitals are generated for the correct transition
-        energy in the field of the remaining ion. Moreover, all the fine-structure transitions are calculated individually.
-"""
-abstract type  AbstractCascadeApproach                   end
-struct         AverageSCA  <:  AbstractCascadeApproach   end
-struct         SCA         <:  AbstractCascadeApproach   end
-struct         UserMCA     <:  AbstractCascadeApproach   end
+
 
 
 
@@ -1025,8 +1157,10 @@ end
 """
 struct  Step
     process            ::Basics.AbstractProcess
-    settings           ::Union{PhotoEmission.Settings, AutoIonization.Settings, PhotoIonization.Settings, PhotoExcitation.Settings, 
-                                PhotoRecombination.Settings}
+    ## ImpactExcitation.Settings was missing from this Union, so a Cascade.Step could not even be constructed
+    ## for an electron-impact excitation cascade -- the scheme was unreachable however its steps were built.
+    settings           ::Union{PhotoEmission.Settings, AutoIonization.Settings, PhotoIonization.Settings, PhotoExcitation.Settings,
+                                PhotoRecombination.Settings, ImpactExcitation.Settings}
     initialConfigs     ::Array{Configuration,1}
     finalConfigs       ::Array{Configuration,1}
     initialMultiplet   ::Multiplet
@@ -1110,18 +1244,18 @@ function Computation(comp::Cascade.Computation;
     scheme::Union{Nothing,Cascade.AbstractCascadeScheme}=nothing,         approach::Union{Nothing,Cascade.AbstractCascadeApproach}=nothing, 
     initialConfigs::Union{Nothing,Array{Configuration,1}}=nothing,        initialMultiplets::Union{Nothing,Array{Multiplet,1}}=nothing)
     
-    if  initialConfigs != nothing   &&   initialMultiplets != nothing   
+    if  !isnothing(initialConfigs)   &&   !isnothing(initialMultiplets)   
         error("Only initialConfigs=..  'xor'  initialMultiplets=..  can be specified for a Cascade.Computation().")
     end
 
-    if  name                 == nothing   namex                 = comp.name                    else  namex = name                              end 
-    if  nuclearModel         == nothing   nuclearModelx         = comp.nuclearModel            else  nuclearModelx = nuclearModel              end 
-    if  grid                 == nothing   gridx                 = comp.grid                    else  gridx = grid                              end 
-    if  asfSettings          == nothing   asfSettingsx          = comp.asfSettings             else  asfSettingsx = asfSettings                end 
-    if  scheme               == nothing   schemex               = comp.scheme                  else  schemex = scheme                          end 
-    if  approach             == nothing   approachx             = comp.approach                else  approachx = approach                      end 
-    if  initialConfigs       == nothing   initialConfigsx       = comp.initialConfigs          else  initialConfigsx = initialConfigs          end 
-    if  initialMultiplets    == nothing   initialMultipletsx    = comp.initialMultiplets       else  initialMultipletsx = initialMultiplets    end
+    if  isnothing(name)                   namex                 = comp.name                    else  namex = name                              end 
+    if  isnothing(nuclearModel)           nuclearModelx         = comp.nuclearModel            else  nuclearModelx = nuclearModel              end 
+    if  isnothing(grid)                   gridx                 = comp.grid                    else  gridx = grid                              end 
+    if  isnothing(asfSettings)            asfSettingsx          = comp.asfSettings             else  asfSettingsx = asfSettings                end 
+    if  isnothing(scheme)                 schemex               = comp.scheme                  else  schemex = scheme                          end 
+    if  isnothing(approach)               approachx             = comp.approach                else  approachx = approach                      end 
+    if  isnothing(initialConfigs)         initialConfigsx       = comp.initialConfigs          else  initialConfigsx = initialConfigs          end 
+    if  isnothing(initialMultiplets)      initialMultipletsx    = comp.initialMultiplets       else  initialMultipletsx = initialMultiplets    end
     
     Computation(namex, nuclearModelx, gridx, asfSettingsx, schemex, approachx, initialConfigsx, initialMultipletsx)
 end
@@ -1165,9 +1299,143 @@ function Base.show(io::IO, comp::Cascade.Computation)
 end
 
 #######################################################################################################################################
+## STORED CASCADE DATA (.jld):  a format stamp, and a reader that fails with an explanation.
+##
+## WHAT THESE FILES ARE, stated plainly because it is easy to assume otherwise.  A cascade `.jld` is written by
+## JLD2 from the `results` dictionary, which holds the WHOLE OBJECT GRAPH -- Multiplet -> Level -> Basis -> CsfR
+## -> Orbital -> Radial.Grid, plus the process Lines.  JAC itself never reads one back: every "JLD2.load(...)"
+## in this module is help text printed for the user, who loads the file in their own session.
+##
+## THE CONSEQUENCE, measured on 14-Aug-2026 rather than assumed: a file written on 5-Aug-2026 CANNOT be loaded
+## by today's JAC.  Not because of anything in the cascade, but because Radial.Grid lost a field and
+## Radial.MeshNone ceased to exist in the Radial rework (cfc1848, d2722fe, 968d269).  JLD2 reconstructs what it
+## can and then dies with a MethodError about a ReconstructedMutable, six frames deep, saying nothing about the
+## cause.  ANY struct change anywhere in that graph does this, and there have already been several.
+##
+## So a stored cascade is tied to the JAC that wrote it.  The stamp below does not change that -- serialising an
+## object graph and then changing the objects cannot be made safe by a version number.  What it does is make the
+## failure legible: Cascade.checkDataFile says which JAC wrote the file and what is missing, instead of leaving
+## the user with a JLD2 internal error.  The durable fix would be to store DATA (indices, energies, rates)
+## rather than objects; that is a design decision about what these files are for, recorded and not taken here.
+#######################################################################################################################################
+
+
+"""
+`Cascade.GBL_CASCADE_DATA_FORMAT`
+    ... version of the layout of the `results` dictionary that Cascade writes to a .jld file. Increase it
+        whenever a KEY of that dictionary is added, removed or renamed. It says nothing about the structs
+        stored underneath, which are the part that actually breaks; see the note above.
+"""
+const GBL_CASCADE_DATA_FORMAT = 1
+
+
+"""
+`Cascade.dataFormatStamp()`
+    ... returns a Dict{String,Any} identifying the writer of a cascade .jld file; it is merged into `results`
+        by Cascade.writeDataFile below, under the key "data format:".
+"""
+function dataFormatStamp()
+    return( Dict{String,Any}("format version" => Cascade.GBL_CASCADE_DATA_FORMAT,
+                             "JAC version"    => Cascade.jacVersion(),
+                             "written"        => string(Dates.now())) )
+end
+
+
+"""
+`Cascade.jacVersion()`
+    ... returns the version of the JenaAtomicCalculator package as a String, or "unknown" if it cannot be
+        determined; used only to stamp stored cascade data.
+"""
+function jacVersion()
+    try
+        wa = pkgversion(@__MODULE__)
+        return( isnothing(wa) ? "unknown" : string(wa) )
+    catch
+        return( "unknown" )
+    end
+end
+
+
+"""
+`Cascade.writeDataFile(filename::String, results::Dict{String,Any})`
+    ... stamps `results` with Cascade.dataFormatStamp() and writes it to `filename` with JLD2; nothing is
+        returned. Every cascade that stores its results goes through here, so that the stamp cannot be
+        forgotten at one of the fourteen call sites.
+"""
+function writeDataFile(filename::String, results::Dict{String,Any})
+    results = Base.merge( results, Dict("data format:" => Cascade.dataFormatStamp()) )
+    ## jldopen rather than JLD2.save, which routes through FileIO and rejects the .jld extension; this is what
+    ## the JLD2.@save macro these call sites used before expands to, so the file layout is unchanged -- one
+    ## entry named "results".
+    JLD2.jldopen(filename, "w") do f
+        f["results"] = results
+    end
+    return( nothing )
+end
+
+
+"""
+`Cascade.checkDataFile(filename::String; stream::IO=stdout)`
+    ... reports what a stored cascade .jld file contains and whether THIS JAC can read it; true is returned if
+        the file loaded, false otherwise. Nothing is thrown: a file that cannot be read is the normal case this
+        function exists for, and it prints which JAC wrote it and which type failed, instead of leaving a JLD2
+        internal error.
+
+        NO CALLER IN `src/`, AND THAT IS CORRECT: it is a REPL tool for a user holding a stored cascade `.jld` file of
+        uncertain provenance, who wants to know what is in it and whether this JAC can read it BEFORE loading it into a
+        computation. Nothing in a run should call it, because a run already knows what it wrote.
+"""
+function checkDataFile(filename::String; stream::IO=stdout)
+    println(stream, "\n  Stored cascade data:  $filename")
+    if  !isfile(filename)   println(stream, "  >>> no such file.");    return( false )    end
+    println(stream, "  size: " * string(round(filesize(filename)/1024/1024, digits=2)) * " MB")
+    local results
+    try
+        ## jldopen rather than JLD2.load: the latter goes through FileIO, which prints its own "Fatal error"
+        ## banner to stdout BEFORE throwing -- which is exactly the noise this function exists to replace.
+        JLD2.jldopen(filename, "r") do f
+            results = haskey(f, "results") ? f["results"] : Dict{String,Any}(k => f[k] for k in keys(f))
+        end
+    catch  e
+        println(stream, "  >>> THIS FILE CANNOT BE READ BY THIS VERSION OF JAC.")
+        println(stream, "  >>> " * first(sprint(showerror, e), 400))
+        println(stream, "  >>> A cascade .jld stores whole objects (Multiplet, Level, Basis, Orbital, " *
+                        "Radial.Grid, ...), so it can only be\n" *
+                        "  >>> opened by a JAC whose struct definitions still match the ones that wrote it. " *
+                        "Re-run the cascade,\n  >>> or check out the JAC version named in the file's stamp " *
+                        "(if it has one; files written before 14-Aug-2026 do not).")
+        return( false )
+    end
+    wa = results
+    if  wa isa Dict
+        if  haskey(wa, "data format:")
+            st = wa["data format:"]
+            println(stream, "  written by JAC " * string(get(st, "JAC version", "?")) *
+                            " on " * string(get(st, "written", "?")) *
+                            ",  data format " * string(get(st, "format version", "?")))
+            if  get(st, "format version", 0) != Cascade.GBL_CASCADE_DATA_FORMAT
+                println(stream, "  >>> this JAC writes data format $(Cascade.GBL_CASCADE_DATA_FORMAT); the keys may differ.")
+            end
+        else
+            println(stream, "  >>> no format stamp: written before 14-Aug-2026.")
+        end
+        println(stream, "  keys:")
+        for  k in sort(collect(keys(wa)))
+            v = wa[k];   sa = v isa AbstractArray ? "$(typeof(v)), $(length(v)) entries" : string(typeof(v))
+            println(stream, "     " * rpad(k, 30) * sa)
+        end
+    else
+        println(stream, "  contents: $(typeof(wa))")
+    end
+    println(stream, "  >>> loaded successfully.")
+    return( true )
+end
+
+#######################################################################################################################################
 #######################################################################################################################################
 #######################################################################################################################################
 
+include("module-Cascade-inc-approaches.jl")
 include("module-Cascade-inc-simulations-structs.jl")
 include("module-Cascade-inc-computations.jl")
 include("module-Cascade-inc-dielectronic-recombination.jl")
@@ -1180,7 +1448,8 @@ include("module-Cascade-inc-impact-ionization.jl")
 include("module-Cascade-inc-photoabsorption.jl")
 include("module-Cascade-inc-photoexcitation.jl")
 include("module-Cascade-inc-photoionization.jl")
-include("module-Cascade-inc-radiative-recombination.jl")
+include("module-Cascade-inc-photorecombination.jl")
+include("module-Cascade-inc-resonant-ionization.jl")
 include("module-Cascade-inc-stepwise-decay.jl")
 include("module-Cascade-inc-simulations.jl")
 

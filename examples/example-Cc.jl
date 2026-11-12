@@ -1,0 +1,346 @@
+
+println("Cc) Apply & test the IsotopeShift module with ASF from an internally generated multiplet.")
+println("    Branches follow Naze et al., CPC 184 (2013) 2187 (RIS3) and Ekman et al., CPC 235 (2019) 433 (RIS4)")
+println("    (examples/papers/2013.cpc-naze-gaigalas-RIS3.pdf, 2019.cpc-eckman-risc4.pdf);")
+println("    see project memory project_isotope_shift_ris3ris4.md.")
+
+using Printf
+
+setDefaults("print summary: open", "zzz-IsotopeShift.sum")
+
+if  false
+    # Last successful:  26-Jul-2026
+    # Branch a: H(1s), bare single-electron test of the normal-mass-shift (NMS) parameter K_nms.
+    #   Proton: I=1/2, mu=2.7928 nmu, Q=0, rms radius=0.8797 fm. "uniform" nuclear model, not "Fermi":
+    #   for Z=1, JAC's 2-parameter Fermi model cannot represent an rms radius this small and now raises
+    #   an explicit error (module-Nuclear.jl, fixed 25-Jul-2026 -- an earlier version silently substituted
+    #   a hardcoded, wrong 1.89 fm nucleus instead; see memory).
+    #   Two real bugs were found and fixed in the NMS machinery while setting this up (25-Jul-2026):
+    #   (1) InteractionStrength.hamiltonian_nms divided by 2 on top of RadialIntegrals.isotope_nms's own
+    #   internal /2 (a double division, silently halving every NMS value); (2) isotope_nms used
+    #   (jb2-1)*jb2 for the Dirac small-component centrifugal coefficient l~(l~+1), which depends only on
+    #   |kappa| and so cannot distinguish e.g. s_1/2 from p_1/2 (same j, different l~); the correct closed
+    #   form, verified by hand against 8 different subshells, is kappa*(kappa-1).
+    #   Verified against the virial theorem for a point-Coulomb potential (K_nms = <p^2>/2 = |E_1s| exactly,
+    #   nonrelativistically): with a near-point rms radius (0.001 fm) the code gives K_nms = 0.500031 a.u.
+    #   vs the exact 0.5 -- 0.006% agreement. With hydrogen's REAL rms radius (0.8797 fm, this branch),
+    #   K_nms = 0.518773 a.u. -- about 3.75% above the point-nucleus value, which is a genuine (if larger
+    #   than naively expected) finite-nuclear-size sensitivity of this derivative-heavy operator (NMS
+    #   involves radial derivatives P', Q' that are locally far more sensitive near r->0 than the energy
+    #   itself is), not a further bug.
+    wa = Atomic.Computation(Atomic.Computation(), name="Cc-a-H1s", grid=Radial.Grid(true),
+                            nuclearModel=Nuclear.Model(1., UniformNucleus(), 1., 0.8797, AngularJ64(1//2), 0.0, 0.0, 0.0),
+                            configs=[Configuration("1s")],
+                            asfSettings=ManyElectron.AsfSettings(ManyElectron.AsfSettings(); scField=Basics.NuclearField()),
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, printBefore=true) ] )
+
+    wb = perform(wa)
+    #
+elseif  false
+    # Last successful:  30-Jul-2026
+    # Branch b: Li-like Nd (Z=60), 1s^2 2s ^2S_1/2 / 1s^2 2p ^2P_1/2,3/2 -- the RIS3/RIS4 papers' own worked
+    #   example. 74Nd-142 Fermi nucleus (rms 4.9123 fm), single configuration (no correlation).
+    #   UPDATE (30-Jul-2026): the ~14% K_nms gap documented below (this session, previously) was NOT a
+    #   correlation/AL-SCF limitation as originally concluded -- it was a genuine B-spline boundary-condition
+    #   defect in the underlying SCF machinery (kappa-sign leading/trailing spline truncation, root-caused
+    #   and fixed this session in module-Bsplines.jl; see project_zeeman_hfs_bugs.md). With that fix in
+    #   place, K_nms(2s) = 3970.46 a.u. vs the papers' 3976.60 a.u. -- only -0.15% off, essentially full
+    #   agreement for this single-CSF (no-correlation) test. K_sms(2s) is still exactly 0.0 -- confirmed
+    #   CORRECT, not a bug: the SMS operator's angular reduced matrix element (a rank-1 C^(1) tensor)
+    #   vanishes by parity selection rule whenever every orbital in the system has the same l, which is the
+    #   case for this all-s-orbital (1s,1s,2s) reference configuration; the papers' own small nonzero
+    #   K_sms(2s)=7.74 a.u. is itself a pure CI/correlation effect, unrelated to this fix.
+    #   HISTORICAL NOTE (pre-fix, kept for context): with only the branch-a NMS fixes applied, K_nms(2s) was
+    #   4519.94 a.u. (13.7% too high). Hand-picked correlation configs were tried to close that gap and did
+    #   NOT succeed -- correctly so, in hindsight, since the gap's real cause was the boundary-condition
+    #   defect in every SCF orbital, not a missing correlation channel:
+    #     - Adding "2s 2p^2" made both the level energy and K_nms worse (an AL-SCF orbital-optimization
+    #       artifact from promoting both deeply-bound 1s core electrons, not a CI/diagonalization problem).
+    #     - Adding "1s^2 3s" barely moved K_nms (0.01% shift) -- not the dominant channel either.
+    #   These attempts were sound diagnostics; they simply couldn't fix a defect that lived in the orbitals
+    #   themselves, common to every configuration tried.
+    wa = Atomic.Computation(Atomic.Computation(), name="Cc-b-NdLiLike", grid=Radial.Grid(true),
+                            nuclearModel=Nuclear.Model(60., FermiNucleus(), 142., 4.9123, AngularJ64(0//1), 0.0, 0.0, 0.0),
+                            configs=[Configuration("1s^2 2s"), Configuration("1s^2 2p")],
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                printBefore=true) ] )
+
+    wb = perform(wa)
+    #
+elseif  false
+    # Last successful:  26-Jul-2026
+    # Branch c: Li-like Nd (Z=60) field-shift electronic factor, same single-configuration 1s^2 2s ^2S_1/2
+    #   system as branch b. calcF computes the field-shift electronic factor F two independent ways: F [ME]
+    #   (direct matrix element of the nuclear-potential difference between two isotope masses, divided by
+    #   the difference of their mean-square radii) and F [dens] (via the electron radial density at the
+    #   origin) -- these agree with EACH OTHER to ~5-6 significant figures (1.18196e8 vs 1.18195e8 MHz/fm^2),
+    #   a strong internal-consistency check between two independently-coded methods for the same quantity.
+    #   Compared against the RIS4 paper's own n=3-CAS per-level electronic factor F0(2s) = 1.231688629e5
+    #   GHz/fm^2 = 1.231688629e8 MHz/fm^2 (their Fig. 6): JAC's single-CSF result is about 4% low -- much
+    #   closer agreement than K_nms's ~14% gap in branch b, consistent with the field shift (dominated by
+    #   the electron density very close to the nucleus, set mostly by the deeply-bound 1s/2s orbital shapes)
+    #   being markedly less sensitive to valence correlation than K_nms is.
+    #   NOTE: IsotopeShift.computeAmplitudesProperties builds its internal comparison nucleus via the bare
+    #   Nuclear.Model(Z, mass+1.0) constructor, which always defaults to "Fermi" regardless of what model
+    #   type the primary nuclearModel argument uses -- for Z=60 this is harmless (auto rms ~4.95 fm, well
+    #   above the ~1.86 fm Fermi floor), but this same code path would hit the Z=1 Fermi-model error fixed
+    #   in module-Nuclear.jl (branch a) if ever used for hydrogen's field shift; not exercised here.
+    nm = Nuclear.Model(60., FermiNucleus(), 142., 4.9123, AngularJ64(0//1), 0.0, 0.0, 0.0)
+    wa = Atomic.Computation(Atomic.Computation(), name="Cc-c-NdFieldShift", grid=Radial.Grid(true),
+                            nuclearModel=nm,
+                            configs=[Configuration("1s^2 2s")],
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=false, calcSMS=false,
+                                                calcF=true, printBefore=true) ] )
+
+    wb = perform(wa)
+    #
+elseif  false
+    # Last successful:  29-Jul-2026
+    # Branch d (AL-Field / Breit revisit): reuses branch c's single-configuration Li-like Nd 1s^2 2s system,
+    #   now that AL-Field (Basics.ALField()) has been root-cause-fixed and promoted to the standard
+    #   implementation (see project_df_al_kink_bug.md). Four settings combinations: DFS+Coulomb (reproduces
+    #   branch c's baseline exactly -- F[ME]=1.18196e8, F[dens]=1.18195e8 MHz/fm^2, bit-identical), AL+
+    #   Coulomb, DFS+Breit, AL+Breit.
+    #   RESULT (2), Breit: K_nms, K_sms and F are EXACTLY bit-identical between the Coulomb-only and
+    #   Breit-added runs (both for DFS and for AL) -- precisely confirming the same structural prediction
+    #   as example-Cb.jl Branch c (single-CSF system, mixing coefficient trivially 1.0, and
+    #   module-IsotopeShift.jl never references Breit/eeInteraction at all). Only the total level energy
+    #   shifts (by ~90 eV here), exactly as expected, not a surprise.
+    #   RESULT (1), AL-Field: K_nms shifts DFS->AL by only +0.12% (1.63070e7 -> 1.63264e7) and F[ME] by only
+    #   +0.17% (1.18196e8 -> 1.18394e8) -- A STRIKING CONTRAST to example-Cb.jl's Na HFS result, where the
+    #   SAME DFS->AL switch changed A(3s) by a full 26%. This makes good physical sense: Nd 1s/2s are
+    #   deeply-bound orbitals of a highly-charged (Z=60) few-electron ion, dominated by direct nuclear
+    #   attraction -- exchange-treatment differences (DFS local vs AL non-local) matter far less there than
+    #   for Na's single shallow valence 3s electron outside a neutral, lower-Z core. For the field shift
+    #   specifically, AL moves F[ME] slightly CLOSER to the RIS4 target (1.231688629e8 MHz/fm^2): DFS is
+    #   4.05% low, AL is 3.89% low -- a small, genuine improvement (unlike HFS, where AL made things worse).
+    #   No comparably direct literature K_nms target exists for this single-CSF system (branch b's ~14% gap
+    #   figure was for a DIFFERENT, 2-configuration reference), so no accuracy verdict is drawn for K_nms
+    #   here -- only the AL-vs-DFS relative shift, which is small either way.
+    nm = Nuclear.Model(60., FermiNucleus(), 142., 4.9123, AngularJ64(0//1), 0.0, 0.0, 0.0)
+
+    wa1 = Atomic.Computation(Atomic.Computation(), name="Cc-d-Nd2s-DFS-Coulomb", grid=Radial.Grid(true),
+                            nuclearModel=nm, configs=[Configuration("1s^2 2s")],
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                calcF=true, printBefore=true) ] )
+    perform(wa1)
+
+    wa2 = Atomic.Computation(Atomic.Computation(), name="Cc-d-Nd2s-AL-Coulomb", grid=Radial.Grid(true),
+                            nuclearModel=nm, configs=[Configuration("1s^2 2s")],
+                            asfSettings=ManyElectron.AsfSettings(ManyElectron.AsfSettings(); scField=Basics.ALField()),
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                calcF=true, printBefore=true) ] )
+    perform(wa2)
+
+    wa3 = Atomic.Computation(Atomic.Computation(), name="Cc-d-Nd2s-DFS-Breit", grid=Radial.Grid(true),
+                            nuclearModel=nm, configs=[Configuration("1s^2 2s")],
+                            asfSettings=ManyElectron.AsfSettings(ManyElectron.AsfSettings(); eeInteractionCI=Basics.CoulombBreit(0.)),
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                calcF=true, printBefore=true) ] )
+    perform(wa3)
+
+    wa4 = Atomic.Computation(Atomic.Computation(), name="Cc-d-Nd2s-AL-Breit", grid=Radial.Grid(true),
+                            nuclearModel=nm, configs=[Configuration("1s^2 2s")],
+                            asfSettings=ManyElectron.AsfSettings(ManyElectron.AsfSettings(); scField=Basics.ALField(),
+                                                                  eeInteractionCI=Basics.CoulombBreit(0.)),
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                calcF=true, printBefore=true) ] )
+    perform(wa4)
+    #
+elseif  false
+    # Last visit:  12-Aug-2026
+    # Last successful:  unknown ... the decomposition OVERSHOOTS the measured shifts; see the verdict below.
+    #
+    # Branch e: NUCLEAR DEFORMATION AND THE MEAN-SQUARE RADIUS -- the nuclear side of the field shift.
+    #
+    # JAC's field shift is organised as F = dE/d<r^2> (module-IsotopeShift.jl), so the whole isotope
+    # dependence enters through <r^2>.  Today the comparison isotope takes its radius from the smooth fit
+    # Nuclear.rrmsRadius(A) = 0.836 A^(1/3) + 0.57, which knows nothing about nuclear shape.  A deformed
+    # nucleus has a LARGER <r^2> at the same volume, and along an isotope chain a change of deformation
+    # therefore shows up directly in the isotope shift.  This branch computes that contribution from
+    # Nuclear.DeformedFermiNucleus instead of assuming the textbook law.
+    #
+    # THE CLASSIC CASE is the samarium chain at N = 88 -> 90, where the ground state changes from nearly
+    # spherical to well deformed between 150Sm and 152Sm and the measured d<r^2> shows a pronounced kink:
+    # 0.423(22) fm^2 for 150->152 (laser spectroscopy) against roughly 0.10-0.15 fm^2 for the neighbouring
+    # pairs.
+    println("\n  Deformation and <r^2>:  what an axially deformed nucleus does to the mean-square radius\n")
+    aSkin = Nuclear.fermiA
+    println("   beta2   axis ratio    <r^2>/<r^2>_sph   sharp-sphere 1+(5/4pi)b^2   ratio diffuse/sharp")
+    c6 = 6.0;   r0 = Nuclear.deformedFermiRrms(c6, aSkin, DeformedFermiNucleus(0.0))
+    for b in [0.05, 0.1, 0.2, 0.3, -0.2, -0.3]
+        rb = Nuclear.deformedFermiRrms(c6, aSkin, DeformedFermiNucleus(b))
+        sharp = 1 + 5b^2/(4pi)
+        @printf("   %+5.2f  %9.4f    %15.6f   %25.6f   %19.4f\n",
+                b, Nuclear.axisRatio(b), (rb/r0)^2, sharp, ((rb/r0)^2 - 1)/(sharp - 1))
+    end
+    #
+    # THE DIFFUSE SURFACE MATTERS.  The textbook law <r^2> = <r^2>_sph (1 + (5/4pi) beta2^2) is derived for
+    # a SHARP-edged sphere.  A real nucleus has a ~0.52 fm surface, which smears the angular variation of
+    # c(theta) and removes about 20% of the effect at beta2 = 0.3.  Verified against the analytic law by
+    # letting the surface sharpen: at a = 0.005 fm this code gives 1.037940 against 1.037941 exactly.
+    #
+    println("\n  The samarium chain across the N = 88 -> 90 shape transition:\n")
+    r2of(A, b2) = Nuclear.deformedFermiRrms(
+                      Nuclear.computeDeformedFermiC(Nuclear.rrmsRadius(A), aSkin, DeformedFermiNucleus(0.0)),
+                      aSkin, DeformedFermiNucleus(b2))^2
+    println("   pair         d<r^2> size   d<r^2> shape   d<r^2> total   measured    total/measured")
+    for (nam, A1, b1, A2, b2, meas) in [("148->150", 148., 0.1423, 150., 0.1928, 0.10),
+                                        ("150->152", 150., 0.1928, 152., 0.3064, 0.423),
+                                        ("152->154", 152., 0.3064, 154., 0.3410, 0.15)]
+        dSize = r2of(A2, 0.0) - r2of(A1, 0.0);    dTot = r2of(A2, b2) - r2of(A1, b1)
+        @printf("   %-10s  %11.4f   %12.4f   %12.4f   %9.3f   %13.2f\n",
+                nam, dSize, dTot - dSize, dTot, meas, dTot/meas)
+    end
+    #
+    ## VERDICT, 12-Aug-2026 -- AN HONEST NEGATIVE RESULT, and the date above stays blank because of it.
+    ##
+    ## The machinery is right: the deformation enhancement of <r^2> reproduces the analytic sharp-sphere
+    ## law to 1e-6 in the limit where that law applies.  The DECOMPOSITION, however, overshoots every
+    ## measured pair, and by different factors -- 3.4x, 1.6x and 2.7x above.  Two separate causes, neither
+    ## of them in the deformation model:
+    ##
+    ##  (1) THE SIZE TERM IS TOO LARGE BY ITSELF.  Nuclear.rrmsRadius, an A^(1/3) droplet fit, gives
+    ##      d<r^2> = 0.197 fm^2 for every two mass units, whereas the measured shifts for the
+    ##      NON-transitional pairs are 0.10-0.15 fm^2.  The size term alone therefore already exceeds the
+    ##      measurement before any deformation is added.  This is the well-known failure of a smooth
+    ##      A^(1/3) law to describe real charge radii, and it is exactly the reason for wanting a measured
+    ##      or shape-derived radius in the first place.
+    ##  (2) THE beta2 VALUES ARE FROM B(E2) SYSTEMATICS AND ARE RECALLED, NOT VERIFIED.  They are quoted
+    ##      here from memory of Raman et al.; I could not machine-read the source table.  They also measure
+    ##      <beta^2> including zero-point motion, which is the right quantity for <r^2> but is not the same
+    ##      as a static deformation, and the distinction matters most precisely at a shape transition.
+    ##
+    ## WHAT THIS BRANCH DOES ESTABLISH: the shape contribution to d<r^2> at the transition (0.49 fm^2) is
+    ## comparable to the whole measured shift (0.42 fm^2) and several times the size term of a normal pair.
+    ## Deformation is not a correction here, it dominates -- which is the physics case for feeding a shape
+    ## rather than a fitted radius into the field shift.  Turning that into a quantitative test needs
+    ## measured radii (Angeli & Marinova) and checked beta2 values, and NOT a better nuclear model.
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last reproduced:  20-Oct-2026 (1 of 1 numbers on the claim line)
+    # Last successful:  14-Aug-2026:  Li-like Nd, Z = 60, A = 142, R_rms = 4.9123 fm held FIXED while only
+    # the nuclear SHAPE is varied, so that every difference below is a pure shape effect.
+    #
+    #   shape                      E(2s) [a.u.]      dE vs 2pF      dF/F (2s)   (2p_1/2)   (2p_3/2)
+    #   2pF Fermi (baseline)     -4204.677981022            --            --          --         --
+    #   3pF  w = +0.2            -4204.677955728     +2.53e-05      +0.0262 %   +0.0253 %  +0.0263 %
+    #   3pF  w = -0.2            -4204.677996437     -1.54e-05      -0.0381 %   -0.0389 %  -0.0381 %
+    #   deformed beta2 = 0.28    -4204.678128230     -1.47e-04      -0.0440 %   -0.0452 %  -0.0444 %
+    #
+    # TWO CONCLUSIONS, and the second is the useful one.
+    #
+    # (1) THE <r^2>-ONLY PARAMETRISATION OF THE ELECTRONIC FACTOR IS GOOD TO ABOUT 0.05 %.  JAC organises the
+    #     field shift as F = dE/d<r^2>, i.e. it assumes the whole nuclear dependence is carried by the second
+    #     radial moment.  Across a realistic range of shapes -- a 20 % central depression, a 20 % central
+    #     bump, and a well-deformed beta2 = 0.28 typical of the rare earths -- F moves by less than 0.05 %.
+    #     The signs are as they must be: a central depression pushes charge OUTWARD at fixed <r^2> and raises
+    #     F; a central bump lowers it.  So the higher Seltzer moments <r^4>, <r^6> that the parametrisation
+    #     drops are genuinely a small correction here, and that is now measured rather than assumed.
+    #
+    # (2) THE SHAPE SENSITIVITY IS THE SAME FOR EVERY LEVEL, so it CANCELS IN RATIOS.  Read the three
+    #     percentage columns across: 0.0262 / 0.0253 / 0.0263, then -0.0440 / -0.0452 / -0.0444.  The shape
+    #     acts as an overall scale on F, not as a level-dependent distortion, to within a few parts in 1e4
+    #     of itself.  A King-plot analysis, which uses RATIOS of field shifts between transitions, is
+    #     therefore almost completely insensitive to the nuclear shape -- which is why that analysis works
+    #     as well as it does.
+    #
+    # AND IT LOCATES THE PROBLEM OF BRANCH e.  Branch e found the NUCLEAR side overshooting the measured
+    # d<r^2> of the samarium chain by factors of 1.6 to 3.4.  This branch shows the ELECTRONIC side is
+    # shape-insensitive at the 0.05 % level.  The isotope-shift discrepancy therefore lives entirely on the
+    # nuclear side -- in d<r^2> itself -- and no improvement of the electronic structure can address it.
+    #
+    # NOTE ON THE DEFORMED CASE: Nuclear.deformedFermiNucleus returns a spherically averaged Z(r), which is
+    # the right object for the J = 0 ground state used here; a deformed nucleus with non-zero spin would
+    # additionally couple through its quadrupole moment, which this does NOT test.
+    println("\n  Field shift F = dE/d<r^2> for Li-like Nd at FIXED R_rms = 4.9123 fm, varying only the shape\n")
+    for  (label, model)  in  [ ("2pF  Fermi (baseline) ", FermiNucleus()),
+                               ("3pF  w = +0.2         ", ThreeParameterFermiNucleus( 0.2, Nuclear.fermiA)),
+                               ("3pF  w = -0.2         ", ThreeParameterFermiNucleus(-0.2, Nuclear.fermiA)),
+                               ("deformed  beta2 = 0.28", DeformedFermiNucleus(0.28)) ]
+        nm = Nuclear.Model(60., model, 142., 4.9123, AngularJ64(0//1), 0.0, 0.0, 0.0)
+        wa = Atomic.Computation(Atomic.Computation(), name="Cc-f-Nd-$label", grid=Radial.Grid(true), nuclearModel=nm,
+                                configs=[Configuration("1s^2 2s"), Configuration("1s^2 2p")],
+                                propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings();
+                                                   calcNMS=false, calcSMS=false, calcF=true, printBefore=false) ] )
+        println("\n***  nuclear shape: $label")
+        perform(wa)
+    end
+    #
+elseif  true
+    # Last visit:  18-Oct-2026
+    # Last successful:  13-Oct-2026
+    #
+    # Branch g: THE KING-PLOT HELPERS (competition-list item C10) -- reuses branch b/d's exact Li-like Nd
+    #   system (Z=60, A=142, Fermi, rms=4.9123 fm, single configuration) and feeds its own K_ms, F straight
+    #   into `IsotopeShift.kingPlotChargeRadiusChange`, checked against a REAL measurement:
+    #   Brandau et al., Phys. Rev. Lett. 100, 073201 (2008) measured the isotope shift of the 2s-2p_1/2 and
+    #   2s-2p_3/2 resonances between 142Nd57+ and 150Nd57+ in dielectronic recombination and extracted
+    #   142,150(delta<r^2>) = -1.36(1)(3) fm^2.
+    #
+    # A REAL BUG AND A REAL SIGN TRAP WERE FOUND BUILDING THIS BRANCH, both now fixed/documented at the
+    # function itself (module-IsotopeShift.jl):
+    #   (1) kingPlotChargeRadiusChange first divided by F alone; the correct King relation (deltaNu*mu = K_ms +
+    #       F*mu*delta<r^2>) needs F*mu in the denominator. Missing it gave delta<r^2> ~ 3340 fm^2 instead of
+    #       order 1 -- off by exactly the missing factor of mu (~2655 u), caught only by testing against this
+    #       real number rather than trusting the algebra.
+    #   (2) `IsotopeShift.displayResults`'s own transition table prints K_ms, F as LOWER-INDEX-LEVEL minus
+    #       HIGHER-INDEX-LEVEL (here: 2s minus 2p_j), the OPPOSITE of the upper-minus-lower convention a
+    #       measured transition-energy isotope shift naturally uses. Using the table's printed sign directly
+    #       flips the result's sign (+1.31 instead of -1.31). This branch builds K_ms, F explicitly as
+    #       (2p_j outcome) minus (2s outcome), not by reading the table, to stay on the correct side of that trap.
+    #   (3) `IsotopeShift.Outcome`'s own K_nms/K_sms/F_me fields are in RAW ATOMIC UNITS -- the 3609.4824
+    #       (-> GHz*u) and `Defaults.convertUnits` (-> MHz/fm^2) factors live ONLY inside `displayResults`,
+    #       applied just before printing. Passing the raw Outcome values straight into
+    #       `kingPlotChargeRadiusChange` (which expects the already-converted, printed units) gave
+    #       delta<r^2> ~ -8.4e9 fm^2 on the first attempt -- the SAME missing-factor shape of mistake as (1),
+    #       just in the unit conversion rather than the formula.
+    #
+    # RESULT: 2s-2p_1/2 gives delta<r^2> = -1.311 fm^2 (3.6% low); 2s-2p_3/2 gives -1.336 fm^2 (1.8% low) --
+    #   TWO INDEPENDENT transitions agreeing with EACH OTHER to 1.9% and with Brandau's measurement to a few
+    #   percent, consistent with the ~4% F-accuracy and ~0.1-0.2% K_nms-accuracy this same single-configuration
+    #   system already showed against RIS3/RIS4 in branches b and c above -- no new accuracy claim beyond what
+    #   those branches already established, just a new, externally-measured way of exercising it.
+    nm      = Nuclear.Model(60., FermiNucleus(), 142., 4.9123, AngularJ64(0//1), 0.0, 0.0, 0.0)
+    wa      = Atomic.Computation(Atomic.Computation(), name="Cc-g-NdKingPlot", grid=Radial.Grid(true),
+                            nuclearModel=nm,
+                            configs=[Configuration("1s^2 2s"), Configuration("1s^2 2p")],
+                            propertySettings=[ IsotopeShift.Settings(IsotopeShift.Settings(); calcNMS=true, calcSMS=true,
+                                                calcF=true, printBefore=true) ] )
+    wb       = perform(wa; output=true)
+    outcomes = wb[IsotopeShift.Settings]
+
+    s2s   = [o for o in outcomes if o.level.J == AngularJ64(1//2) && o.level.parity == Basics.plus ][1]
+    p2p12 = [o for o in outcomes if o.level.J == AngularJ64(1//2) && o.level.parity == Basics.minus][1]
+    p2p32 = [o for o in outcomes if o.level.J == AngularJ64(3//2) && o.level.parity == Basics.minus][1]
+
+    massNd142 = 141.907729;   massNd150 = 149.920902         ## standard atomic mass values, in u
+    meV_to_MHz = 2.417989242e8 * 1.0e-3                       ## 1 eV = 2.417989242e8 MHz (E = h*f)
+
+    for  (label, upper, deltaE_meV, brandau) in  [ ("2s -> 2p_1/2", p2p12, 40.2, -1.36), ("2s -> 2p_3/2", p2p32, 42.3, -1.36) ]
+        ## Outcome's own K_nms/K_sms/F_me fields are in RAW ATOMIC UNITS, exactly as `displayResults` finds
+        ## them before IT applies the same 3609.4824 (-> GHz*u) and Defaults.convertUnits (-> MHz/fm^2) factors
+        ## for printing -- easy to forget since those factors live only inside that display function.
+        Kms = ((upper.Knms + upper.Ksms) - (s2s.Knms + s2s.Ksms)) * 3609.4824       ## UPPER minus LOWER, GHz*u
+        F   = Defaults.convertUnits("energy: from atomic to Hz", upper.Fme - s2s.Fme) * 1.0e-6     ## MHz/fm^2
+        dr2 = IsotopeShift.kingPlotChargeRadiusChange(deltaE_meV*meV_to_MHz, Kms, F, massNd142, massNd150)
+        @printf("  %-14s  JAC delta<r^2> = %7.4f fm^2   Brandau 2008 = %6.3f fm^2   ratio = %6.4f\n",
+                label, dr2, brandau, dr2/brandau)
+    end
+
+    # MACHINERY CHECK, NOT PHYSICS: kingPlotFit is a plain least-squares line fit, verified by round-trip
+    # rather than against a literature King plot (a genuine multi-isotope-pair dataset for this system was not
+    # at hand). Construct synthetic modified shifts from KNOWN Kms1, F1, Kms2, F2 and several delta<r^2>
+    # values, and confirm the fit recovers the known slope = F1/F2 and intercept = Kms1 - slope*Kms2 exactly.
+    Kms1 = 100.0;   F1 = 7.0;   Kms2 = 40.0;   F2 = 3.0
+    dr2s = [0.5, 1.0, 1.5, 2.0, 2.5]
+    x    = [Kms2 + F2*dr2 for dr2 in dr2s]                         ## modified shift of the reference transition
+    y    = [Kms1 + F1*dr2 for dr2 in dr2s]                         ## modified shift of the transition of interest
+    slope, intercept = IsotopeShift.kingPlotFit(x, y)
+    @printf("\n  kingPlotFit (synthetic round-trip): slope = %.10f (exact %.10f), intercept = %.10f (exact %.10f)\n",
+            slope, F1/F2, intercept, Kms1 - (F1/F2)*Kms2)
+    #
+end
+#
+setDefaults("print summary: close", "")

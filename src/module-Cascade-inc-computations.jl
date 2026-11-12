@@ -12,33 +12,36 @@ end
 
     
 """
-`Basics.extractLeadingConfiguration(cLevel::Cascade.Level)`  
+`Basics.extractConfiguration(theme::Basics.LeadingConfiguration, cLevel::Cascade.Level)`  
     ... extract the leading configuration of the given level; a conf::Configuration is returned.
 """
-function Basics.extractLeadingConfiguration(cLevel::Cascade.Level)
-    # First extract the right ManyElectron.Level that is to be analyzed
-    level = Level()
-    if length(cLevel.parents) > 0   
+function Basics.extractConfiguration(theme::Basics.LeadingConfiguration, cLevel::Cascade.Level)
+    # First extract the right ManyElectron.Level that is to be analyzed.
+    # The placeholder `level = Level()` that used to stand here could never work: inside module Cascade the
+    # bare name Level resolves to Cascade.Level, which has no zero-argument constructor, whereas the comment
+    # (and everything below) wants a ManyElectron.Level. It was pure scope declaration in any case -- every
+    # branch below either assigns `level` or raises -- and Julia's `if` does not open a new scope, so the
+    # assignments are visible afterwards without it.
+    if length(cLevel.parents) > 0
         parent = cLevel.parents[1]
         if      parent.process == Basics.Auger()       level = parent.lines[parent.index].finalLevel
         elseif  parent.process == Basics.Radiative()   level = parent.lines[parent.index].finalLevel
-        else    error("stop a")
+        else    error("Basics.extractConfiguration(): unsupported theme.")
         end
-    elseif length(cLevel.daugthers) > 0   
-        daugth = cLevel.daugthers[1]
-        ##x @show typeof(daugth.lines[daugth.index])
+    elseif length(cLevel.daughters) > 0   
+        daugth = cLevel.daughters[1]
         if      daugth.process == Basics.Auger()       level = daugth.lines[daugth.index].initialLevel
         elseif  daugth.process == Basics.Radiative()   level = daugth.lines[daugth.index].initialLevel
-        else    error("stop b")
+        else    error("Basics.extractConfiguration(): unsupported theme.")
         end
-    else        error("stop c")
+    else        error("Basics.extractConfiguration(): unsupported theme.")
     end
 
-    allConfs = Basics.extractNonrelativisticConfigurations(level.basis)
+    allConfs = Basics.extractConfigurations(Basics.FromBasis(), level.basis)
     weights  = zeros(length(allConfs))
     for  (ia, allConf) in  enumerate(allConfs)
         for (ic, csf) in enumerate(level.basis.csfs)
-            if  allConf == Basics.extractNonrelativisticConfigurationFromCsfR(csf, level.basis)     
+            if  allConf == Basics.extractConfiguration(Basics.FromBasis(), level.basis, csf)     
                 weights[ia] = weights[ia] + level.mc[ic]
             end
         end
@@ -76,8 +79,13 @@ end
     ... to perform the same but to return the complete output in a dictionary;  the particular output depends on the type 
         and specifications of the cascade but can easily accessed by the keys of this dictionary.
 """
-function Basics.perform(comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)
-    Cascade.perform(comp.scheme, comp::Cascade.Computation, output=output, outputToFile=outputToFile)
+function Basics.perform(comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true,
+                        outputDirectory::String="")
+    # Reject an unrealizable cascade approach HERE, before any orbital or amplitude work is done; a cascade
+    # that cannot succeed should say so in the first second rather than in the middle of some step.
+    Cascade.validateConditions(comp.approach)
+    Cascade.perform(comp.scheme, comp::Cascade.Computation, output=output, outputToFile=outputToFile,
+                    outputDirectory=outputDirectory)
 end
 
 
@@ -89,7 +97,7 @@ end
         to the given atomic processes. The results of all individual steps are printed to screen but nothing is returned 
         otherwise.
 
-`Basics.perform(comp::Cascade.Simulation; output=true)`   
+`Basics.perform(comp::Cascade.Simulation; output::Bool=false)`   
     ... to perform the same but to return the complete output in a dictionary;  the particular output depends on the type 
         and specifications of the cascade but can easily accessed by the keys of this dictionary.
 """
@@ -112,15 +120,14 @@ end
 """
 function computeDecayProbabilities(outcome::DecayYield.Outcome, linesR::Array{PhotoEmission.Line,1}, 
                                     linesA::Array{AutoIonization.Line,1}, settings::DecayYield.Settings)
-    #
     # Determine the leading configuration and shells of the initial level
     subshList     = Basics.extractRelativisticSubshellList(outcome.level)
-    relConfigs    = Basics.extractRelativisticConfigurations(outcome.level.basis, outcome.level.J)
-    holeSubshells = Basics.extractOpenSubshells(relConfigs[1]);   holeSubshell = holeSubshells[1]
-    #
+    relConfigs    = Basics.extractConfigurations(Basics.RelativisticConfigurations(), outcome.level.basis, outcome.level.J)
+    holeSubshells = Basics.extractFromConfiguration(Basics.OpenSubshells(), relConfigs[1]);   holeSubshell = holeSubshells[1]
     # Initialize and fill dictionaries for collecting the radiative and Auger rates
     level = outcome.level;    sym = LevelSymmetry(level.J, level.parity)
-    if  subshList[1] != Subshell("1s_1/2")    error("stop a")     end
+    if  subshList[1] != Subshell("1s_1/2")    error("Cascade.computeDecayProbabilities(): the first subshell is $(subshList[1]), not "  *
+                                                      "1s_1/2.")     end
     println("\n Probabilities are determined for the initial hole $holeSubshell of a level with symmetry $sym " *
             "and configurations \n  $(relConfigs)")
     subshEnergies  = Dict{Subshell,Float64}()
@@ -133,17 +140,21 @@ function computeDecayProbabilities(outcome::DecayYield.Outcome, linesR::Array{Ph
             if  j >= i  aProbabilities[(subshi, subshj)] = 0.   end 
         end
     end
-    #
-    @show subshList, relConfigs, holeSubshell
-    @show subshEnergies
-    #
     # Calculate the total rate and convert the dictionaries into probabilities
     # First, identify the level key of the given level also in the lists of radiative and Auger lines
     level = outcome.level;    levelKey = LevelKey( LevelSymmetry(level.J, level.parity), level.index, level.energy, 0.)
     similarKey = LevelKey();  rateR = Basics.EmProperty(0.);    rateA = 0.;   NoPhotonLines = 0;   NoAugerLines = 0
+    # Track the CLOSEST similar key, not simply the last one found (FIXED 13-Oct-2026, item 65): several
+    # close-lying but DISTINCT levels can each pass Basics.isSimilar's fixed tolerance against the same
+    # levelKey, and overwriting on every match -- regardless of how close -- let a worse, wrong neighbour win
+    # if it happened to be listed later in linesR.
+    bestDiff = Inf
     for  line in linesR
         compareKey = LevelKey( LevelSymmetry(line.initialLevel.J, line.initialLevel.parity), line.initialLevel.index, line.initialLevel.energy, 0.)
-        if   Basics.isSimilar(levelKey, compareKey, 1.0e-3)    println("** compareKey = $compareKey");   similarKey = deepcopy(compareKey)    end
+        if   Basics.isSimilar(levelKey, compareKey, 1.0e-3)
+            diff = abs(levelKey.energy - compareKey.energy)
+            if  diff < bestDiff    bestDiff = diff;   similarKey = deepcopy(compareKey)    end
+        end
     end
     if   similarKey == LevelKey()    @warn("No similar level found !")   end
     
@@ -151,54 +162,51 @@ function computeDecayProbabilities(outcome::DecayYield.Outcome, linesR::Array{Ph
         if  similarKey == LevelKey( LevelSymmetry(line.initialLevel.J, line.initialLevel.parity), line.initialLevel.index, line.initialLevel.energy, 0.)
             rateR = rateR + line.photonRate;   NoPhotonLines = NoPhotonLines + 1  
             # Extract the subshells that make the difference between the initial and final levels; terminate if NO 1s_1/2 occurs
-            confi = Basics.extractLeadingConfigurationR(line.initialLevel)
-            conff = Basics.extractLeadingConfigurationR(line.finalLevel)
-            occDiffs = Basics.extractShellOccupationDifference(confi, conff);   subshList = Subshell[]
+            confi = Basics.extractConfiguration(Basics.LeadingConfigurationR(), line.initialLevel)
+            conff = Basics.extractConfiguration(Basics.LeadingConfigurationR(), line.finalLevel)
+            occDiffs = Basics.extractFromConfigurations(Basics.OccupationDifference(), confi, conff);   subshList = Subshell[]
             for  diff in occDiffs
                 # holeSubshell must differ by -1
                 if diff[1] == holeSubshell
-                    if diff[2] == -1     else   error("stop b")    end
+                    if diff[2] == -1     else   error("Cascade.computeDecayProbabilities(): the occupation difference is not the single "  *
+                                                        "hole expected.")    end
                 end
                 if     diff[2] ==  1     push!(subshList, diff[1])                                end       
                 if     diff[2] ==  2     push!(subshList, diff[1]);    push!(subshList, diff[1])  end       
             end
-            if   length(subshList)  != 1   error("stop c")    end
+            if   length(subshList)  != 1   error("Cascade.computeDecayProbabilities(): $(length(subshList)) subshells differ, exactly "  *
+                                                   "one expected.")    end
             rProbabilities[ subshList[1] ] = rProbabilities[ subshList[1] ] + 
                                                 (line.photonRate.Babushkin + line.photonRate.Coulomb) / 2
         end
     end
-    @show rProbabilities
-    #
     for  line in linesA
         if  similarKey == LevelKey( LevelSymmetry(line.initialLevel.J, line.initialLevel.parity), line.initialLevel.index, line.initialLevel.energy, 0.)
             rateA = rateA + line.totalRate;   NoAugerLines = NoAugerLines + 1    
             # Extract the subshells that make the difference between the initial and final levels; terminate if NO 1s_1/2 occurs
-            confi = Basics.extractLeadingConfigurationR(line.initialLevel)
-            conff = Basics.extractLeadingConfigurationR(line.finalLevel)
-            occDiffs = Basics.extractShellOccupationDifference(confi, conff);   subshList = Subshell[]
+            confi = Basics.extractConfiguration(Basics.LeadingConfigurationR(), line.initialLevel)
+            conff = Basics.extractConfiguration(Basics.LeadingConfigurationR(), line.finalLevel)
+            occDiffs = Basics.extractFromConfigurations(Basics.OccupationDifference(), confi, conff);   subshList = Subshell[]
             for  diff in occDiffs
                 # holeSubshell must differ by -1
                 if diff[1] == holeSubshell
-                    if diff[2] == -1     else   error("stop d")    end
+                    if diff[2] == -1     else   error("Cascade.computeDecayProbabilities(): the occupation difference is not the single "  *
+                                                        "hole expected.")    end
                 end
                 if     diff[2] ==  1     push!(subshList, diff[1])                                end       
                 if     diff[2] ==  2     push!(subshList, diff[1]);    push!(subshList, diff[1])  end       
             end
-            if   length(subshList)  != 2   error("stop e")    end
+            if   length(subshList)  != 2   error("Cascade.computeDecayProbabilities(): $(length(subshList)) subshells differ, exactly "  *
+                                                   "two expected.")    end
             aProbabilities[ (subshList[1], subshList[2]) ] = aProbabilities[ (subshList[1], subshList[2]) ] + line.totalRate
         end
     end
-    @show aProbabilities
-    #
     # Add all rates, convert to probabilities and print these dictionaries into a neat table
     rate = 0.
     for (k,v) in rProbabilities   rate = rate + v   end
     for (k,v) in aProbabilities   rate = rate + v   end
-    @show outcome.rateR + outcome.rateA, rate
-    #
     for (k,v) in rProbabilities   rProbabilities[k] = v/(rate + 1.0e-20)   end
     for (k,v) in aProbabilities   aProbabilities[k] = v/(rate + 1.0e-20)   end
-    #
     Cascade.displayDecayProbabilities(stdout, outcome, rProbabilities, aProbabilities, settings)
     # Generate an additional output file if printDataX & printDataY = true
     printDataX, iodataX = Defaults.getDefaults("data-X flag/stream")
@@ -223,12 +231,18 @@ function computeDecayYieldOutcome(outcome::DecayYield.Outcome, linesR::Array{Pho
                                     linesA::Array{AutoIonization.Line,1}, settings::DecayYield.Settings)
     # Identify the level key of the given level also in the lists of radiative and Auger lines
     level = outcome.level;    levelKey = LevelKey( LevelSymmetry(level.J, level.parity), level.index, level.energy, 0.)
-    @show levelKey
     similarKey = LevelKey();  rateR = Basics.EmProperty(0.);    rateA = 0.;   NoPhotonLines = 0;   NoAugerLines = 0
+    # Track the CLOSEST similar key, not simply the last one found (FIXED 13-Oct-2026, item 65): several
+    # close-lying but DISTINCT levels can each pass Basics.isSimilar's fixed tolerance against the same
+    # levelKey, and overwriting on every match -- regardless of how close -- let a worse, wrong neighbour win
+    # if it happened to be listed later in linesR.
+    bestDiff = Inf
     for  line in linesR
         compareKey = LevelKey( LevelSymmetry(line.initialLevel.J, line.initialLevel.parity), line.initialLevel.index, line.initialLevel.energy, 0.)
-        @show compareKey
-        if   Basics.isSimilar(levelKey, compareKey, 1.0e-3)    println("** compareKey = $compareKey");   similarKey = deepcopy(compareKey)    end
+        if   Basics.isSimilar(levelKey, compareKey, 1.0e-3)
+            diff = abs(levelKey.energy - compareKey.energy)
+            if  diff < bestDiff    bestDiff = diff;   similarKey = deepcopy(compareKey)    end
+        end
     end
     if   similarKey == LevelKey()    @warn("No similar level found !")   end
     
@@ -251,13 +265,13 @@ end
 
 """
 `Cascade.computeTotalAugerRate(level::Cascade.Level)` 
-    ... computes the total Auger rate of level as given by its daugther levels; a rate::Float64 is returned.
+    ... computes the total Auger rate of level as given by its daughter levels; a rate::Float64 is returned.
 """
 function computeTotalAugerRate(level::Cascade.Level)
     rate = 0.
-    for daugther in level.daugthers
-        if  daugther.process != Basics.Auger();      continue   end
-        aLine   = daugther.lines[daugther.index]
+    for daughter in level.daughters
+        if  daughter.process != Basics.Auger();      continue   end
+        aLine   = daughter.lines[daughter.index]
         rate    = rate + aLine.totalRate
     end
     return( rate )
@@ -266,13 +280,13 @@ end
 
 """
 `Cascade.computeTotalPhotonRate(level::Cascade.Level)` 
-    ... computes the total photon (radiative) rate of level as given by its daugther levels; a rate::EmProperty is returned.
+    ... computes the total photon (radiative) rate of level as given by its daughter levels; a rate::EmProperty is returned.
 """
 function computeTotalPhotonRate(level::Cascade.Level)
     rate = Basics.EmProperty(0.)
-    for daugther in level.daugthers
-        if  daugther.process != Basics.Radiative();      continue   end
-        rLine   = daugther.lines[daugther.index]
+    for daughter in level.daughters
+        if  daughter.process != Basics.Radiative();      continue   end
+        rLine   = daughter.lines[daughter.index]
         rate    = rate + rLine.photonRate
     end
     
@@ -288,7 +302,6 @@ end
         about the given blocks. nothing is returned.
 """
 function displayBlocks(stream::IO, blockList::Array{Cascade.Block,1}; sa::String="")
-    #
     nx = 150
     println(stream, "\n* Configuration 'blocks' (multiplets): " * sa * "\n")
     println(stream, "  ", TableStrings.hLine(nx))
@@ -330,12 +343,10 @@ end
 function displayDecayProbabilities(stream::IO, outcome::DecayYield.Outcome, rProbabilities::Dict{Subshell,Float64},
                                     aProbabilities::Dict{Tuple{Subshell,Subshell},Float64}, settings::DecayYield.Settings)
     
-    #
     # Determine the leading configuration and shells of the initial level
     subshList     = Basics.extractRelativisticSubshellList(outcome.level)
-    relConfigs    = Basics.extractRelativisticConfigurations(outcome.level.basis, outcome.level.J)
-    holeSubshells = Basics.extractOpenSubshells(relConfigs[1]);   holeSubshell = holeSubshells[1]
-    @show subshList, relConfigs, holeSubshell
+    relConfigs    = Basics.extractConfigurations(Basics.RelativisticConfigurations(), outcome.level.basis, outcome.level.J)
+    holeSubshells = Basics.extractFromConfiguration(Basics.OpenSubshells(), relConfigs[1]);   holeSubshell = holeSubshells[1]
     
     nx = 28
     println(stream, " ")
@@ -346,17 +357,15 @@ function displayDecayProbabilities(stream::IO, outcome::DecayYield.Outcome, rPro
     println(stream, "    + Level:         $(outcome.level.index) with symmetry $(LevelSymmetry( outcome.level.J, outcome.level.parity)) ")
     println(stream, "    + $(outcome.NoPhotonLines)           ... number of photon lines. ")
     println(stream, "    + $(outcome.NoAugerLines )           ... number of Auger lines. ")
-    if    settings.approach in ["AverageSCA", "SCA"]
+    if    settings.approach isa Union{Basics.AverageSCA, Basics.SCA}
     println(stream, "    + Approach:  $(settings.approach)  ... all decay probabilities only in Babushkin gauge. ")
     end
-    #
     println(stream, " ")
     println(stream, "  ", TableStrings.hLine(nx))
     sa = " "
     sa = sa * TableStrings.center(10, "Shell"; na=2);     
     sa = sa * TableStrings.center(16, "p (radiative)";   na=4)
     println(stream, sa);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #
     for subsh in subshList
         if  haskey(rProbabilities, subsh)
             if  rProbabilities[subsh] == 0.  continue    end
@@ -364,12 +373,10 @@ function displayDecayProbabilities(stream::IO, outcome::DecayYield.Outcome, rPro
         end
     end
     println(stream, "  ", TableStrings.hLine(nx), "\n")
-    #  
     sa = " ";       nx = 38
     sa = sa * TableStrings.center(10, "Shell"; na=0) * TableStrings.center(10, "Shell"; na=2);     
     sa = sa * TableStrings.center(16, "p (Auger)";   na=4)
     println(stream, sa);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #
     for subsha in subshList
         for subshb in subshList
             if  haskey(aProbabilities, (subsha, subshb) )
@@ -434,7 +441,7 @@ function dumpGeant4Index(subsh::Subshell)
     elseif  subsh == Subshell("7s_1/2")       idx = 58
     elseif  subsh == Subshell("7p_1/2")       idx = 60
     elseif  subsh == Subshell("7p_3/2")       idx = 61
-    else    error("stop a; subsh = $subsh")
+    else    error("Cascade.dumpGeant4Index(): no Geant4 index is defined for the subshell $subsh.")
     end
     
     return( idx )
@@ -451,11 +458,10 @@ end
 """
 function dumpDecayProbabilities(stream::IO, outcome::DecayYield.Outcome, subshEnergies::Dict{Subshell,Float64},
                                 rProbabilities::Dict{Subshell,Float64},settings::DecayYield.Settings)
-    #
     # Determine the leading configuration and shells of the initial level
     subshList     = Basics.extractRelativisticSubshellList(outcome.level)
-    relConfigs    = Basics.extractRelativisticConfigurations(outcome.level.basis, outcome.level.J)
-    holeSubshells = Basics.extractOpenSubshells(relConfigs[1]);   holeSubshell = holeSubshells[1]
+    relConfigs    = Basics.extractConfigurations(Basics.RelativisticConfigurations(), outcome.level.basis, outcome.level.J)
+    holeSubshells = Basics.extractFromConfiguration(Basics.OpenSubshells(), relConfigs[1]);   holeSubshell = holeSubshells[1]
     
     # Dump probabilities for the given holeSubshell to the data file
     idx = Cascade.dumpGeant4Index(holeSubshell)
@@ -489,11 +495,10 @@ end
 """
 function dumpDecayProbabilities(stream::IO, outcome::DecayYield.Outcome, subshEnergies::Dict{Subshell,Float64},
                                 aProbabilities::Dict{Tuple{Subshell,Subshell},Float64},settings::DecayYield.Settings)
-    #
     # Determine the leading configuration and shells of the initial level
     subshList     = Basics.extractRelativisticSubshellList(outcome.level)
-    relConfigs    = Basics.extractRelativisticConfigurations(outcome.level.basis, outcome.level.J)
-    holeSubshells = Basics.extractOpenSubshells(relConfigs[1]);   holeSubshell = holeSubshells[1]
+    relConfigs    = Basics.extractConfigurations(Basics.RelativisticConfigurations(), outcome.level.basis, outcome.level.J)
+    holeSubshells = Basics.extractFromConfiguration(Basics.OpenSubshells(), relConfigs[1]);   holeSubshell = holeSubshells[1]
     
     # Dump probabilities for the given holeSubshell to the data file
     idx = Cascade.dumpGeant4Index(holeSubshell)
@@ -529,8 +534,8 @@ function displayLevels(stream::IO, multiplets::Array{Multiplet,1}; sa::String=""
     println(stream, "* Configurations and levels for all given " * sa * "multiplets of the cascade, relative to the lowest:")
     for  multiplet  in multiplets
         println(stream, "  ")
-        confList = Basics.extractNonrelativisticConfigurations(multiplet.levels[1].basis)
-        for  conf in confList
+        confList = Basics.extractConfigurations(Basics.FromBasis(), multiplet.levels[1].basis)
+         for  conf in confList
             println(stream, "  $conf")
         end
         println(stream, "  ", TableStrings.hLine(nx))
@@ -567,7 +572,6 @@ function displaySteps(stream::IO, steps::Array{Cascade.Step,1}; sa::String="")
     sa = sa * TableStrings.flushleft(40, "Energies from ... to in " * TableStrings.inUnits("energy"); na=4)
     println(stream, sa)
     println(stream, "  ", TableStrings.hLine(nx))
-    #
     for  i = 1:length(steps)
         sa = " " * TableStrings.flushright( 7, string(i); na=5)
         sa = sa  * TableStrings.flushleft( 11, string(steps[i].process); na=1)
@@ -601,78 +605,82 @@ function generateBlocks(comp::Cascade.Computation, confs::Array{Configuration,1}
                         sa::String="", printout::Bool=true)
     blockList = Cascade.Block[]
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
+    # The approach is no longer interrogated by name here. It is resolved into its conditions, and those
+    # conditions decide what happens -- which is also what the six lines printed by Cascade.displayApproach
+    # report. Announcing and doing therefore come from ONE source and cannot drift apart, as they had: this
+    # block used to print "all blocks (multiplets) are generated from single-CSF levels and without any
+    # configuration mixing" while the code below was running full configuration interaction.
+    cd = Cascade.conditions(comp.approach)
+    if  printout
+        println("\n* Generate blocks " * sa)
+        Cascade.displayApproach(stdout, comp.approach, comp.asfSettings)
+        if  printSummary
+            println(iostream, "\n* Generate blocks " * sa)
+            Cascade.displayApproach(iostream, comp.approach, comp.asfSettings)
+        end
+    end
+    # ChargeStateOrbitals needs one self-consistent field per charge state, prepared once for all blocks.
+    # GlobalOrbitals uses the initial multiplet's own orbitals, which the caller has already passed in and
+    # which are precisely "the mean field of the initial ion" that the approach asks for. MultipletOrbitals
+    # prepares nothing here: every block runs its own self-consistent field in the loop below.
+    orbitalSets = Dict{Int64, Dict{Subshell, Orbital}}()
+    if  cd.bound == Cascade.ChargeStateOrbitals()
+        orbitalSets = Cascade.generateBoundOrbitals(comp.approach, comp, confs; printout=printout)
+    end
+    # WARM START (13-Aug-2026), BROADCAST RATHER THAN CHAINED (15-Aug-2026).  With MultipletOrbitals every
+    # block solves its own field, and each one used to begin from hydrogenic orbitals -- although every block
+    # of a cascade differs from the initial ion by only a few holes or electrons, so their orbitals are
+    # nearly the same.  Each block therefore starts from the INITIAL ion's converged orbitals, which the
+    # caller already passes in.  The machinery existed and was used in exactly one place (the
+    # dielectronic-recombination cascade): ManyElectron.StartFromPrevious, honoured by
+    # SelfConsistent.initializeBasis, which fills any subshell the seed lacks hydrogenically.
     #
-    if    comp.approach == AverageSCA()
-        if  printout
-        println("\n* Generate blocks " * sa)
-        println("\n  In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println("    + orbitals from the initial multiplet are applied throughout; ")
-        println("    + all blocks (multiplets) are generated from single-CSF levels and without any configuration mixing even in the SC; ")
-        println("    + only E1 dipole transitions are applied in all radiative decay stets; ")
-        println("    + for each decay step, a (single) set of continuum orbitals with an configuration averaged energy is applied " *
-                        "for all transitions of the same step. \n")
-        if  printSummary   
-        println(iostream, "\n* Generate blocks " * sa)
-        println(iostream, "\n* In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println(iostream, "    + orbitals from the initial multiplet are applied throughout; ")
-        println(iostream, "    + all blocks (multiplets) are generated from single-CSF levels and without any configuration mixing even in the SC; ")
-        println(iostream, "    + only E1 dipole transitions are applied in all radiative decay stets; ")
-        println(iostream, "    + for each decay step, a (single) set of continuum orbitals with an configuration averaged energy is applied " *
-                            "for all transitions of the same step. \n")
+    # WHY BROADCAST AND NOT A CHAIN.  Until 15-Aug each block was seeded from the PREVIOUS block's converged
+    # set.  That looks like the better guess -- adjacent blocks resemble each other more than either
+    # resembles the initial ion -- but it makes the loop CARRY A DEPENDENCE, so the blocks cannot be run
+    # concurrently.  Measured, the chain is not even faster.  Two cascades, RefinedSCA, MINIMUM OF FOUR runs
+    # after a warm-up (total wall clock):
+    #
+    #      case          chained     broadcast
+    #      Mg 1s-hole    36.46 s      33.31 s     broadcast 9 % faster
+    #      Ar 2p-hole    14.94 s      13.63 s     broadcast 9 % faster
+    #
+    # Both give IDENTICAL line counts (Mg 99 Auger / 236 photon, Ar 21 / 55); the summed rates differ by
+    # 3e-8 relative, i.e. two starting guesses landing at different points inside the same SCF convergence
+    # tolerance.  Suite 48/48.
+    # The chain probably loses because it DRIFTS: every block seeds the next, so a late block starts from a
+    # guess that has wandered several charge states from its own solution, whereas the broadcast keeps every
+    # block anchored to one converged reference.
+    # MEASUREMENT NOTE: single readings are worthless here.  The Ar case spreads 33 % between repeats
+    # (13.63 - 18.14 s), and a first two-run comparison made the broadcast look 17 % SLOWER.  Take the
+    # minimum of at least four.
+    #
+    # Against no warm start at all (Mg): generateBlocks 25.61 s, total 45.18 s -- so the warm start is worth
+    # about 1.28x on the whole cascade and has pulled generateBlocks from the 77.6 % of the 13-Aug profile
+    # down to 48.5 %, which also caps what THREADING it could ever buy at roughly 2x.
+    for  confa  in confs
+        print("  Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")
+        if  printSummary   println(iostream, "\n*  Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")   end
+        if      cd.bound == Cascade.MultipletOrbitals()
+            blockSettings = length(initalOrbitals) == 0  ?  comp.asfSettings  :
+                            AsfSettings(comp.asfSettings; startScfFrom = ManyElectron.StartFromPrevious(initalOrbitals))
+            multiplet = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, blockSettings; printout=false)
+        elseif  cd.bound == Cascade.GlobalOrbitals()
+            multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa], initalOrbitals, comp.nuclearModel, comp.grid,
+                                                                Cascade.asfSettingsForApproach(comp.approach, comp.asfSettings); printout=false)
+        else
+            multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa], orbitalSets[confa.NoElectrons], comp.nuclearModel, comp.grid,
+                                                                Cascade.asfSettingsForApproach(comp.approach, comp.asfSettings); printout=false)
         end
-        end     # printout
-        #
-        for  confa  in confs
-            print("  Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")
-            if  printSummary   println(iostream, "\n*  Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")   end
-            ##x multiplet = Basics.perform("computation: mutiplet from orbitals, no CI, CSF diagonal", [confa],  initalOrbitals, 
-            ##x                             comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa], initalOrbitals, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
 
-            # Shift the total energies of all levels if requested for the StepwiseDecayScheme
-            if  typeof(comp.scheme) == StepwiseDecayScheme   &&   haskey(comp.scheme.chargeStateShifts, confa.NoElectrons)
-                energyShift = comp.scheme.chargeStateShifts[confa.NoElectrons]
-                multiplet   = Basics.shiftTotalEnergies(multiplet, energyShift)
-                print("shift all levels by $energyShift [a.u.] ... ")
-            end
-            push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
-            println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
+        # Shift the total energies of all levels if requested for the StepwiseDecayScheme
+        if  typeof(comp.scheme) == StepwiseDecayScheme   &&   haskey(comp.scheme.chargeStateShifts, confa.NoElectrons)
+            energyShift = comp.scheme.chargeStateShifts[confa.NoElectrons]
+            multiplet   = Basics.shiftTotalEnergies(multiplet, energyShift)
+            print("shift all levels by $energyShift [a.u.] ... ")
         end
-    elseif    comp.approach == SCA()
-        if printout
-        println("\n* Generate blocks " * sa)
-        println("\n  In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println("    + orbitals are generated independently for each multiplet (block); ")
-        println("    + configuration interaction is included for each block; ")
-        println("    + only E1 dipole transitions are applied in all radiative decay stets; \n")
-        if  printSummary   
-        println(iostream, "\n* Generate blocks " * sa)
-        println(iostream, "\n* In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println(iostream, "    + orbitals are generated independently for each multiplet (block); ")
-        println(iostream, "    + configuration interaction is included for each block; ")
-        println(iostream, "    + only E1 dipole transitions are applied in all radiative decay stets; \n")
-        end
-        end     # printout
-        #
-        i = 0
-        for  confa  in confs
-            ## i = i + 1;    if   i in [1,2, 4,5,6,7,8,9,10,11,12,13,14]  ||  i > 15   println("  Block $i omitted.");    continue    end
-            ## i = i + 1;    if   i < 11  ||  i > 11   println("  Block $i omitted.");    continue    end
-            print("  Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")
-            if  printSummary   print(iostream, "* Multiplet computations for $(string(confa)[1:end]) with $(confa.NoElectrons) electrons ... ")   end
-            ##x basis     = Basics.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            ##x multiplet = Basics.performCI(basis, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            multiplet = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            # Shift the total energies of all levels if requested for the StepwiseDecayScheme
-            if  typeof(comp.scheme) == StepwiseDecayScheme   &&   haskey(comp.scheme.chargeStateShifts, confa.NoElectrons)
-                energyShift = comp.scheme.chargeStateShifts[confa.NoElectrons]
-                multiplet   = Basics.shiftTotalEnergies(multiplet, energyShift)
-                print("shift all levels by $energyShift [a.u.] ... ")
-            end
-            push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
-            println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
-        end
-    else  error("Unsupported cascade approach.")
+        push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
+        println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
     end
 
     return( blockList )
@@ -692,7 +700,7 @@ function generateConfigurationList(multiplets::Array{Multiplet,1}, further::Int6
     # Determine all (different) configurations from multiplets
     confList = Configuration[]
     for mp  in  multiplets   
-        cfList = Basics.extractNonrelativisticConfigurations(mp.levels[1].basis)
+        cfList = Basics.extractConfigurations(Basics.FromBasis(), mp.levels[1].basis)
         for  cf in cfList   if  cf in confList   nothing   else   push!(confList, cf)      end      end
     end
     cList = copy(confList);   initialNoElectrons = multiplets[1].levels[1].basis.NoElectrons
@@ -700,11 +708,8 @@ function generateConfigurationList(multiplets::Array{Multiplet,1}, further::Int6
     for  fur = 1:further+1
         newConfList = Configuration[]
         for conf  in cList
-            holeList = Basics.determineHoleShells(conf)
-            for  holeShell in holeList
-                wa = generateConfigurationsWith1OuterHole(conf,  holeShell);   append!(newConfList, wa)
-                wa = generateConfigurationsWith2OuterHoles(conf, holeShell);   append!(newConfList, wa)
-            end
+            wa = Basics.generateConfigurations(Basics.ForPhotoEmission(), [conf]);   append!(newConfList, wa)
+            wa = Basics.generateConfigurations(Basics.ForAutoIonization(), [conf]);  append!(newConfList, wa)
         end
         newConfList = unique(newConfList)
         cList = newConfList
@@ -722,221 +727,17 @@ end
 
 
 """
-`Cascade.generateConfigurationsWith1OuterHole(conf,  holeShell)`  
-    ... generates all possible (decay) configurations where the hole in holeShell is moved 'outwards'. 
-        A confList::Array{Configuration,1} is returned.
-"""
-function generateConfigurationsWith1OuterHole(conf::Configuration,  holeShell::Shell)
-    shList = Basics.generate("shells: ordered list for NR configurations", [conf]);   i0 = 0
-    for  i = 1:length(shList)
-        if   holeShell == shList[i]    i0 = i;    break    end
-    end
-    @show conf, holeShell
-    @show shList
-    if  i0 == 0   error("stop a")   end
-    #
-    # Now move the hole 'outwards'
-    confList = Configuration[]
-    for  i = i0+1:length(shList)
-        if  haskey(conf.shells, shList[i])  &&  conf.shells[ shList[i] ] >= 1  
-            newshells = copy( conf.shells )
-            newshells[ shList[i] ] = newshells[ shList[i] ] - 1
-            newshells[ holeShell ] = newshells[ holeShell ] + 1
-            if  newshells[ holeShell ]  >  2*(2*holeShell.l + 1)    continue    end
-            push!(confList, Configuration( newshells, conf.NoElectrons ) )
-        end
-    end
-
-    return( confList )
-end
-
-
-"""
-`Cascade.generateConfigurationsWith1OuterHole(configs::Array{Configuration,1},  holeShells::Array{Shell,1})`  
-    ... generates all possible (decay) configurations where one hole from holeShells is moved 'outwards'. 
-        A confList::Array{Configuration,1} is returned.
-"""
-function generateConfigurationsWith1OuterHole(configs::Array{Configuration,1},  holeShells::Array{Shell,1})
-    nconfList = Configuration[]
-    for  conf in configs
-        for  shell in holeShells
-            dcs = Cascade.generateConfigurationsWith1OuterHole(conf, shell)
-            append!(nconfList, dcs)
-        end
-    end
-    nconfList = unique(nconfList)
-    return(nconfList)
-end
-
-
-#==
-"""
-`Cascade.generateConfigurationsWith2OuterHoles(conf,  holeShell)`  
-    ... generates all possible (decay) configurations where the hole in holeShell is moved 'outwards'. 
-        A confList::Array{Configuration,1} is returned.
-"""
-function generateConfigurationsWith2OuterHoles(conf::Configuration,  holeShell::Shell)
-        shList = Basics.generate("shells: ordered list for NR configurations", [conf]);   i0 = 0
-        for  i = 1:length(shList)
-            if   holeShell == shList[i]    i0 = i;    break    end
-        end
-        if  i0 == 0   error("stop a")   end
-        #
-        # Now move the hole 'outwards'
-        confList = Configuration[]
-        for  i = i0+1:length(shList)
-            if  haskey(conf.shells, shList[i])  &&  conf.shells[ shList[i] ] >= 2  
-                newshells = copy( conf.shells )
-                newshells[ shList[i] ] = newshells[ shList[i] ] - 2
-                newshells[ holeShell ] = newshells[ holeShell ] + 1
-                if  newshells[ holeShell ]  >  2*(2*holeShell.l + 1)    continue    end
-                push!(confList, Configuration( newshells, conf.NoElectrons - 1 ) )
-            end
-            #
-            for  j = i0+1:length(shList)
-                if  i != j   &&   haskey(conf.shells, shList[i])  &&  conf.shells[ shList[i] ] >= 1   &&
-                                haskey(conf.shells, shList[j])  &&  conf.shells[ shList[j] ] >= 1 
-                    newshells = copy( conf.shells )
-                    newshells[ shList[i] ] = newshells[ shList[i] ] - 1
-                    newshells[ shList[j] ] = newshells[ shList[j] ] - 1
-                    newshells[ holeShell ] = newshells[ holeShell ] + 1
-                    if  newshells[ holeShell ]  >  2*(2*holeShell.l + 1)    continue    end
-                    push!(confList, Configuration( newshells, conf.NoElectrons - 1 ) )
-                end
-            end
-        end
-    #
-
-    return( confList )
-end                          ==#
-
-
-"""
-`Cascade.generateConfigurationsWith2OuterHoles(conf,  holeShell)`  
-    ... generates all possible (decay) configurations where the hole in holeShell is moved 'outwards'. 
-        A confList::Array{Configuration,1} is returned.
-"""
-function generateConfigurationsWith2OuterHoles(conf::Configuration,  holeShell::Shell)
-    shList = Basics.generate("shells: ordered list for NR configurations", [conf]);    i0 = 0
-    if  !(holeShell in shList)     error("stop a")   end
-    #
-    for  (i,shell) in enumerate(shList)
-        if   holeShell == shell    i0 = i;    break    end
-    end
-    #
-    holes = Tuple{Int64, Int64}[]
-    for  i = i0+1:length(shList)
-        for  j = i:length(shList)   push!(holes, (i,j))     end
-    end
-    # Now create configurations with the new holes
-    confList       = Configuration[]
-    #
-    for (i,j) in holes
-        shells = copy(conf.shells)
-        shells[holeShell] = shells[holeShell] + 1       # fill holeShell by an electron
-        if  shells[holeShell]  >  2*(2*holeShell.l + 1) continue   end
-        if  shells[ shList[i] ] - 1             < 0     continue   end
-        if  shells[ shList[j] ] - 1             < 0     continue   end
-        if  i == j  &&  shells[ shList[i] ] - 2 < 0     continue   end
-        shells[ shList[i] ] = shells[ shList[i] ] - 1
-        shells[ shList[j] ] = shells[ shList[j] ] - 1
-        #
-        push!(confList, Configuration(shells, conf.NoElectrons - 1))
-    end
-    #
-
-    return( confList )
-end
-
-
-"""
-`Cascade.generateConfigurationsWith2OuterHoles(configs::Array{Configuration,1},  holeShells::Array{Shell,1})`  
-    ... generates all possible (decay) configurations where two holes from holeShells are moved 'outwards'. 
-        A confList::Array{Configuration,1} is returned.
-"""
-function generateConfigurationsWith2OuterHoles(configs::Array{Configuration,1},  holeShells::Array{Shell,1})
-    nconfList = Configuration[]
-    for  conf in configs
-        for  shell in holeShells
-            dcs = Cascade.generateConfigurationsWith2OuterHoles(conf, shell)
-            append!(nconfList, dcs)
-        end
-    end
-    nconfList = unique(nconfList)
-    return(nconfList)
-end
-
-
-
-"""
-`Cascade.groupDisplayConfigurationList(Z::Float64, confs::Array{Configuration,1}; sa::String="")` 
-    ... group & display the configuration list into sublists with the same No. of electrons; this lists are displayed together 
-        with an estimated total energy. An ordered confList::Array{Configuration,1} is returned with configurations of decreasing
-        number of electrons.
-"""
-function groupDisplayConfigurationList(Z::Float64, confs::Array{Configuration,1}; sa::String="")
-    minNoElectrons = 1000;   maxNoElectrons = 0  
-    for  conf in confs
-        minNoElectrons = min(minNoElectrons, conf.NoElectrons)
-        maxNoElectrons = max(maxNoElectrons, conf.NoElectrons)
-    end
-    #
-    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
-    #
-    println("\n* Electron configuration(s) used:    " * sa)
-    ## @warn "*** Limit to just 4 configurations for each No. of electrons. ***"                       ## delete nxx
-    if  printSummary   println(iostream, "\n* Electron configuration(s) used:    " * sa)    end
-    confList = Configuration[];   nc = 0
-    for  n = maxNoElectrons:-1:minNoElectrons
-        nxx = 0                                                                                        ## delete nxx
-        println("\n  Configuration(s) with $n electrons:")
-        if  printSummary   println(iostream, "\n    Configuration(s) with $n electrons:")      end
-        nd = 0
-        for  conf in confs  nd = max(nd, length("      " * string(conf)))   end
-        for  conf in confs
-            if n == conf.NoElectrons  
-                ## nxx = nxx + 1;    if nxx > 4   break    end                                         ## delete nxx
-                nc = nc + 1
-                push!(confList, conf ) 
-                ##x wa = Semiempirical.estimate("binding energy: XrayDataBooklet", round(Int64, Z), conf);  
-                wa = -Empirical.totalEnergy(round(Int64, Z), conf, data = PeriodicTable.XrayDataBooklet() )
-                wa = Defaults.convertUnits("energy: from atomic", wa)
-                ##x if  Z > 36.0    wa = 0.
-                ##x else            wa = Semiempirical.estimate("binding energy: XrayDataBooklet", round(Int64, Z), conf);    
-                ##x                 wa = Defaults.convertUnits("energy: from atomic", wa)
-                ##x end
-                sb = "   av. BE = "  * string( round(-wa) ) * "  " * TableStrings.inUnits("energy")
-                sd = "      " * string(conf) * "                                "
-                println(sd[1:nd+3] * sb * "      ($nc)" )
-                if  printSummary   println(iostream, sd[1:nd+3] * sb * "      ($nc)")      end
-            end  
-        end
-    end
-    
-    println("\n  A total of $nc configuration have been defined for this " * sa * "cascade, and selected configurations could be " *
-            "removed here:  [currently not supported]")
-    if  printSummary   println(iostream, "\n* A total of $nc configuration have been defined for this cascade, and selected " *
-                                            "configurations could be removed here:  [currently not supported]")      end
-    return( confList )
-end
-
-
-"""
 `Cascade.modifySteps(stepList::Array{Cascade.Step,1})` 
     ... allows the user to modify the steps, for instance, by deleting selected steps of the cascade or by modifying the settings of
         one or several steps. A newStepList::Array{Cascade.Step,1} for which the transition data are eventually computed.
 """
 function modifySteps(stepList::Array{Cascade.Step,1})
-    #
     newStepList = Cascade.Step[]
-    #
     println("\n* Here, modify the individual steps explicitly in the code, if needed, ...... and just do it !!")
-    # 
     #  Delete individual steps from stepList
     #  if  i in [1,2,5, ...] modify the particular settings, etc.
     for  i = 1:length(stepList)
         step = stepList[i]
-        #
         if  i in []
             println("  Modify step $i :")
             newStep = Cascade.Step(step.process, step.settings, step.initialConfs, step.finalConfs, step.initialMultiplet, step.initialMultiplet)
@@ -945,10 +746,8 @@ function modifySteps(stepList::Array{Cascade.Step,1})
             push!(newStepList, step)
         end
     end
-    #
     # wa = [1,2,3]
     # delete from list
-    #
     println("\n  A total of $(length(newStepList)) steps are still defined in the cascade.")
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary   println(iostream, "\n* A total of $(length(newStepList)) steps are still defined in the cascade.")    end      

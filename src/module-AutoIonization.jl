@@ -1,23 +1,38 @@
 
 """
 `module  JAC.AutoIonization`  
-	... a submodel of JAC that contains all methods for computing Auger properties between two given initial- and final-state 
-        multiplets.
+	... a submodel of JAC that contains all methods for computing Auger properties between two given initial- and final-state multiplets.
 """
 module AutoIonization
 
 
-using  Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..InteractionStrength, ..ManyElectron, ..Nuclear, 
-               ..Radial, ..SpinAngular, ..TableStrings
+using  Printf, ..AngularMomentum, ..Basics, ..BiOrthogonal, ..Bsplines, ..Continuum, ..Defaults, ..InteractionStrength,
+               ..ManyElectron, ..Nuclear, ..Radial, ..SpinAngular, ..TableStrings
+
 
 """
 `struct  Settings  <:  AbstractProcessSettings`  ... defines a type for the details and parameters of computing Auger lines.
 
-    + calcAnisotropy      ::Bool               ... True, if the intrinsic alpha_2,4 angular parameters are to be 
-                                                    calculated, and false otherwise.
+    + calcAnisotropy      ::Bool               ... True, if the intrinsic alpha_2,4 angular parameters are to be calculated, and false
+                                                   otherwise.
     + calcTeAuger         ::Bool               
         ... True, if contributions of the two-electron Auger transitions are to be calculated, and false otherwise;
             this flag requires a proper (resonant) Green function that supports the TEA transitions.
+    + calcBiorthogonal    ::Bool
+        ... True, if the (bound) initial- and final-state multiplets are first brought into a bi-orthogonal
+            representation (`BiOrthogonal.computeTransformation`) before the free (Auger) electron orbital is
+            generated and the transition amplitudes are evaluated, and false (the default) otherwise. As for
+            PhotoIonization, this transforms ONLY the bound spectator orbitals shared between the N-electron
+            autoionizing initial multiplet and the (N-1)-electron final-ion multiplet -- the core relaxation
+            upon Auger decay -- and must be applied BEFORE the free electron is generated: the free-electron
+            partial wave is built fresh per line via `Continuum.generateOrbitalForLevel`, with the matching
+            "empty slot" on the initial side filled by `Basics.generateLevelWithExtraSubshell`'s dummy,
+            all-zero placeholder orbital; a transformation applied any later would LU-decompose a singular
+            per-kappa overlap matrix built partly from that placeholder. See PhotoIonization.Settings'
+            calcBiorthogonal docstring for the same reasoning in full, including the still-open question of
+            whether BiOrthogonal.computeTransformation is rigorously valid for the resulting N-vs-(N-1)
+            electron-count mismatch (empirically it runs and gives plausible results, but has not yet been
+            checked against an independent known-answer test).
     + printBefore         ::Bool               ... True, if all energies and lines are printed before their evaluation.
     + lineSelection       ::LineSelection      ... Specifies the selected levels, if any.
     + augerEnergyShift    ::Float64            ... An overall energy shift for all Auger (free-electron) energies.
@@ -30,66 +45,104 @@ using  Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..Interacti
     + gMultiplet          ::Multiplet      
         ... Mean-field multiplet of intermediate levels in the computations, sometimes referred to as
             (resonant) Green function.
+    + gCoreMultiplet      ::Multiplet      
+        ... Mean-field multiplet of the (N-1)-electron IONIC CORES of the CONTINUUM intermediate levels of the two-electron Auger sum, i.e.
+            of those intermediate states that carry one electron already in the continuum. An empty Multiplet() -- the default -- omits
+            that contribution and leaves the sum over bound intermediates (gMultiplet) alone. The two spaces are DISJOINT, since they are
+            the 16- and the (15 + 1 free)-electron parts of one complete intermediate set, and they add COHERENTLY; see
+            AutoIonization.computeTeaContinuumAmplitude.
+    + NoIntermediateEnergies ::Int64   
+        ... Number of quadrature points in the integral over the INTERMEDIATE electron energy, i.e. in the REGULAR part R(eps) of the
+            continuum branch; see AutoIonization.computeTeaRegularAmplitude. ZERO -- the default -- omits R(eps) entirely and leaves only
+            the delta piece, so that the field is opt-in and an existing computation is unchanged by its presence. It truncates a complete
+            set and is therefore a CONVERGENCE PARAMETER, not a tuning knob.
+    + intermediateEnergyFactor ::Float64
+        ... Factor by which the intermediate-energy range exceeds the energetically allowed maximum. It must EXCEED ONE: an intermediate
+            state is virtual, so its energy is not restricted by energy conservation, and the on-shell pole must lie strictly INSIDE the
+            interval or there is nothing to regularize. Like the point count it is a convergence parameter.
+    + continuumExchange   ::Union{Nothing,Bool}
+        ... True/false to force exchange between the free (Auger) electron and the bound electrons on or off; `nothing` --
+            the default -- lets `Basics.perform` decide automatically from the final-ion `AsfSettings.scField`
+            (`Continuum.resolveExchangeDefault`, item 99): on for `ALField`/`EOLField`, off otherwise. A caller of
+            `AutoIonization.computeLines` OUTSIDE `Basics.perform` that leaves this `nothing` gets `false`, the behaviour
+            this field did not change.
 """
 struct Settings  <:  AbstractProcessSettings
-    calcAnisotropy        ::Bool         
-    calcTeAuger           ::Bool               
-    printBefore           ::Bool 
-    lineSelection         ::LineSelection 
+    calcAnisotropy        ::Bool
+    calcTeAuger           ::Bool
+    calcBiorthogonal      ::Bool
+    printBefore           ::Bool
+    lineSelection         ::LineSelection
     augerEnergyShift      ::Float64
     minAugerEnergy        ::Float64
     maxAugerEnergy        ::Float64
     maxKappa              ::Int64
-    operator              ::AbstractEeInteraction 
-    gMultiplet            ::Multiplet      
-end 
+    operator              ::AbstractEeInteraction
+    gMultiplet            ::Multiplet
+    gCoreMultiplet        ::Multiplet
+    NoIntermediateEnergies ::Int64
+    intermediateEnergyFactor ::Float64
+    continuumExchange     ::Union{Nothing,Bool}
+end
 
 
 """
 `AutoIonization.Settings()`  ... constructor for the default values of AutoIonization line computations.
 """
 function Settings()
-    Settings(false, false, false, LineSelection(), 0., 0., 10e5, 100, CoulombInteraction(), Multiplet())
+    Settings(false, false, false, false, LineSelection(), 0., 0., 10e5, 100, CoulombInteraction(), Multiplet(), Multiplet(), 0, 3., nothing)
 end
 
 
 """
 `AutoIonization.Settings(set::AutoIonization.Settings;`
 
-        calcAnisotropy=..,      calcTeAuger..,              printBefore=..,         augerEnergyShift=.., 
-        minAugerEnergy=..,      maxAugerEnergy=..,          maxKappa=..,            operator=..,
-        gMultiplet=.. )
-                    
+        calcAnisotropy=..,      calcTeAuger..,              calcBiorthogonal=..,    printBefore=..,
+        augerEnergyShift=..,    minAugerEnergy=..,          maxAugerEnergy=..,      maxKappa=..,
+        operator=..,            gMultiplet=..,              gCoreMultiplet=..,
+        NoIntermediateEnergies=..,                          intermediateEnergyFactor=..,
+        continuumExchange=.. )
+
     ... constructor for modifying the given AutoIonization.Settings by 'overwriting' the previously selected parameters.
 """
-function Settings(set::AutoIonization.Settings;    
-    calcAnisotropy::Union{Nothing,Bool}=nothing,            calcTeAuger::Union{Nothing,Bool}=nothing,     
-    printBefore::Union{Nothing,Bool}=nothing,               lineSelection::Union{Nothing,LineSelection}=nothing,    
-    augerEnergyShift::Union{Nothing,Float64}=nothing,       
+function Settings(set::AutoIonization.Settings;
+    calcAnisotropy::Union{Nothing,Bool}=nothing,            calcTeAuger::Union{Nothing,Bool}=nothing,
+    calcBiorthogonal::Union{Nothing,Bool}=nothing,          printBefore::Union{Nothing,Bool}=nothing,
+    lineSelection::Union{Nothing,LineSelection}=nothing,
+    augerEnergyShift::Union{Nothing,Float64}=nothing,
     minAugerEnergy::Union{Nothing,Float64}=nothing,         maxAugerEnergy::Union{Nothing,Float64}=nothing,
-    maxKappa::Union{Nothing,Int64}=nothing,                 operator::Union{Nothing,String}=nothing,
-    gMultiplet::Union{Nothing,Multiplet}=nothing)  
-    
-    if  calcAnisotropy   == nothing   calcAnisotropyx    = set.calcAnisotropy    else  calcAnisotropyx    = calcAnisotropy    end 
-    if  calcTeAuger      == nothing   calcTeAugerx       = set.calcTeAuger       else  calcTeAugerx       = calcTeAuger       end 
-    if  printBefore      == nothing   printBeforex       = set.printBefore       else  printBeforex       = printBefore       end 
-    if  lineSelection    == nothing   lineSelectionx     = set.lineSelection     else  lineSelectionx     = lineSelection     end 
-    if  augerEnergyShift == nothing   augerEnergyShiftx  = set.augerEnergyShift  else  augerEnergyShiftx  = augerEnergyShift  end 
-    if  minAugerEnergy   == nothing   minAugerEnergyx    = set.minAugerEnergy    else  minAugerEnergyx    = minAugerEnergy    end 
-    if  maxAugerEnergy   == nothing   maxAugerEnergyx    = set.maxAugerEnergy    else  maxAugerEnergyx    = maxAugerEnergy    end 
-    if  maxKappa         == nothing   maxKappax          = set.maxKappa          else  maxKappax          = maxKappa          end 
-    if  operator         == nothing   operatorx          = set.operator          else  operatorx          = operator          end 
-    if  gMultiplet       == nothing   gMultipletx        = set.gMultiplet        else  gMultipletx        = gMultiplet        end 
+    maxKappa::Union{Nothing,Int64}=nothing,                 operator::Union{Nothing,AbstractEeInteraction}=nothing,
+    gMultiplet::Union{Nothing,Multiplet}=nothing,           gCoreMultiplet::Union{Nothing,Multiplet}=nothing,
+    NoIntermediateEnergies::Union{Nothing,Int64}=nothing,   intermediateEnergyFactor::Union{Nothing,Float64}=nothing,
+    continuumExchange::Union{Nothing,Bool}=nothing)
 
-    Settings( calcAnisotropyx, calcTeAugerx, printBeforex, lineSelectionx, augerEnergyShiftx, 
-              minAugerEnergyx, maxAugerEnergyx, maxKappax, operatorx, gMultipletx)
+    if  isnothing(calcAnisotropy)     calcAnisotropyx    = set.calcAnisotropy    else  calcAnisotropyx    = calcAnisotropy    end
+    if  isnothing(calcTeAuger)        calcTeAugerx       = set.calcTeAuger       else  calcTeAugerx       = calcTeAuger       end
+    if  isnothing(calcBiorthogonal)   calcBiorthogonalx  = set.calcBiorthogonal  else  calcBiorthogonalx  = calcBiorthogonal  end
+    if  isnothing(printBefore)        printBeforex       = set.printBefore       else  printBeforex       = printBefore       end
+    if  isnothing(lineSelection)      lineSelectionx     = set.lineSelection     else  lineSelectionx     = lineSelection     end
+    if  isnothing(augerEnergyShift)   augerEnergyShiftx  = set.augerEnergyShift  else  augerEnergyShiftx  = augerEnergyShift  end
+    if  isnothing(minAugerEnergy)     minAugerEnergyx    = set.minAugerEnergy    else  minAugerEnergyx    = minAugerEnergy    end
+    if  isnothing(maxAugerEnergy)     maxAugerEnergyx    = set.maxAugerEnergy    else  maxAugerEnergyx    = maxAugerEnergy    end
+    if  isnothing(maxKappa)           maxKappax          = set.maxKappa          else  maxKappax          = maxKappa          end
+    if  isnothing(operator)           operatorx          = set.operator          else  operatorx          = operator          end
+    if  isnothing(gMultiplet)         gMultipletx        = set.gMultiplet        else  gMultipletx        = gMultiplet        end
+    if  isnothing(gCoreMultiplet)     gCoreMultipletx    = set.gCoreMultiplet    else  gCoreMultipletx    = gCoreMultiplet    end
+    if  isnothing(NoIntermediateEnergies)     NoIntermediateEnergiesx   = set.NoIntermediateEnergies    else  NoIntermediateEnergiesx   = NoIntermediateEnergies    end
+    if  isnothing(intermediateEnergyFactor)   intermediateEnergyFactorx = set.intermediateEnergyFactor  else  intermediateEnergyFactorx = intermediateEnergyFactor  end
+    if  isnothing(continuumExchange)          continuumExchangex        = set.continuumExchange         else  continuumExchangex        = continuumExchange         end
+
+    Settings( calcAnisotropyx, calcTeAugerx, calcBiorthogonalx, printBeforex, lineSelectionx, augerEnergyShiftx,
+              minAugerEnergyx, maxAugerEnergyx, maxKappax, operatorx, gMultipletx, gCoreMultipletx,
+              NoIntermediateEnergiesx, intermediateEnergyFactorx, continuumExchangex)
 end
 
 
 # `Base.show(io::IO, settings::AutoIonization.Settings)`  ... prepares a proper printout of the variable settings::AutoIonization.Settings.
-function Base.show(io::IO, settings::AutoIonization.Settings) 
+function Base.show(io::IO, settings::AutoIonization.Settings)
     println(io, "calcAnisotropy:                $(settings.calcAnisotropy)  ")
     println(io, "calcTeAuger:                   $(settings.calcTeAuger)  ")
+    println(io, "calcBiorthogonal:              $(settings.calcBiorthogonal)  ")
     println(io, "printBefore:                   $(settings.printBefore)  ")
     println(io, "lineSelection:                 $(settings.lineSelection)  ")
     println(io, "augerEnergyShift:              $(settings.augerEnergyShift)  ")
@@ -98,6 +151,10 @@ function Base.show(io::IO, settings::AutoIonization.Settings)
     println(io, "maxKappa:                      $(settings.maxKappa)  ")
     println(io, "operator:                      $(settings.operator)  ")
     println(io, "gMultiplet.name:               $(settings.gMultiplet.name)  ")
+    println(io, "gCoreMultiplet.name:           $(settings.gCoreMultiplet.name)  ")
+    println(io, "NoIntermediateEnergies:        $(settings.NoIntermediateEnergies)  ")
+    println(io, "intermediateEnergyFactor:      $(settings.intermediateEnergyFactor)  ")
+    println(io, "continuumExchange:             $(settings.continuumExchange)  ")
 end
 
 
@@ -130,34 +187,41 @@ end
 
 
 """
-`struct  Channel`   
-    ... defines a type for a AutoIonization channel to help characterize a scattering (continuum) state of many 
-        electron-states with a single free electron.
+`struct  AutoIonization.PartialWave`
+    ... ONE partial wave of the emitted Auger electron, and its amplitude.
 
-    + kappa          ::Int64                ... partial-wave of the free electron
-    + symmetry       ::LevelSymmetry        ... total angular momentum and parity of the scattering state
-    + phase          ::Float64              ... phase of the partial wave
-    + amplitude      ::Complex{Float64}     ... Auger amplitude associated with the given channel.
+    + kappa          ::Int64                ... partial wave of the free electron.
+    + energy         ::Float64              ... energy of the free electron.
+    + phase          ::Float64              ... scattering phase; a property of (energy, kappa).
+    + amplitude      ::Complex{Float64}     ... Auger amplitude of this partial wave.
+
+        `amplitude` is a plain Complex{Float64} and deliberately NOT an EmPropertyC. The Coulomb-Breit operator has no gauge;
+        `settings.operator` selects CoulombInteraction() or BreitInteraction(), which is a choice of OPERATOR, not a pair of representations
+        computed together. An EmPropertyC here would assert that two gauges exist. (Measured: this module contains no occurrence of
+        `EmProperty` or `gauge` at all.)
 """
-struct  Channel
+struct  PartialWave
     kappa            ::Int64
-    symmetry         ::LevelSymmetry
+    energy           ::Float64
     phase            ::Float64
     amplitude        ::Complex{Float64}
 end
 
 
 """
-`struct  Line`  
-    ... defines a type for a AutoIonization line that may include the definition of sublines and their 
-        corresponding amplitudes.
+`struct  AutoIonization.Line`
+    ... defines a type for an Auger transition between an initial (autoionizing) and a final level, and carries the emitted electron as a
+        list of partial waves; the total rate and the intrinsic angular parameter of the line are stored alongside them.
 
-    + initialLevel   ::Level           ... initial-(state) level
-    + finalLevel     ::Level           ... final-(state) level
-    + electronEnergy ::Float64         ... Energy of the (incoming free) electron.
-    + totalRate      ::Float64         ... Total rate of this line.
-    + angularAlpha   ::Float64         ... Angular alpha_2 coefficient.
-    + channels       ::Array{AutoIonization.Channel,1}  ... List of AutoIonization channels of this line.
+    + initialLevel   ::Level                            ... initial-(state) level
+    + finalLevel     ::Level                            ... final-(state) level
+    + electronEnergy ::Float64                          ... Energy of the emitted Auger electron.
+    + totalRate      ::Float64                          ... Total rate of this line.
+    + angularAlpha   ::Float64                          ... Intrinsic angular parameter alpha_2.
+    + partialWaves   ::Array{PartialWave,1}       ... one entry per partial wave of the free electron.
+
+        The total symmetry of the scattering state is NOT stored: it is LevelSymmetry(initialLevel.J, initialLevel.parity) for every partial
+        wave, and it is recomputed where needed as LevelSymmetry(line.initialLevel.J, line.initialLevel.parity).
 """
 struct  Line
     initialLevel     ::Level
@@ -165,45 +229,33 @@ struct  Line
     electronEnergy   ::Float64
     totalRate        ::Float64
     angularAlpha     ::Float64
-    channels         ::Array{AutoIonization.Channel,1}
-end 
-
-
-"""
-`AutoIonization.Line(initialLevel::Level, finalLevel::Level, totalRate::Float64)`  
-    ... constructor for an AutoIonization line between a specified initial and final level.
-"""
-function Line(initialLevel::Level, finalLevel::Level, totalRate::Float64)
-    Line(initialLevel, finalLevel, 0., totalRate, 0., false, AutoIonization.Channel[])
+    partialWaves     ::Array{PartialWave,1}
 end
 
 
-# `Base.show(io::IO, line::AutoIonization.Line)`  ... prepares a proper printout of the variable line::AutoIonization.Line.
-function Base.show(io::IO, line::AutoIonization.Line) 
-    println(io, "initialLevel:           $(line.initialLevel)  ")
-    println(io, "finalLevel:             $(line.finalLevel)  ")
-    println(io, "electronEnergy:         $(line.electronEnergy)  ")
-    println(io, "totalRate:              $(line.totalRate)  ")
-    println(io, "angularAlpha:           $(line.angularAlpha)  ")
-    println(io, "channels:               $(line.channels)  ")
-end
-
+#################################################################################################################################
+#################################################################################################################################
 
 """
-`AutoIonization.amplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel, continuumLevel::Level, initialLevel::Level, 
-                            grid::Radial.Grid; printout::Bool=true)`  
-    ... to compute the kind in  CoulombInteraction(), BreitInteraction(), CoulombBreit(), CoulombGaunt()   Auger amplitude 
-        <(alpha_f J_f, kappa) J_i || O^(Auger, kind) || alpha_i J_i>  due to the interelectronic interaction for the given 
-        final and initial level. A value::ComplexF64 is returned.
+`AutoIonization.amplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level, initialLevel::Level,
+                            grid::Radial.Grid; printout::Bool=true)`
+    ... to compute the kind in  CoulombInteraction(), BreitInteraction(), CoulombBreit(), CoulombGaunt()   Auger amplitude <(alpha_f J_f,
+        kappa) J_i || O^(Auger, kind) || alpha_i J_i>  due to the interelectronic interaction for the given final and initial level. A
+        value::ComplexF64 is returned.
+
+        THIS IS THE OUTGOING-WAVE (decay) amplitude, and its phase convention belongs to that direction: the real reduced matrix element is
+        multiplied by i^l exp(-i phase).  For the reverse, i.e. for the DIELECTRONIC CAPTURE of a free electron, do NOT take the complex
+        conjugate of this value -- use `AutoIonization.captureAmplitude`, whose docstring explains why the two differ by (-1)^l and when
+        that matters.
 """
-function amplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel, continuumLevel::Level, initialLevel::Level, grid::Radial.Grid; 
+function amplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level, initialLevel::Level, grid::Radial.Grid; 
                     printout::Bool=true)
-    nt = length(continuumLevel.basis.csfs);    ni = length(initialLevel.basis.csfs);    partial = Subshell(9,channel.kappa)
+    nt = length(continuumLevel.basis.csfs);    ni = length(initialLevel.basis.csfs);    partial = Subshell(9,kappa)
     if  printout  printstyled("Compute ($kind) Auger matrix of dimension $nt x $ni in the continuum- and initial-state bases " *
                                 "for the transition [$(initialLevel.index)- ...] and for partial wave $(string(partial)[2:end]) ... ", 
                                 color=:light_green)    end
     matrix = zeros(ComplexF64, nt, ni)
-    #
+
     if  initialLevel.basis.subshells == continuumLevel.basis.subshells
         iLevel = initialLevel;   cLevel = continuumLevel
     else
@@ -212,28 +264,20 @@ function amplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel,
         iLevel    = Level(initialLevel, subshells)
         cLevel    = Level(continuumLevel, subshells)
     end
-    #
-    if      typeof(kind) in [ CoulombInteraction, BreitInteraction, CoulombBreit, CoulombGaunt]        ## pure V^Coulomb interaction
+
+    if      typeof(kind) in [ CoulombInteraction, BreitInteraction, CoulombBreit, CoulombGaunt]        # pure V^Coulomb interaction
     #------------------------------------------------------------------------------------------
         for  r = 1:nt
             for  s = 1:ni
                 if  iLevel.basis.csfs[s].J != iLevel.J  ||  iLevel.basis.csfs[s].parity != iLevel.parity      continue    end 
                     # Calculate the spin-angular coefficients
-                if  Defaults.saRatip()
-                    waR = compute("angular coefficients: e-e, Ratip2013", continuumLevel.basis.csfs[r], initialLevel.basis.csfs[s])
-                    wa  = waR       
-                end
                 if  Defaults.saGG()
                         subshellList = cLevel.basis.subshells
-                    opa  = SpinAngular.TwoParticleOperator(0, plus, true)
+                    opa  = SpinAngular.TwoParticleOperator(0, plus)
                     waG2 = SpinAngular.computeCoefficients(opa, cLevel.basis.csfs[r], iLevel.basis.csfs[s], subshellList)
                     wa   = [1.0, waG2]
                 end
-                if  Defaults.saRatip() && Defaults.saGG() && true
-                    if  length(waR[2]) != 0     println("\n>> Angular coeffients from Ratip2013   = $(waR[2]) ")    end
-                    if  length(waG2)   != 0     println(  ">> Angular coeffients from SpinAngular = $waG2 ")        end
-                end
-                #
+
                 me = 0.
                 for  coeff in wa[2]
                     if   typeof(kind) in [ CoulombInteraction, CoulombBreit, CoulombGaunt]    
@@ -250,305 +294,444 @@ function amplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel,
         end 
         if  printout  printstyled("done. \n", color=:light_green)    end
         amplitude = transpose(cLevel.mc) * matrix * iLevel.mc 
-        amplitude = im^Basics.subshell_l(Subshell(101, channel.kappa)) * exp( -im*channel.phase ) * amplitude
-        #
-        #
+        amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( -im*phase ) * amplitude
+
+
         elseif  kind == "H-E"
     #--------------------
         iLevel = finalLevel;   fLevel = initialLevel
         amplitude = 0.;    error("stop a")
     else    error("stop b")
     end
-    
+
     return( amplitude )
 end
 
 
 """
-`AutoIonization.channelAmplitude(kind::String, channel::AutoIonization.Channel, energy::Float64, finalLevel::Level, 
-                                    initialLevel::Level, grid::Radial.Grid)`  
-    ... to compute the kind = (CoulombInteraction(), BreitInteraction(), CoulombBreit(), CoulombGaunt())   Auger amplitude  
-        <(alpha_f J_f, kappa) J_i || O^(Auger, kind) || alpha_i J_i>  due to the interelectronic interaction for the given final and 
-        initial level. A newChannel::AutoIonization.Channel is returned.
-"""
-function channelAmplitude(kind::String, channel::AutoIonization.Channel, energy::Float64, finalLevel::Level, 
-                            initialLevel::Level, grid::Radial.Grid)
-    newiLevel = Basics.generateLevelWithSymmetryReducedBasis(initialLevel, initialLevel.basis.subshells)
-    newiLevel = Basics.generateLevelWithExtraSubshell(Subshell(101, channel.kappa), newiLevel)
-    newfLevel = Basics.generateLevelWithSymmetryReducedBasis(finalLevel, finalLevel.basis.subshells)
-    cOrbital, phase  = Continuum.generateOrbital(energy, Subshell(101, channel.kappa), newfLevel, grid, contSettings)
-    newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newfLevel)
-    newChannel = AutoIonization.Channel(channel.kappa, channel.symmetry, phase, 0.)
-    amplitude = AutoIonization.amplitude(kind, channel, newcLevel, newiLevel, grid)
+`AutoIonization.captureAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level, initialLevel::Level,`
+                                 `grid::Radial.Grid; printout::Bool=true)`
+    ... to compute the DIELECTRONIC-CAPTURE amplitude <alpha_i J_i || O^(capture, kind) || (alpha_f J_f, kappa) J_i>, i.e. the amplitude for
+        the reverse of the Auger decay computed by `AutoIonization.amplitude`, in the INCOMING-WAVE convention.  A value::ComplexF64 is
+        returned.
 
-    newChannel = AutoIonization.Channel(newChannel.kappa, newChannel.symmetry, newChannel.phase, amplitude)    
-    return( newChannel )
+        WHY THIS EXISTS, AND WHY conj(amplitude) IS NOT IT.  A continuum orbital in JAC is real; the physics of a given direction sits in
+        the phase factor that each caller attaches to it, and JAC does not use one convention throughout:
+
+            AutoIonization.amplitude       multiplies the real reduced matrix element by  i^l exp(-i phase)   (outgoing wave)
+            PhotoRecombination.amplitude   multiplies its own reduced matrix element by   i^l exp(+i phase)   (incoming wave)
+
+        The capture amplitude has to describe the SAME scattering state |c> = i^l exp(+i phase)|real orbital> that a recombination amplitude
+        describes, so it is the Auger amplitude with its phase factor turned round,
+
+            captureAmplitude = amplitude * exp(2 i phase)  =  i^l exp(+i phase) * M   with M real,
+
+        whereas  conj(amplitude) = (-i)^l exp(+i phase) * M  differs from it by (-1)^l.
+
+        That factor is harmless in any quantity that squares the amplitude, which is why `ElectronCapture.amplitude` may take the conjugate
+        and still obtain correct capture RATES, and why the discrepancy went unnoticed.  It is NOT harmless when a capture amplitude is
+        added COHERENTLY to another amplitude -- as in the interference of dielectronic with radiative recombination -- because (-1)^l
+        depends on the partial wave and therefore reweights the partial waves against one another inside the coherent sum rather than
+        producing an overall sign.  Use this function, and not a conjugate, whenever the result is to be added to something rather than
+        squared.
+"""
+function captureAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level, initialLevel::Level,
+                          grid::Radial.Grid; printout::Bool=true)
+    wa = AutoIonization.amplitude(kind, kappa, phase, continuumLevel, initialLevel, grid; printout=printout) * exp( 2im * phase )
+
+    return( wa )
 end
 
 
 """
-`AutoIonization.computeAmplitudesProperties(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64, 
-                                            settings::AutoIonization.Settings; printout::Bool=true)` 
-    ... to compute all amplitudes and properties of the given line; a line::AutoIonization.Line is returned for which the amplitudes 
-        and properties are now evaluated.
+`AutoIonization.amplitudeForPhotoionizationConvention(kind::AbstractEeInteraction, kappa::Int64, phase::Float64,
+                                                      continuumLevel::Level, initialLevel::Level, grid::Radial.Grid;
+                                                      printout::Bool=true)`
+    ... to compute the SAME outgoing-wave Auger decay amplitude as `AutoIonization.amplitude`, but with the real reduced matrix
+        element multiplied by i^(-l) exp(-i phase) -- `PhotoIonization.amplitude`'s own continuum-phase convention -- rather than
+        this module's native i^(+l) exp(-i phase). A value::ComplexF64 is returned.
+
+        WHY THIS EXISTS, AND WHY A PLAIN CALL TO `amplitude` IS NOT IT. Both conventions share the SAME phase factor exp(-i phase)
+        -- both describe an OUTGOING continuum electron -- but differ in the l-PREFACTOR: i^(+l) here against i^(-l) there, a
+        mismatch of i^(2l) = (-1)^l. That factor is harmless in any quantity that squares the amplitude (an ordinary Auger rate,
+        for instance), which is why it is easy to miss; it is NOT harmless when this amplitude is added COHERENTLY to a
+        `PhotoIonization` amplitude reaching the same (f, kappa) channel, as in `PhotoIonizationInterference`, because (-1)^l
+        depends on the partial wave and therefore reweights the partial waves against one another inside the coherent sum. This is
+        the exact counterpart, for photoionization, of why `AutoIonization.captureAmplitude` exists for recombination -- there the
+        two conventions differ in the PHASE (exp(+i phase) against exp(-i phase)); here they differ in the L-PREFACTOR instead,
+        so the fix is a real sign (-1)^l rather than a phase rotation exp(2i phase).
 """
-function computeAmplitudesProperties(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64, 
-                                        settings::AutoIonization.Settings; printout::Bool=true) 
-    newChannels = AutoIonization.Channel[];   contSettings = Continuum.Settings(false, nrContinuum);   rate = 0.
-    # Define a common subshell list for both multiplets
-    subshellList = Basics.generate("subshells: ordered list for two bases", line.finalLevel.basis, line.initialLevel.basis)
-    Defaults.setDefaults("relativistic subshell list", subshellList; printout=false)
-    
-    for channel in line.channels
-        newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshellList)
-        newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, subshellList)
-        newiLevel = Basics.generateLevelWithExtraSubshell(Subshell(101, channel.kappa), newiLevel)
-        cOrbital, phase  = Continuum.generateOrbitalForLevel(line.electronEnergy, Subshell(101, channel.kappa), newfLevel, nm, grid, contSettings)
-        newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newfLevel)
-        newChannel = AutoIonization.Channel(channel.kappa, channel.symmetry, phase, 0.)
-        amplitude  = AutoIonization.amplitude(settings.operator, newChannel, newcLevel, newiLevel, grid, printout=printout)
+function amplitudeForPhotoionizationConvention(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level,
+                                               initialLevel::Level, grid::Radial.Grid; printout::Bool=true)
+    wa = AutoIonization.amplitude(kind, kappa, phase, continuumLevel, initialLevel, grid; printout=printout)
+    l  = Basics.subshell_l(Subshell(101, kappa))
+
+    return( wa * (-1)^l )
+end
+
+
+"""
+`AutoIonization.amplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level,
+                          initialLevel::Level, grid::Radial.Grid, plasmaModel::Basics.AbstractPlasmaModel; printout::Bool=true)`
+    ... to compute the Auger amplitude as AutoIonization.amplitude(...) above, but with the electron-electron Coulomb interaction
+        Debye-Hueckel-screened according to the given plasma model (InteractionStrength.XL_Coulomb_DH in place of XL_Coulomb) -- the plasma
+        parameters thereby enter the transition operator itself, not only the level energies. Only kind = CoulombInteraction() is supported,
+        consistent with Basics.compute(...,plasmaModel) which also excludes the Breit interaction from plasma computations. For plasmaModel
+        = Basics.NoPlasmaModel(), this delegates directly to the field-free method above, so that the computation of the standard
+        (field-free) Auger process is never touched by this plasma-specific code path. A value::ComplexF64 is returned.
+"""
+function amplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level, initialLevel::Level,
+                    grid::Radial.Grid, plasmaModel::Basics.AbstractPlasmaModel; printout::Bool=true)
+    if  typeof(plasmaModel) == Basics.NoPlasmaModel
+        return( AutoIonization.amplitude(kind, kappa, phase, continuumLevel, initialLevel, grid; printout=printout) )
+    end
+    typeof(plasmaModel) == Basics.DebyeHueckelModel  ||
+        error("Unsupported plasma model = $(plasmaModel)  (only Basics.DebyeHueckelModel is currently supported " *
+              "for the plasma-screened Auger amplitude).")
+    typeof(kind) == CoulombInteraction  ||
+        error("No Breit interaction supported for plasma computations; use kind = CoulombInteraction() for the " *
+              "plasma-screened Auger amplitude.")
+
+    nt = length(continuumLevel.basis.csfs);    ni = length(initialLevel.basis.csfs);    partial = Subshell(9,kappa)
+    if  printout  printstyled("Compute ($kind, Debye-Hueckel-screened) Auger matrix of dimension $nt x $ni in the " *
+                                "continuum- and initial-state bases for the transition [$(initialLevel.index)- ...] " *
+                                "and for partial wave $(string(partial)[2:end]) ... ", color=:light_green)    end
+    matrix = zeros(ComplexF64, nt, ni)
+
+    if  initialLevel.basis.subshells == continuumLevel.basis.subshells
+        iLevel = initialLevel;   cLevel = continuumLevel
+    else
+        subshells = Basics.merge(initialLevel.basis.subshells, continuumLevel.basis.subshells)
+        Defaults.setDefaults("relativistic subshell list", subshells; printout=false)
+        iLevel    = Level(initialLevel, subshells)
+        cLevel    = Level(continuumLevel, subshells)
+    end
+
+    for  r = 1:nt
+        for  s = 1:ni
+            if  iLevel.basis.csfs[s].J != iLevel.J  ||  iLevel.basis.csfs[s].parity != iLevel.parity      continue    end
+            if  Defaults.saGG()
+                subshellList = cLevel.basis.subshells
+                opa  = SpinAngular.TwoParticleOperator(0, plus)
+                waG2 = SpinAngular.computeCoefficients(opa, cLevel.basis.csfs[r], iLevel.basis.csfs[s], subshellList)
+                wa   = [1.0, waG2]
+            end
+            me = 0.
+            for  coeff in wa[2]
+                me = me + coeff.V * InteractionStrength.XL_Coulomb_DH(coeff.nu,
+                                        cLevel.basis.orbitals[coeff.a], cLevel.basis.orbitals[coeff.b],
+                                        iLevel.basis.orbitals[coeff.c], iLevel.basis.orbitals[coeff.d], grid,
+                                        1/plasmaModel.debyeLength)
+            end
+            matrix[r,s] = me
+        end
+    end
+    if  printout  printstyled("done. \n", color=:light_green)    end
+    amplitude = transpose(cLevel.mc) * matrix * iLevel.mc
+    amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( -im*phase ) * amplitude
+
+    return( amplitude )
+end
+
+
+"""
+`AutoIonization.computeAmplitudesProperties(line::AutoIonization.Line, nm::Nuclear.Model,
+        grid::Radial.Grid, nrContinuum::Int64, settings::AutoIonization.Settings; printout::Bool=true,
+        nuclearPot::Union{Nothing,Radial.Potential}=nothing, primitives::Union{Nothing,Bsplines.Primitives}=nothing)`
+    ... computes the Auger amplitude of every partial wave of the given line and, from them, the total rate and -- if the settings ask for
+        it -- the intrinsic angular parameter alpha_2. The rate is summed INCOHERENTLY over the partial waves. The two keywords carry
+        the nuclear potential and the B-spline primitives, which are constant for a whole computation and are therefore passed in rather
+        than rebuilt per line. A newLine::AutoIonization.Line with all amplitudes and properties evaluated is returned.
+"""
+function computeAmplitudesProperties(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid,
+                                           nrContinuum::Int64, settings::AutoIonization.Settings; printout::Bool=true,
+                                           nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                           primitives::Union{Nothing,Bsplines.Primitives}=nothing)
+    newPartialWaves = AutoIonization.PartialWave[]
+    contSettings = Continuum.Settings(isnothing(settings.continuumExchange) ? false : settings.continuumExchange, nrContinuum)
+    rate = 0.
+    subshellList = Basics.generate(OrderedSubshellList(), line.finalLevel.basis, line.initialLevel.basis)
+    nucPot    = isnothing(nuclearPot) ? Nuclear.nuclearPotential(nm, grid) : nuclearPot
+    redILevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshellList)
+    newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel,   subshellList)
+    # The one total symmetry of the scattering state; see the note at PartialWave.
+    symi      = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
+
+    for  pw in line.partialWaves
+        newiLevel = Basics.generateLevelWithExtraSubshell(Subshell(101, pw.kappa), redILevel)
+        cOrbital, phase = Continuum.generateOrbitalForLevel(line.electronEnergy, Subshell(101, pw.kappa), newfLevel,
+                                                            nm, grid, contSettings; nuclearPot=nucPot,
+                                                            primitives=primitives)
+        newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, symi, newfLevel)
+        amplitude  = AutoIonization.amplitude(settings.operator, pw.kappa, phase, newcLevel, newiLevel, grid, printout=printout)
         # Calculate two-electron Auger (TEA) contributions if requested; write an extra note if the amplitude is non-zero
         if  settings.calcTeAuger
-            if  amplitude != ComplexF64(0.)     warn(">>> TEA contributions start from non-zero amplitude = $amplitude")    end
-            symc = channel.symmetry;    symi = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
-            println(">>> Normal Auger for ($symi --> $symc) transition with amplitude = $amplitude")    
-            amp = ComplexF64(0.);               
-            amp = AutoIonization.computeTeaAmplitude(settings.operator, newChannel, newcLevel, settings.gMultiplet, 
-                                                     newiLevel, grid, printout=printout)
-            amplitude  = amplitude + amp
+            if  amplitude != ComplexF64(0.)     @warn ">>> TEA contributions start from non-zero amplitude = $amplitude"    end
+            println(">>> Normal Auger for ($symi --> $symi) transition with amplitude = $amplitude")
+            amp = AutoIonization.computeTeaAmplitude(settings.operator, pw.kappa, phase, newcLevel, settings.gMultiplet,
+                                                     newiLevel, grid, nucPot, printout=printout)
+            amplitude = amplitude + amp
+            # The CONTINUUM intermediate states of the same second-order sum. They are the (15 + 1 free)-electron part of one
+            # complete intermediate set whose 16-electron part gMultiplet carries, so the two are disjoint and add COHERENTLY
+            # rather than one correcting the other; an empty gCoreMultiplet returns zero and leaves the bound sum alone.
+            ampC = AutoIonization.computeTeaContinuumAmplitude(settings.operator, pw.kappa, phase, line.electronEnergy, cOrbital,
+                                                               newfLevel, settings.gCoreMultiplet, newiLevel, grid, nucPot,
+                                                               printout=printout)
+            amplitude = amplitude + ampC
+            # The REGULAR part of the same continuum branch, in which the free electron PARTICIPATES rather than
+            # spectates. It is the other half of one exact split of the continuum step and is added coherently like
+            # the rest; settings.NoIntermediateEnergies = 0 returns zero and leaves the two pieces above alone.
+            ampR = AutoIonization.computeTeaRegularAmplitude(settings.operator, pw.kappa, phase, newcLevel,
+                                                             settings.gCoreMultiplet, newiLevel, nm, grid, nucPot, contSettings,
+                                                             settings.maxKappa, settings.NoIntermediateEnergies,
+                                                             settings.intermediateEnergyFactor, printout=printout)
+            amplitude = amplitude + ampR
         end
-        #            
+
         rate = rate + conj(amplitude) * amplitude
-        push!( newChannels, AutoIonization.Channel(newChannel.kappa, newChannel.symmetry, newChannel.phase, amplitude) )
+        push!(newPartialWaves, AutoIonization.PartialWave(pw.kappa, line.electronEnergy, phase, amplitude))
     end
-    totalRate = 2pi* rate;   angularAlpha = 0.
-    ##  Correct for energy normalization for Yasumasa (2022)
-    ##  if  line.electronEnergy < 2.0   totalRate = totalRate * (line.electronEnergy/2.0)^1.5     end
-    newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, angularAlpha, newChannels)
-    #
+    totalRate = 2pi * rate;    angularAlpha = 0.
+    newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate,
+                                          angularAlpha, newPartialWaves)
+
     if  settings.calcAnisotropy    angularAlpha = AutoIonization.computeIntrinsicAlpha(2, newLine)
-        newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, real(angularAlpha), newChannels)
+        newLine = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate,
+                                            real(angularAlpha), newPartialWaves)
     end
-    
+
     return( newLine )
 end
 
 
 """
-`AutoIonization.computeAmplitudesPropertiesPlasma(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64, 
-                                                  settings::AutoIonization.PlasmaSettings; printout::Bool=true)`  
-    ... to compute all amplitudes and properties of the given line but for the given plasma model; a line::AutoIonization.Line is returned 
-        for which the amplitudes and properties are now evaluated.
+`AutoIonization.computeAmplitudesPropertiesPlasma(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
+                                                  settings::AutoIonization.PlasmaSettings, plasmaModel::Basics.AbstractPlasmaModel;
+                                                  printout::Bool=true)`
+    ... to compute all amplitudes and properties of the given line but for the given plasma model; both the continuum orbital and the Auger
+        (e-e Coulomb) transition operator are screened according to plasmaModel, cf. Continuum.generateOrbitalForLevel(...,plasmaModel) and
+        AutoIonization.amplitude(...,plasmaModel). A line::AutoIonization.Line is returned for which the amplitudes and properties are now
+        evaluated.
 """
-function computeAmplitudesPropertiesPlasma(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64, 
-                                           settings::AutoIonization.PlasmaSettings; printout::Bool=true) 
-    newChannels = AutoIonization.Channel[];   contSettings = Continuum.Settings(false, nrContinuum);   rate = 0.
-    for channel in line.channels
-        newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, line.initialLevel.basis.subshells)
-        newiLevel = Basics.generateLevelWithExtraSubshell(Subshell(101, channel.kappa), newiLevel)
-        newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, line.finalLevel.basis.subshells)
-        @warn "Adapt a proper continuum orbital for the plasma potential"
-        cOrbital, phase  = Continuum.generateOrbitalForLevel(line.electronEnergy, Subshell(101, channel.kappa), newfLevel, nm, grid, contSettings)
-        newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newfLevel)
-        newChannel = AutoIonization.Channel(channel.kappa, channel.symmetry, phase, 0.)
-        @warn "Adapt a proper Auger amplitude for the plasma e-e interaction"
-        amplitude = 1.0
-        # amplitude  = AutoIonization.amplitude(settings.operator, newChannel, newcLevel, newiLevel, grid)
+function computeAmplitudesPropertiesPlasma(line::AutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
+                                           settings::AutoIonization.PlasmaSettings, plasmaModel::Basics.AbstractPlasmaModel;
+                                           printout::Bool=true)
+    newPartialWaves = AutoIonization.PartialWave[];   contSettings = Continuum.Settings(false, nrContinuum);   rate = 0.
+    # Define a common subshell list for both multiplets, as in the field-free computeAmplitudesProperties
+    subshellList = Basics.generate(OrderedSubshellList(), line.finalLevel.basis, line.initialLevel.basis)
+    # Display-only; set once by the driver, not here.  See Defaults.setStandardSubshellList. The one total symmetry of the scattering state:
+    # that of the level which autoionizes.
+    symi = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
+
+    for  pw in line.partialWaves
+        newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshellList)
+        newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, subshellList)
+        newiLevel = Basics.generateLevelWithExtraSubshell(Subshell(101, pw.kappa), newiLevel)
+        cOrbital, phase  = Continuum.generateOrbitalForLevel(line.electronEnergy, Subshell(101, pw.kappa), newfLevel,
+                                                              nm, grid, contSettings, plasmaModel)
+        newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, symi, newfLevel)
+        amplitude  = AutoIonization.amplitude(CoulombInteraction(), pw.kappa, phase, newcLevel, newiLevel, grid, plasmaModel; printout=printout)
         rate       = rate + conj(amplitude) * amplitude
-        push!( newChannels, AutoIonization.Channel(newChannel.kappa, newChannel.symmetry, newChannel.phase, amplitude) )
+        push!( newPartialWaves, AutoIonization.PartialWave(pw.kappa, line.electronEnergy, phase, amplitude) )
     end
     totalRate = 2pi* rate;   angularAlpha = 0.
-    newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, angularAlpha, newChannels)
-    
+    newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, angularAlpha, newPartialWaves)
+
     return( newLine )
 end
 
 
+"""
+`AutoIonization.computeIntrinsicAlpha(k::Int64, line::AutoIonization.Line)`
+    ... computes the intrinsic angular parameter alpha_k of the given line, which determines the anisotropy of the emitted Auger electrons;
+        a value::ComplexF64 is returned.
 
+        Pairs are formed ACROSS partial waves -- kappa and kappa' are independent, and that interference is the physical content of the
+        parameter. Within a pair, l and j belong to the outer partial wave and lp, jp to the inner one.
+
+        The `if false` block of the flat version -- an unfinished comparison against M. H. Chen, PRA 47 (1993) 3733, which "does not agree
+        exactly so far" -- is NOT carried over. It is dead code with a println, and the place to finish it is the flat function.
 """
-`AutoIonization.computeIntrinsicAlpha(k::Int64, line::AutoIonization.Line)`  
-    ... to compute the intrinsic alpha_k anisotropy parameter for the given line. A value::Float64 is returned.
-"""
-function  computeIntrinsicAlpha(k::Int64, line::AutoIonization.Line)
-    wn = 0.;    for  channel in line.channels    wn = wn + conj(channel.amplitude) * channel.amplitude   end
-    wa = 0.;    Ji = line.initialLevel.J;    Jf = line.finalLevel.J;
-    for  cha  in line.channels  
-        j = AngularMomentum.kappa_j(cha.kappa);    l = AngularMomentum.kappa_l(cha.kappa)
-        for  chp  in line.channels  
-            jp = AngularMomentum.kappa_j(chp.kappa);    lp = AngularMomentum.kappa_l(chp.kappa)
-            wa = wa + sqrt( AngularMomentum.bracket([l, lp, j, jp]) ) *  
+function computeIntrinsicAlpha(k::Int64, line::AutoIonization.Line)
+    wn = 0.;    for  pw in line.partialWaves    wn = wn + conj(pw.amplitude) * pw.amplitude    end
+    wa = 0.;    Ji = line.initialLevel.J;    Jf = line.finalLevel.J
+    for  pwa in line.partialWaves
+        j = AngularMomentum.kappa_j(pwa.kappa);    l = AngularMomentum.kappa_l(pwa.kappa)
+        for  pwb in line.partialWaves
+            jp = AngularMomentum.kappa_j(pwb.kappa);    lp = AngularMomentum.kappa_l(pwb.kappa)
+            wa = wa + sqrt( AngularMomentum.bracket([l, lp, j, jp]) ) *
                       AngularMomentum.ClebschGordan(l, AngularM64(0), lp, AngularM64(0), AngularJ64(k), AngularM64(0)) *
-                      AngularMomentum.Wigner_6j(Ji, j, Jf, jp, Ji, AngularJ64(k)) * 
-                      AngularMomentum.Wigner_6j(l,  j, AngularJ64(1//2), jp, lp, AngularJ64(k)) * 
-                        cha.amplitude * conj(chp.amplitude)
-        end    
-    end
-    value = AngularMomentum.phaseFactor([Ji, +1, Jf, +1, AngularJ64(k), -1, AngularJ64(1//2)]) * 
-            sqrt(Basics.twice(Ji) + 1) * wa / wn
-
-    if  false
-        # Calculate the value given by M.H. Chen, PRA 47 (1993) 3733; this does not agree exactly so far.
-        wa = 0.
-        for  cha  in line.channels  
-            j = AngularMomentum.kappa_j(cha.kappa);    l = AngularMomentum.kappa_l(cha.kappa);    phase = cha.phase
-            for  chp  in line.channels  
-                jp = AngularMomentum.kappa_j(chp.kappa);    lp = AngularMomentum.kappa_l(chp.kappa);    phasep = chp.phase
-                wa = wa + AngularMomentum.phaseFactor([Ji, +1, Jf, -1, AngularJ64(1//2)]) * im^(Float64(l) - Float64(lp)) * cos(phase - phasep) *
-                          sqrt( AngularMomentum.bracket([l, lp, j, jp, AngularJ64(k), Ji]) ) *  
-                          AngularMomentum.Wigner_3j(lp, l, AngularJ64(k), AngularJ64(0), AngularJ64(0), AngularJ64(0)) * 
-                          AngularMomentum.Wigner_6j(j, jp, AngularJ64(k), lp, l, AngularJ64(1//2)) * 
-                          AngularMomentum.Wigner_6j(Ji, Ji, AngularJ64(k), jp, j, Jf) * 
-                          cha.amplitude * conj(chp.amplitude)
-            end
+                      AngularMomentum.Wigner_6j(Ji, j, Jf, jp, Ji, AngularJ64(k)) *
+                      AngularMomentum.Wigner_6j(l,  j, AngularJ64(1//2), jp, lp, AngularJ64(k)) *
+                        pwa.amplitude * conj(pwb.amplitude)
         end
-        println("*** Comparison value = $value    Chen-value = $(wa/wn)")
     end
 
-    return( value )
+    return( AngularMomentum.phaseFactor([Ji, +1, Jf, +1, AngularJ64(k), -1, AngularJ64(1//2)]) *
+            sqrt(Basics.twice(Ji) + 1) * wa / wn )
 end
 
 
-
 """
-`AutoIonization.computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                settings::AutoIonization.Settings; output=true, printout::Bool=true)`  
-    ... to compute the Auger transition amplitudes and all properties as requested by the given settings. A list of 
-        lines::Array{AutoIonization.Lines} is returned.
+`AutoIonization.computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model,
+                                   grid::Radial.Grid, settings::AutoIonization.Settings; output=true, printout::Bool=true)`
+    ... computes the Auger amplitudes and all requested properties for the lines between the levels of the two given multiplets; this is the
+        standard entry point of this module. The continuum orbitals are generated on a shared nuclear potential and B-spline basis. A list
+        of lines::Array{AutoIonization.Line,1} is returned if output=true, and nothing otherwise.
 """
-function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                        settings::AutoIonization.Settings; output=true, printout::Bool=true)
+function computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                            settings::AutoIonization.Settings; output=true, printout::Bool=true)
+    if  settings.calcBiorthogonal
+        initialMultiplet, finalMultiplet = BiOrthogonal.computeTransformation(initialMultiplet, finalMultiplet, grid)
+    end
     println("")
     printstyled("AutoIonization.computeLines(): The computation of Auger rates and properties starts now ... \n", color=:light_green)
-    printstyled("------------------------------------------------------------------------------------------- \n", color=:light_green)
+    printstyled("-------------------------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
     lines = AutoIonization.determineLines(finalMultiplet, initialMultiplet, settings)
-    # Display all selected lines before the computations start
-    if  settings.printBefore    AutoIonization.displayLines(stdout, lines)    end  
-    # Determine maximum energy and check for consistency of the grid
+    # Display-only and the same for every line; set ONCE per computation, never from inside the line loop.
+    Defaults.setStandardSubshellList(Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis,
+                                                     initialMultiplet.levels[1].basis); printout=false)
+    if  settings.printBefore    AutoIonization.displayLines(stdout, lines)    end
     maxEnergy = 0.;   for  line in lines   maxEnergy = max(maxEnergy, line.electronEnergy)   end
     nrContinuum = Continuum.gridConsistency(maxEnergy, grid)
-    # Calculate all amplitudes and requested properties
-    newLines = AutoIonization.Line[]
-    for  (nl, line)  in  enumerate(lines)
-        if  rem(nl,10) == 0    println("\n>> Auger computations for line No = $nl   ...")     end
-        newLine = AutoIonization.computeAmplitudesProperties(line, nm, grid, nrContinuum, settings) 
-        push!( newLines, newLine)
+    # Both are constants of the whole computation and are READ-ONLY below, so they are shared safely.
+    nuclearPot = Nuclear.nuclearPotential(nm, grid)
+    primitives = Bsplines.generatePrimitives(grid)
+    newLines = Vector{AutoIonization.Line}(undef, length(lines))
+    doPrint  = Threads.nthreads() == 1
+    Threads.@threads for  nl  in  eachindex(lines)
+        if  doPrint  &&  rem(nl,10) == 0    println("\n>> Auger computations for line No = $nl   ...")     end
+        newLines[nl] = AutoIonization.computeAmplitudesProperties(lines[nl], nm, grid, nrContinuum, settings;
+                                                                        nuclearPot=nuclearPot, primitives=primitives)
     end
-    # Print all results to screen
     AutoIonization.displayRates(stdout, newLines, settings)
     AutoIonization.displayLifetimes(stdout, newLines)
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
-    if  printSummary   AutoIonization.displayRates(iostream, newLines, settings);   AutoIonization.displayLifetimes(iostream, newLines)     end
-    #
-    if    output    return( lines )
+    if  printSummary   AutoIonization.displayRates(iostream, newLines, settings)
+                       AutoIonization.displayLifetimes(iostream, newLines)     end
+
+    if    output    return( newLines )
     else            return( nothing )
     end
 end
-
 
 
 """
 `AutoIonization.computeLinesCascade(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
                                     settings::AutoIonization.Settings; output::Bool=true, printout::Bool=true)`  
-    ... to compute the Auger transition amplitudes and all properties as requested by the given settings. The computations
-        and printout is adapted for large cascade computations by including only lines with at least one channel and by sending
-        all printout to a summary file only. A list of lines::Array{AutoIonization.Lines} is returned.
+    ... to compute the Auger transition amplitudes and all properties as requested by the given settings. The computations and printout is
+        adapted for large cascade computations by including only lines with at least one channel and by sending all printout to a summary
+        file only. A list of lines::Array{AutoIonization.Lines} is returned.
 """
 function  computeLinesCascade(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
                                 settings::AutoIonization.Settings; output::Bool=true, printout::Bool=true)
     
     lines = AutoIonization.determineLines(finalMultiplet, initialMultiplet, settings)
-    # Display all selected lines before the computations start
-    # if  settings.printBefore    AutoIonization.displayLines(stdout, lines)    end  
+    # Display-only and the same for every line; set ONCE per computation, never from inside the line loop.
+    Defaults.setStandardSubshellList(Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis,
+                                                     initialMultiplet.levels[1].basis); printout=false)
+    # Display all selected lines before the computations start if  settings.printBefore    AutoIonization.displayLines(stdout, lines)    end
     # Determine maximum energy and check for consistency of the grid
     maxEnergy = 0.;   for  line in lines   maxEnergy = max(maxEnergy, line.electronEnergy)   end
     nrContinuum = Continuum.gridConsistency(maxEnergy, grid)
-    # Calculate all amplitudes and requested properties
-    newLines = AutoIonization.Line[]
-    for  (i,line)  in  enumerate(lines)
-        if  rem(i,10) == 0    println("> Auger line $i:  ... calculated ")    end
-        newLine = AutoIonization.computeAmplitudesProperties(line, nm, grid, nrContinuum, settings, printout=printout) 
-        push!( newLines, newLine)
+    # Calculate all amplitudes and requested properties Threaded as computeLines is; see the note there.
+    newLines = Vector{AutoIonization.Line}(undef, length(lines))
+    doPrint  = printout  &&  Threads.nthreads() == 1
+    Threads.@threads for  i  in  eachindex(lines)
+        if  doPrint  &&  rem(i,10) == 0    println("> Auger line $i:  ... calculated ")    end
+        newLines[i] = AutoIonization.computeAmplitudesProperties(lines[i], nm, grid, nrContinuum, settings,
+                                                                 printout=printout)
     end
     # Print all results to a summary file, if requested
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary   AutoIonization.displayRates(iostream, newLines, settings)     end
-    #
+
     if    output    return( newLines )
     else            return( nothing )
     end
 end
 
 
-
 """
 `AutoIonization.computeLinesFromOrbitals(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                            settings::AutoIonization.Settings, contOrbitals::Dict{Subshell, Orbital}; output::Bool=true, printout::Bool=true)`  
-    ... to compute the Auger transition amplitudes and all properties as requested by the given settings but by using the given set of 
-        continuum orbitals. The computations and printout is adapted for large cascade computations by including only lines with at least 
-        one channel and by sending all printout to a summary file only. A list of lines::Array{AutoIonization.Lines} is returned.
+                                            settings::AutoIonization.Settings, contOrbitals::Dict{Subshell, Orbital},
+                                            contPhases::Dict{Subshell, Float64}; output::Bool=true, printout::Bool=true)`  
+    ... to compute the Auger transition amplitudes and all properties as requested by the given settings but by using the given set of
+        continuum orbitals and their scattering phases, both keyed on the continuum subshell. The computations and printout is adapted for
+        large cascade computations by including only lines with at least one channel and by sending all printout to a summary file only.
+        The phase cancels in the total rate, which is an incoherent sum over the partial waves, but NOT in the intrinsic angular
+        parameter, where amplitudes of different kappa interfere. A list of lines::Array{AutoIonization.Line,1} is returned.
 """
 function  computeLinesFromOrbitals(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                    settings::AutoIonization.Settings, contOrbitals::Dict{Subshell, Orbital}; output::Bool=true, printout::Bool=true)
+                                    settings::AutoIonization.Settings, contOrbitals::Dict{Subshell, Orbital},
+                                    contPhases::Dict{Subshell, Float64}; output::Bool=true, printout::Bool=true)
 
     lines = AutoIonization.determineLines(finalMultiplet, initialMultiplet, settings)
+    # Display-only and the same for every line; set ONCE per computation, never from inside the line loop.
+    Defaults.setStandardSubshellList(Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis,
+                                                     initialMultiplet.levels[1].basis); printout=false)
     # Calculate all amplitudes and requested properties
     newLines = AutoIonization.Line[]
     
     for  (i,line)  in  enumerate(lines)
         # Define a common subshell list for both multiplets
-        subshellList = Basics.generate("subshells: ordered list for two bases", line.finalLevel.basis, line.initialLevel.basis)
-        Defaults.setDefaults("relativistic subshell list", subshellList; printout=false)
+        subshellList = Basics.generate(OrderedSubshellList(), line.finalLevel.basis, line.initialLevel.basis)
+        # Display-only; set once by the driver, not here.  See Defaults.setStandardSubshellList.
     
         if  rem(i,500) == 0    println("> Auger line $i:  ... calculated ")    end
         # Calculate the individual channels with the given orbitals
-        newChannels = AutoIonization.Channel[];   rate = 0.
+        newPartialWaves = AutoIonization.PartialWave[];   rate = 0.
+        # The one total symmetry of the scattering state: that of the level which autoionizes.
+        symi = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
 
-        for channel in line.channels
+        for  pw in line.partialWaves
             newiLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshellList)
             newfLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, subshellList)
-            sh         = Subshell(101, channel.kappa)
+            sh         = Subshell(101, pw.kappa)
             if haskey(contOrbitals, sh)   cOrbital = contOrbitals[sh]      else    println(">>> skip Auger channel for $sh");   continue    end
+            phase      = contPhases[sh]
             newiLevel  = Basics.generateLevelWithExtraSubshell(sh, newiLevel)
-            newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newfLevel)
-            newChannel = AutoIonization.Channel(channel.kappa, channel.symmetry, 0., 0.)
-            amplitude  = AutoIonization.amplitude(settings.operator, newChannel, newcLevel, newiLevel, grid, printout=printout)
+            newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, symi, newfLevel)
+            amplitude  = AutoIonization.amplitude(settings.operator, pw.kappa, phase, newcLevel, newiLevel, grid, printout=printout)
             rate       = rate + conj(amplitude) * amplitude
-            push!( newChannels, AutoIonization.Channel(newChannel.kappa, newChannel.symmetry, newChannel.phase, amplitude) )
+            push!( newPartialWaves, AutoIonization.PartialWave(pw.kappa, line.electronEnergy, phase, amplitude) )
         end
         totalRate = 2pi* rate;   angularAlpha = 0.
-        newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, angularAlpha, newChannels)
+        newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, angularAlpha, newPartialWaves)
         ##
-        ## if  settings.calcAnisotropy    angularAlpha = AutoIonization.computeIntrinsicAlpha(2, newLine)
-        ##  newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, real(angularAlpha), newChannels)
-        ## end
+        # if  settings.calcAnisotropy    angularAlpha = AutoIonization.computeIntrinsicAlpha(2, newLine)
+        #  newLine   = AutoIonization.Line(line.initialLevel, line.finalLevel, line.electronEnergy, totalRate, real(angularAlpha), newChannels)
+        # end
         push!( newLines, newLine)
     end
     # Print all results to a summary file, if requested
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary   AutoIonization.displayRates(iostream, newLines, settings)     end
-    #
+
     if    output    return( newLines )
     else            return( nothing )
     end
 end
 
 
-
 """
-`AutoIonization.computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                   settings::AutoIonization.PlasmaSettings; output=true)`  
-    ... to compute the Auger transition amplitudes and all properties as requested by the given settings. A list of 
+`AutoIonization.computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                                   settings::AutoIonization.PlasmaSettings, plasmaModel::Basics.AbstractPlasmaModel; output=true)`
+    ... to compute the Auger transition amplitudes and all properties as requested by the given settings and plasma model. A list of
         lines::Array{AutoIonization.Lines} is returned.
 """
-function  computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                             settings::AutoIonization.PlasmaSettings; output=true)
+function  computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                             settings::AutoIonization.PlasmaSettings, plasmaModel::Basics.AbstractPlasmaModel; output=true)
     println("")
     printstyled("AutoIonization.computeLinesPlasma(): The computation of Auger rates starts now ... \n", color=:light_green)
     printstyled("---------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
     augerSettings = AutoIonization.Settings(AutoIonization.Settings(), printBefore=settings.printBefore, lineSelection=settings.lineSelection)
     lines         = AutoIonization.determineLines(finalMultiplet, initialMultiplet, augerSettings)
+    # Display-only and the same for every line; set ONCE per computation, never from inside the line loop.
+    Defaults.setStandardSubshellList(Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis,
+                                                     initialMultiplet.levels[1].basis); printout=false)
     # Display all selected lines before the computations start
     if  settings.printBefore    AutoIonization.displayLines(stdout, lines)    end
     # Determine maximum energy and check for consistency of the grid
@@ -557,7 +740,7 @@ function  computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multip
     # Calculate all amplitudes and requested properties
     newLines = AutoIonization.Line[]
     for  line in lines
-        newLine = AutoIonization.computeAmplitudesPropertiesPlasma(line, nm, grid, nrContinuum, settings) 
+        newLine = AutoIonization.computeAmplitudesPropertiesPlasma(line, nm, grid, nrContinuum, settings, plasmaModel)
         push!( newLines, newLine)
     end
     # Print all results to screen
@@ -565,33 +748,72 @@ function  computeLinesPlasma(finalMultiplet::Multiplet, initialMultiplet::Multip
     AutoIonization.displayLifetimes(stdout, newLines)
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary   AutoIonization.displayRates(iostream, newLines, augerSettings);   AutoIonization.displayLifetimes(iostream, newLines)     end
-    #
-    if    output    return( lines )
+
+    if    output    return( newLines )
     else            return( nothing )
     end
 end
 
 
 """
-`AutoIonization.computeTeaAmplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel, continuumLevel::Level, 
-                                    gMultiplet::Multiplet, initialLevel::Level, grid::Radial.Grid; printout::Bool=true)`  
-    ... to compute the kind in  CoulombInteraction(), BreitInteraction(), CoulombBreit() total Auger amplitude 
-        for the two-electron Auger transitions via the gMultiplet as the resonant Green function:
+`AutoIonization.computeTeaAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level,
+                                    gMultiplet::Multiplet, initialLevel::Level, grid::Radial.Grid,
+                                    nuclearPotential::Radial.Potential; printout::Bool=true)`
+    ... to compute the kind in  CoulombInteraction(), BreitInteraction(), CoulombBreit() total Auger amplitude for the two-electron Auger
+        transitions via the gMultiplet as the resonant Green function:
         
         <(alpha_f J_f, kappa) J_i || O^(TEA, kind) || alpha_i J_i> 
         
-                    <(alpha_f J_f, kappa) J_i || O^(Auger, kind) || alpha_in J_n> <J_n || O^(e-e, kind) || alpha_i J_i>
+                    <(alpha_f J_f, kappa) J_i || O^(Auger, kind) || alpha_in J_n> <J_n || H - E || alpha_i J_i>
                 = ---------------------------------------------------------------------------------------------------
                                                                     E_i  -  E_n
                                                                     
-        due to the interelectronic interaction as well as the given initial, intermediate (gMultiplet), and final 
-        (continuum) levels and the given kind of interaction. A value::ComplexF64 is returned.
+        due to the interelectronic interaction as well as the given initial, intermediate (gMultiplet), and final (continuum) levels and the
+        given kind of interaction. The outgoing-electron factor i^l exp(-i*phase) is applied to the total, exactly as in
+        AutoIonization.amplitude, so that the two may be added coherently; it is a pure phase and does not affect a rate on its own.
+        A value::ComplexF64 is returned.
+        
+        BOTH MATRIX ELEMENTS CARRY H - E, BECAUSE BOTH ARE MATRIX ELEMENTS OF THE ONE PERTURBATION V = H - H_0.  With
+        H_0 = sum_a [h_D(a) + U(r_a)] the perturbation is V = sum_{a<b} v(ab) - sum_a U(a) exactly, so it has a two-body half AND a
+        one-body half.  Where two states differ in TWO orbitals the one-body half vanishes identically and V^(e-e) is the whole answer --
+        the first-order Auger case.  Where they differ in ONE orbital of the same kappa the two-body half returns the WHOLE spectator mean
+        field <b|U_HF|a>, counted a second time after it had already generated both orbitals, and the one-body half is what reduces it to
+        the residual <b|(U_HF - U)|a> that first-order perturbation theory asks for.
+        
+        THE DECAY STEP IS SUCH A ONE-ORBITAL CASE, WHICH IS WHY IT NEEDED CHANGING.  For Ar 2p^-2 -> 3p^-3 the dominant intermediates are
+        the five 3p^-2 levels, whose decay is the single replacement 3p -> eps;  only the 2p^-1 3p^-1 levels decay by two.  Measured
+        26-Oct-2026 on the kappa = -2 partial wave: of the 15 CSF pairs 11 move two or more orbitals and the one-body half is exactly zero
+        on every one of them, while the two that move one and match in kappa carry the dominant V^(e-e) = 0.6185 and 0.2753 and are
+        cancelled by the one-body half to 0.005 % and 0.5 %.  Keeping V^(e-e) alone there left a decay matrix element 19 to 208 times too
+        large, depending on the form of the counterterm, and that single term carried 81.5 % of the whole bound-intermediate amplitude.
+        
+        AND THE OVERLAP TERM IS NOT WHAT BLOCKS IT.  An earlier form of this docstring kept V^(e-e) on the decay step because the final
+        state carries a continuum orbital whose overlap with the bound set does not vanish, so that H - E would need the -E <f|n>
+        counterterm ManyElectron.matrixElement_HminusE does not implement.  The overlap was never measured;  it is <eps|3p> = 1.9e-04,
+        and under the orthonormality that the whole second-order path already assumes the term is zero by the same assumption that makes
+        the junction's own one-body part exact.  The remaining difference between the bare-h form used here and an explicit -<b|U|a> is
+        NOT that overlap but the AoC non-canonicity of the orbital set -- eps and 3p are eigenfunctions of different mean fields -- which
+        was measured on bound pairs of equal kappa at 2 to 6 % and sets the accuracy of the residual, not of the cancellation.
+        
+        `nuclearPotential` must be the nuclear potential on `grid`; it now enters the one-body integral of BOTH steps.
 """
-function computeTeaAmplitude(kind::AbstractEeInteraction, channel::AutoIonization.Channel, continuumLevel::Level, 
-                                gMultiplet::Multiplet, initialLevel::Level, grid::Radial.Grid; printout::Bool=true)
-    #
-    # Always ensure the same subshell list for all initial, intermediate and final (continuum) levels
+function computeTeaAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, continuumLevel::Level,
+                                gMultiplet::Multiplet, initialLevel::Level, grid::Radial.Grid,
+                                nuclearPotential::Radial.Potential; printout::Bool=true)
+    # An EMPTY Green multiplet means "no bound intermediate states", exactly as an empty gCoreMultiplet means no
+    # continuum ones, and must return zero rather than raise -- the merge below indexes levels[1]. This is more
+    # than robustness: switching the BOUND sum off is how the continuum branch ALONE is compared against a
+    # published calculation that omits the bound intermediates as negligible, which is the one comparison that
+    # tests the two calculations on the object they share.
+    if  length(gMultiplet.levels) == 0      return( ComplexF64(0.) )    end
+
+    # Always ensure the same subshell list for all initial, intermediate and final (continuum) levels. The
+    # INTERMEDIATE list has to enter the merge as well: a Green multiplet that carries an orbital the initial and
+    # final states do not have -- any Rydberg member above the valence shell -- otherwise cannot be re-expressed,
+    # and Basis(basis, subshells) raises "Improper subshell order". That silently limited the intermediate space
+    # to the initial state's own orbitals, which is precisely the space too small to converge the second-order sum.
     subshells  = Basics.merge(initialLevel.basis.subshells, continuumLevel.basis.subshells)
+    subshells  = Basics.merge(subshells, gMultiplet.levels[1].basis.subshells)
     iLevel     = Level(initialLevel, subshells)
     fLevel     = Level(continuumLevel, subshells)
     nMultiplet = Multiplet(gMultiplet, subshells)
@@ -600,31 +822,46 @@ function computeTeaAmplitude(kind::AbstractEeInteraction, channel::AutoIonizatio
     ni = length(iLevel.basis.csfs);    symi = LevelSymmetry(iLevel.J, iLevel.parity);    eni = iLevel.energy
     nn = length(nMultiplet.levels[1].basis.csfs)
     
-    if  printout   printstyled("Compute two-electron Auger amplitude for the transition [$(iLevel.index)-$(fLevel.index)] ... \n", 
+    # The sum over intermediate levels must run over levels that are DIFFERENT from the initial one; a formally
+    # coincident n -- which occurs whenever the gMultiplet's reference configurations overlap with the initial-state
+    # configurations -- would give a spurious, ill-defined 1/(eni-enn) singularity and must be excluded.
+    selfTolerance = 1.0e-8
+
+    if  printout   printstyled("Compute two-electron Auger amplitude for the transition [$(iLevel.index)-$(fLevel.index)] ... \n",
                                 color=:light_green)    end
     amplitude = ComplexF64(0.)
-    #
+
     for  nLevel in nMultiplet.levels
         amp  = ComplexF64(0.)
         symn = LevelSymmetry(nLevel.J, nLevel.parity);    enn = nLevel.energy
         if  symf != symn  ||  symn != symi     continue    end
-        #
+        if  abs(enn - eni) <= selfTolerance    continue    end
+
         for  r = 1:nf
             symr = LevelSymmetry(fLevel.basis.csfs[r].J, fLevel.basis.csfs[r].parity);      if  symr != symf    continue    end
             for  s = 1:ni
                 syms = LevelSymmetry(iLevel.basis.csfs[s].J, iLevel.basis.csfs[s].parity);  if  syms != symi    continue    end
-                #
-                #   Compute <alpha_f J_i || V^(e-e) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>
+
+                #   Compute <alpha_f J_i || H - E || alpha_n J_i> <alpha_n J_i || H - E || alpha_i J_i>
+                #   The intermediate Green-function level is, in general, multi-configurational; the two matrix
+                #   elements therefore run over two INDEPENDENT CSF indices t, tp of that same level.  BOTH steps
+                #   carry H - E, because both are matrix elements of the one perturbation V = H - H_0; see this
+                #   function's docstring for the measurement that settled it.
                 for  t = 1:nn
                     if  nLevel.mc[t] == 0.  continue    end
-                    Vee = ManyElectron.matrixElement_Vee(kind, nLevel.basis, t, iLevel.basis, s, grid)
-                    Vae = ManyElectron.matrixElement_Vee(kind, fLevel.basis, r, nLevel.basis, t, grid)
-                    amp = amp + fLevel.mc[r] * Vae * nLevel.mc[t]^2 * Vee * iLevel.mc[s] / (eni - enn) / 4.
+                    Vae = ManyElectron.matrixElement_HminusE(Basics.HminusE(kind), fLevel.basis, r,
+                                                              nLevel.basis, t, grid, nuclearPotential)
+                    for  tp = 1:nn
+                        if  nLevel.mc[tp] == 0.  continue    end
+                        Vee = ManyElectron.matrixElement_HminusE(Basics.HminusE(kind), nLevel.basis, tp,
+                                                                  iLevel.basis, s, grid, nuclearPotential)
+                        amp = amp + fLevel.mc[r] * Vae * nLevel.mc[t] * nLevel.mc[tp] * Vee * iLevel.mc[s] / (eni - enn)
+                    end
                 end
             end
         end
         # Display the amplitude for nLevel, if desired
-        if  true   
+        if  printout
             println(">>>> TEA amplitude < fLevel=$(continuumLevel.index) [J=$(continuumLevel.J)$(string(continuumLevel.parity))] ||" *
                     " { nLevel=$(nLevel.index) [J=$(nLevel.J)$(string(nLevel.parity))] } ||" *
                     " iLevel=$(initialLevel.index) [$(initialLevel.J)$(string(initialLevel.parity))] >  = $(amp.re)  " *
@@ -632,106 +869,309 @@ function computeTeaAmplitude(kind::AbstractEeInteraction, channel::AutoIonizatio
         end
         amplitude = amplitude + amp
     end
-    # if  printout   printstyled("done. \n", color=:light_green)    end
-    
-    if  printout  
+    # Carry the outgoing electron's own factor, as AutoIonization.amplitude does, so that the first- and second-order
+    # amplitudes are in one convention and may be added.
+    amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( -im*phase ) * amplitude
+
+    if  printout
         println(">>>  Total TEA amplitude < fLevel=$(continuumLevel.index) [J=$(continuumLevel.J)$(string(continuumLevel.parity))] ||" *
                 " TAE^($kind) ||" *
                 " iLevel=$(initialLevel.index) [$(initialLevel.J)$(string(initialLevel.parity))] >  = $amplitude  ")
     end
     
     return( amplitude )
-    end
-
-
-"""
-`AutoIonization.determineChannels(finalLevel::Level, initialLevel::Level, settings::AutoIonization.Settings)`  
-    ... to determine a list of Auger Channel for a transitions from the initial to final level and by taking into account the particular 
-        settings of for this computation; an Array{AutoIonization.Channel,1} is returned.
-"""
-function determineChannels(finalLevel::Level, initialLevel::Level, settings::AutoIonization.Settings)
-    channels  = AutoIonization.Channel[];   
-    symi      = LevelSymmetry(initialLevel.J, initialLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity) 
-    kappaList = AngularMomentum.allowedKappaSymmetries(symi, symf)
-    for  kappa in kappaList
-        if  abs(kappa) > settings.maxKappa      continue    end
-        push!(channels, AutoIonization.Channel(kappa, symi, 0., Complex(0.)) )
-    end
-    return( channels )  
 end
 
 
 """
-`AutoIonization.determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::AutoIonization.Settings)`  
-    ... to determine a list of AutoIonization.Line's for transitions between levels from the initial- and final-state multiplets, and  
-        by taking into account the particular selections and settings for this computation; an Array{AutoIonization.Line,1} is returned. 
-        Apart from the level specification, all physical properties are set to zero during the initialization process.
+`AutoIonization.computeTeaContinuumAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, electronEnergy::Float64,
+                                             cOrbital::Orbital, finalIonLevel::Level, gCoreMultiplet::Multiplet, initialLevel::Level,
+                                             grid::Radial.Grid, nuclearPotential::Radial.Potential; printout::Bool=true)`
+    ... to compute that part of the two-electron Auger amplitude which proceeds through the CONTINUUM intermediate states, i.e. through
+        intermediate states that carry one electron already in the continuum, and to return a value::ComplexF64. It is the companion of
+        AutoIonization.computeTeaAmplitude, which carries the BOUND intermediate states, and the two must be added: the sum over
+        intermediate states of a second-order amplitude runs over a COMPLETE set, which partitions by bound-electron count into a
+        16-electron part and a (15 + 1 free)-electron part. The two parts are disjoint and add COHERENTLY, so neither is a correction to
+        the other and their relative SIGN is physical.
+
+        WHAT IS COMPUTED, AND WHAT IS NOT.  Writing the intermediate as |g_core, eps kappa> with g_core a level of gCoreMultiplet, the
+        step that leads to the final state splits EXACTLY into a singular and a regular part,
+
+            <f| V |g_core, eps>   =   delta(eps - eps_f) * <f_core| V |g_core>   +   R(eps),
+
+        because the continuum electron is a pure SPECTATOR of a junction that acts on the ionic core alone and therefore enters only
+        through its own overlap -- and for orbitals normalized per unit energy that overlap is a delta function. Integrating the delta
+        piece places the intermediate electron at the energy of the OBSERVED electron and leaves no integral at all, which is what this
+        method computes. The regular part R(eps) is a Cauchy principal-value integral over the intermediate electron energy with an
+        on-shell pole at eps = E_i - E_g, and it is NOT computed here; it needs the quadrature and the retarded propagator of
+        PhotoDoubleIonization.generateIntermediateLevels and PhotoDoubleIonization.assemblePrincipalValue.
+
+        THE DELTA PIECE THEREFORE READS
+
+            A   =   sum_g   <(f_core J_f, kappa) J_i | O^(Auger, kind) ... >  ...
+
+                        A^(Auger)(i --> g_core, eps_f kappa)  *  <f_core || H - E || g_core>
+            A   =   sum_g  ------------------------------------------------------------------
+                                            E_i  -  E_g  -  eps_f
+
+        and every factor in it is already validated machinery. The numerator's first factor is an ORDINARY first-order Auger amplitude
+        into the intermediate channel, taken at the energy of the observed electron rather than on shell, and it is evaluated by
+        AutoIonization.amplitude itself -- which is why the outgoing-electron factor i^l exp(-i*phase) is carried exactly once and nothing
+        further is applied to the total here. The second factor is the junction of item 98, now between the two BOUND (N-1)-electron
+        cores; the continuum electron has been integrated out of it by the delta function and does not appear.
+
+        THE JUNCTION IS A SCALAR ON THE CORE, which fixes the angular algebra completely and introduces no new Wigner coefficient: in the
+        coupled basis |(J_core, kappa) J_i> a rank-0 operator acting on the core leaves the coupling untouched, so the matrix element is
+        delta(J_g, J_f) times the core matrix element, with a geometric factor of exactly one. Only cores of the final level's own J and
+        parity are therefore reached, and the loop below skips the others rather than relying on the spin-angular coefficients to vanish.
+
+        AND THE DENOMINATOR IS WRITTEN AS E_i - E_g - eps_f RATHER THAN AS E_f - E_g, although energy conservation makes the two equal:
+        the first form is the second-order propagator of the state actually constructed, it stays correct under a non-zero
+        settings.augerEnergyShift, and it makes the comparison with the bound branch's E_i - E_n an OUTPUT rather than an assumption.
+        Measured on argon 26-Oct-2026, the two denominators come out as the same quantity with OPPOSITE SIGN -- the dominant bound family
+        at +252.7 to +256.7 eV against the whole continuum family at -234.0 to -246.8 eV -- so the two parts of the sum interfere
+        destructively; see tools/probeTeaDenominators.jl.
+
+        + cOrbital        ::Orbital     ... the SAME continuum orbital the final state carries; the delta function identifies the two, and
+                                            generating a second one here would break that identity.
+        + finalIonLevel   ::Level       ... the (N-1)-electron final ionic level, with its basis already symmetry-reduced.
+        + initialLevel    ::Level       ... the initial level carrying the empty continuum slot, as AutoIonization.amplitude requires.
 """
-function  determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::AutoIonization.Settings)
+function computeTeaContinuumAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, electronEnergy::Float64,
+                                        cOrbital::Orbital, finalIonLevel::Level, gCoreMultiplet::Multiplet, initialLevel::Level,
+                                        grid::Radial.Grid, nuclearPotential::Radial.Potential; printout::Bool=true)
+    amplitude = ComplexF64(0.)
+    if  length(gCoreMultiplet.levels) == 0      return( amplitude )     end
+
+    symi = LevelSymmetry(initialLevel.J, initialLevel.parity)
+    symf = LevelSymmetry(finalIonLevel.J, finalIonLevel.parity);    eni = initialLevel.energy
+
+    # The junction is a BOUND (N-1)-electron matrix element, so the two cores need a common subshell list of their
+    # own -- not the one the Auger step uses, which carries the continuum subshell as well.
+    jSubshells = Basics.merge(finalIonLevel.basis.subshells, gCoreMultiplet.levels[1].basis.subshells)
+    fIonLevel  = Level(finalIonLevel, jSubshells)
+    jMultiplet = Multiplet(gCoreMultiplet, jSubshells)
+    nfc        = length(fIonLevel.basis.csfs)
+    selfTolerance = 1.0e-8
+
+    if  printout   printstyled("Compute continuum-intermediate two-electron Auger amplitude for partial wave kappa = $kappa ... \n",
+                                color=:light_green)    end
+
+    for  (ig, gLevel)  in  enumerate(jMultiplet.levels)
+        symg = LevelSymmetry(gLevel.J, gLevel.parity)
+        if  symg != symf                        continue    end
+        enn = gLevel.energy + electronEnergy
+        if  abs(eni - enn) <= selfTolerance     continue    end
+
+        # The junction <f_core || H - E || g_core>, i.e. the coefficient of the delta function.
+        ng = length(gLevel.basis.csfs);     junction = 0.
+        for  r = 1:nfc
+            if  fIonLevel.mc[r] == 0.           continue    end
+            symr = LevelSymmetry(fIonLevel.basis.csfs[r].J, fIonLevel.basis.csfs[r].parity)
+            if  symr != symf                    continue    end
+            for  t = 1:ng
+                if  gLevel.mc[t] == 0.          continue    end
+                symt = LevelSymmetry(gLevel.basis.csfs[t].J, gLevel.basis.csfs[t].parity)
+                if  symt != symg                continue    end
+                junction = junction + fIonLevel.mc[r] *
+                            ManyElectron.matrixElement_HminusE(Basics.HminusE(kind), fIonLevel.basis, r, gLevel.basis, t,
+                                                                grid, nuclearPotential) * gLevel.mc[t]
+            end
+        end
+        if  junction == 0.                      continue    end
+
+        # The first-order Auger amplitude into the intermediate channel, OFF SHELL at the observed electron's energy.
+        # The intermediate scattering state carries the final state's own continuum orbital, as the delta function demands.
+        redGLevel = Basics.generateLevelWithSymmetryReducedBasis(gCoreMultiplet.levels[ig],
+                                                                 gCoreMultiplet.levels[ig].basis.subshells)
+        gcLevel   = Basics.generateLevelWithExtraElectron(cOrbital, symi, redGLevel)
+        augerAmp  = AutoIonization.amplitude(kind, kappa, phase, gcLevel, initialLevel, grid; printout=false)
+        amp       = augerAmp * junction / (eni - enn)
+
+        if  printout
+            println(">>>> TEA(continuum) amplitude < fIonLevel=$(finalIonLevel.index) [J=$(finalIonLevel.J)" *
+                    "$(string(finalIonLevel.parity))] || { gCore=$(gLevel.index) [J=$(gLevel.J)$(string(gLevel.parity))], eps } ||" *
+                    " iLevel=$(initialLevel.index) [$(initialLevel.J)$(string(initialLevel.parity))] >  = $amp  " *
+                    " with  junction=$junction,  Delta E=$(eni - enn)")
+        end
+        amplitude = amplitude + amp
+    end
+
+    if  printout
+        println(">>>  Total TEA(continuum) amplitude for partial wave kappa = $kappa  = $amplitude  ")
+    end
+
+    return( amplitude )
+end
+
+
+"""
+`AutoIonization.photoDoubleIonizationModule()`
+    ... to return the PhotoDoubleIonization module::Module, whose second-order machinery -- the intermediate continuum levels and the
+        principal-value assembly -- is general rather than specific to that process and is therefore shared rather than copied.
+
+        WHY IT CANNOT SIMPLY BE NAMED. PhotoDoubleIonization is included AFTER this module in JenaAtomicCalculator.jl, so
+        `using ..PhotoDoubleIonization` at module-definition time fails. Writing the parent's own name inside a function body does not
+        work either, although it looks as though it should: a submodule does NOT see a binding for the module that encloses it, and
+        `JenaAtomicCalculator.PhotoDoubleIonization` raises an UndefVarError from here -- measured 26-Oct-2026, after exactly that form
+        had been checked from the top level, where it DOES resolve and therefore proves nothing about this scope. `parentmodule` does see
+        it, and the lookup happens at CALL time, once every include has run.
+"""
+photoDoubleIonizationModule() = getfield(parentmodule(@__MODULE__), :PhotoDoubleIonization)
+
+
+"""
+`AutoIonization.computeTeaRegularAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, finalScattLevel::Level,
+                                           gCoreMultiplet::Multiplet, initialLevel::Level, nm::Nuclear.Model, grid::Radial.Grid,
+                                           nuclearPotential::Radial.Potential, contSettings::Continuum.Settings, maxKappa::Int64,
+                                           noIntEnergies::Int64, intEnergyFactor::Float64; printout::Bool=true)`
+    ... to compute the REGULAR part R(eps) of the continuum branch of the two-electron Auger amplitude, i.e. that part in which the free
+        electron is NOT a spectator but PARTICIPATES, and to return a value::ComplexF64. It is the companion of
+        AutoIonization.computeTeaContinuumAmplitude, which carries the singular (delta) part of the very same branch, and of
+        AutoIonization.computeTeaAmplitude, which carries the bound intermediates; all three are parts of ONE second-order sum and must be
+        added. A noIntEnergies of zero -- the default -- returns zero, so R(eps) is opt-in and an existing computation is unchanged.
+
+        WHAT IT IS PHYSICALLY. Reading g_core --> f_core, a 3p electron fills the 2p hole and the free electron carries off the energy
+        released, going eps --> eps_f. That is the outgoing Auger electron scattering INELASTICALLY off the ion it has just left, and the
+        energy bookkeeping closes on itself: eps_f = eps + (E_g - E_f), so with a pole at eps* = E_i - E_g the observed electron comes out
+        at the energy the first-order calculation already predicts.
+
+        THE OPERATOR IS THE PLAIN TWO-BODY INTERACTION, AND THAT IS NOT A CHOICE. The states f = (f_core, eps_f) and g = (g_core, eps)
+        each carry one free electron beside their bound ones and differ in TWO orbitals -- the core's 3p --> 2p and the free electron's
+        eps --> eps_f. Two orbital differences are exactly where H - E reduces to V^(e-e) identically, so no junction reasoning enters
+        here; the delta piece was the one-orbital case and that is precisely why it needed H - E.
+
+        THE PHASE FACTOR BELONGS TO THE TOTAL AMPLITUDE AND IS APPLIED ONCE, at the end. The observed electron carries
+        i^l exp(-i*phase); the intermediate electron is an internal line of a sum over a COMPLETE SET OF REAL BASIS STATES and carries no
+        boundary-condition phase of its own. Each matrix element is therefore taken BARE, which is what passing kappa = -1 and phase = 0
+        to AutoIonization.amplitude achieves -- its own factor is then i^0 exp(0) = 1 exactly. In the delta piece this distinction did not
+        arise, because there eps = eps_f and the two kappas coincide, so attaching the factor to either factor of the product gave the
+        same number; here the two kappas differ and it matters.
+
+        TWO PROPERTIES OF THE QUADRATURE, BOTH LEARNED IN PhotoDoubleIonization AND NOT TO BE REDISCOVERED (priority item 33, closed
+        05-Oct-2026). A plain Gauss-Legendre sum of 1/x through a pole HAS NO LIMIT -- refining the mesh merely puts nodes nearer the
+        pole -- so the principal value is subtracted from the start rather than added once a number exists. And an intermediate state is
+        VIRTUAL, so its energy is not restricted by energy conservation: the range must extend BEYOND the energetically allowed maximum,
+        with the pole strictly inside, which is what intEnergyFactor > 1 secures.
+
+        A (core, kappa) BLOCK THAT VANISHES IS SKIPPED AFTER ONE ENERGY, not evaluated at every node. The zero is a SELECTION RULE
+        independent of eps: once the free electron's own eps --> eps_f is counted it consumes one of the two slots of a two-body operator,
+        so R(eps) reaches only cores ONE orbital away from f_core, whereas the delta piece reached every core its junction could connect.
+        The two branches therefore sample DIFFERENT core spaces and must be converged separately. Measured on argon 26-Oct-2026, 36 of 82
+        blocks were such zeros; see tools/probeTeaRegularPart.jl, where the same probe also confirms hermiticity to 3.8e-10 and that every
+        live block depends on eps.
+
+        + finalScattLevel ::Level   ... the FINAL SCATTERING state, i.e. the final ion with the observed continuum electron already
+                                        attached; it is the bra of R(eps) and is the same level the first-order amplitude uses.
+        + noIntEnergies   ::Int64   ... quadrature points over the intermediate electron energy; zero omits R(eps) altogether.
+"""
+function computeTeaRegularAmplitude(kind::AbstractEeInteraction, kappa::Int64, phase::Float64, finalScattLevel::Level,
+                                      gCoreMultiplet::Multiplet, initialLevel::Level, nm::Nuclear.Model, grid::Radial.Grid,
+                                      nuclearPotential::Radial.Potential, contSettings::Continuum.Settings, maxKappa::Int64,
+                                      noIntEnergies::Int64, intEnergyFactor::Float64; printout::Bool=true)
+    amplitude = ComplexF64(0.)
+    if  noIntEnergies <= 0  ||  length(gCoreMultiplet.levels) == 0      return( amplitude )     end
+
+    symi = LevelSymmetry(initialLevel.J, initialLevel.parity);      eni = initialLevel.energy
+
+    # The intermediate mesh. Its upper end must exceed the energetically allowed maximum so that the pole lies
+    # strictly inside the interval; both the range and the point count truncate a complete set and are therefore
+    # convergence parameters rather than settings to be left at a default.
+    eGreenMin    = minimum(lv.energy for lv in gCoreMultiplet.levels)
+    onShellEn    = eni - eGreenMin
+    if  onShellEn <= 0.                                                 return( amplitude )     end
+    intFactor    = intEnergyFactor > 1. ? intEnergyFactor : 3.
+    energyRange  = (0.01, intFactor * onShellEn)
+    energyGrid   = Radial.GridGL(Radial.GridGaussLegendreFinite(), energyRange[1], energyRange[2], noIntEnergies;
+                                 printout=false)
+
+    # The intermediate states and the principal-value assembly are general second-order machinery and are
+    # therefore shared with PhotoDoubleIonization rather than copied; see photoDoubleIonizationModule above for
+    # why that module has to be reached through `parentmodule` and cannot simply be named.
+    nLevels, nWeights, nOnShell, nBlock, nEnergy =
+        AutoIonization.photoDoubleIonizationModule().generateIntermediateLevels(symi, gCoreMultiplet, nm, grid, energyGrid,
+                                contSettings, maxKappa; nuclearPot=nuclearPotential, onShellTotalEnergy=eni)
+
+    if  printout   printstyled("Compute regular continuum-intermediate two-electron Auger amplitude for partial wave " *
+                                "kappa = $kappa over $(length(nLevels)) intermediate levels ... \n", color=:light_green)    end
+
+    numer      = zeros(ComplexF64, length(nLevels))
+    deadBlocks = Int64[]
+    for  k = 1:length(nLevels)
+        nBlock[k] in deadBlocks     &&  continue
+        rPart = AutoIonization.amplitude(kind, -1, 0., finalScattLevel, nLevels[k], grid; printout=false)
+        if  rPart == ComplexF64(0.)
+            push!(deadBlocks, nBlock[k]);       continue
+        end
+        augerAmp = AutoIonization.amplitude(kind, -1, 0., nLevels[k], initialLevel, grid; printout=false)
+        numer[k] = rPart * augerAmp
+    end
+
+    value     = AutoIonization.photoDoubleIonizationModule().assemblePrincipalValue(numer, nLevels, nWeights, nOnShell,
+                                nBlock, nEnergy, energyRange, eni, true)
+    amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( -im*phase ) * value
+
+    if  printout
+        println(">>>  Total TEA(regular) amplitude for partial wave kappa = $kappa  = $amplitude  " *
+                " with $(length(deadBlocks)) of $(length(unique(nBlock))) blocks closed by selection rule")
+    end
+
+    return( amplitude )
+end
+
+
+"""
+`AutoIonization.determineChannels(finalLevel::Level, initialLevel::Level, settings::AutoIonization.Settings)`
+    ... determines the partial waves of the emitted Auger electron for the given transition, by applying
+        AngularMomentum.allowedKappaSymmetries(symi, symf) and discarding every kappa with abs(kappa) > settings.maxKappa. No total symmetry
+        is stored with a partial wave: it is symi for all of them and hence a property of the line. An Array{AutoIonization.PartialWave,1}
+        is returned, with all amplitudes still zero.
+"""
+function determineChannels(finalLevel::Level, initialLevel::Level, settings::AutoIonization.Settings)
+    partialWaves = AutoIonization.PartialWave[]
+    symi         = LevelSymmetry(initialLevel.J, initialLevel.parity)
+    symf         = LevelSymmetry(finalLevel.J,   finalLevel.parity)
+    for  kappa in AngularMomentum.allowedKappaSymmetries(symi, symf)
+        if  abs(kappa) > settings.maxKappa      continue    end
+        push!(partialWaves, AutoIonization.PartialWave(kappa, 0., 0., Complex(0.)))
+    end
+    return( partialWaves )
+end
+
+
+"""
+`AutoIonization.determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
+                                     settings::AutoIonization.Settings)`
+    ... selects the Auger lines to be computed by forming all pairs of an initial and a final level that pass the line selection and for
+        which the electron energy -- the transition energy shifted by settings.augerEnergyShift -- is positive. An
+        Array{AutoIonization.Line,1} is returned, with all amplitudes still zero.
+"""
+function determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::AutoIonization.Settings)
     lines = AutoIonization.Line[]
     augerEnergyShift = Defaults.convertUnits("energy: to atomic", settings.augerEnergyShift)
-    @show augerEnergyShift
     for  iLevel  in  initialMultiplet.levels
         for  fLevel  in  finalMultiplet.levels
             if  Basics.selectLevelPair(iLevel, fLevel, settings.lineSelection)
                 energy = iLevel.energy - fLevel.energy + augerEnergyShift
                 if   energy < 0.01                                                             continue   end
-                if   energy < settings.minAugerEnergy  ||  energy > settings.maxAugerEnergy    continue   end  
-                channels = AutoIonization.determineChannels(fLevel, iLevel, settings) 
-                push!( lines, AutoIonization.Line(iLevel, fLevel, energy, 0., 0., channels) )
+                if   energy < settings.minAugerEnergy  ||  energy > settings.maxAugerEnergy    continue   end
+                partialWaves = AutoIonization.determineChannels(fLevel, iLevel, settings)
+                push!( lines, AutoIonization.Line(iLevel, fLevel, energy, 0., 0., partialWaves) )
             end
         end
     end
+
     return( lines )
 end
 
 
-"""
-`AutoIonization.displayLines(stream::IO, lines::Array{AutoIonization.Line,1})`  
-    ... to display a list of lines and channels that have been selected due to the prior settings. A neat table of all selected 
-        transitions and energies is printed but nothing is returned otherwise.
-"""
-function  displayLines(stream::IO, lines::Array{AutoIonization.Line,1})
-    nx = 150;   noLines = 0;    noChannels = 0
-    println(stream, " ")
-    println(stream, "  Selected Auger lines:")
-    println(stream, " ")
-    println(stream, "  ", TableStrings.hLine(nx))
-    sa = "  ";   sb = "  "
-    sa = sa * TableStrings.center(18, "i-level-f"; na=2);                                sb = sb * TableStrings.hBlank(20)
-    sa = sa * TableStrings.center(18, "i--J^P--f"; na=4);                                sb = sb * TableStrings.hBlank(22)
-    sa = sa * TableStrings.center(14, "Energy"; na=4);              
-    sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
-    sa = sa * TableStrings.center(14, "Energy e_A"; na=4);              
-    sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
-    sa = sa * TableStrings.flushleft(37, "List of kappas and total symmetries"; na=4)  
-    sb = sb * TableStrings.flushleft(37, "partial (total J^P)                "; na=4)
-    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #   
-    for  line in lines
-        noLines = noLines + 1;    noChannels = noChannels + length(line.channels)
-        sa  = "  ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
-                        fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
-        sa = sa * TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
-        sa = sa * TableStrings.center(18, TableStrings.symmetries_if(isym, fsym); na=4)
-        sa = sa * @sprintf("%.8e", Defaults.convertUnits("energy: from atomic", line.initialLevel.energy))  * "    "
-        sa = sa * @sprintf("%.8e", Defaults.convertUnits("energy: from atomic", line.electronEnergy))       * "   "
-        kappaSymmetryList = Tuple{Int64,LevelSymmetry}[]
-        for  i in 1:length(line.channels)
-            push!( kappaSymmetryList, (line.channels[i].kappa, line.channels[i].symmetry) )
-        end
-        sa = sa * TableStrings.kappaSymmetryTupels(80, kappaSymmetryList)
-        println(stream,  sa )
-    end
-    println(stream, "  ", TableStrings.hLine(nx), "\n\n  A total of $noLines lines with $noChannels Auger channels will be compute. \n")
-    #
-    return( nothing )
-end
-
+#################################################################################################################################
+#################################################################################################################################
 
 """
-`AutoIonization.displayLifetimes(stream::IO, lines::Array{AutoIonization.Line,1})`  
-    ... to list all lifetimes as associated with the selected lines. A neat table is printed but nothing is returned otherwise.
+`AutoIonization.displayLifetimes(stream::IO, lines::Array{AutoIonization.Line,1})`
+    ... derives the lifetime of every autoionizing level from the total Auger rate of all lines that start from it, and lists it together
+        with the corresponding level width. A neat table is printed to stream; nothing::Nothing is returned.
 """
 function  displayLifetimes(stream::IO, lines::Array{AutoIonization.Line,1})
     nx = 104
@@ -749,7 +1189,7 @@ function  displayLifetimes(stream::IO, lines::Array{AutoIonization.Line,1})
     sa = sa * TableStrings.center(42, "Widths"; na=2);       
     sb = sb * TableStrings.center(42, "  Hartrees         Kaysers           eV"; na=2)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    # 
+
     notYetDone = trues(1000)
     for  line in lines
         if  notYetDone[line.initialLevel.index]
@@ -770,15 +1210,62 @@ function  displayLifetimes(stream::IO, lines::Array{AutoIonization.Line,1})
         end
     end
     println(stream, "  ", TableStrings.hLine(nx))
-    #
+
     return( nothing )
 end
 
 
 """
-`AutoIonization.displayRates(stream::IO, lines::Array{AutoIonization.Line,1}, settings::AutoIonization.Settings)`  
-    ... to list all results, energies, rates, etc. of the selected lines. A neat table is printed but nothing is returned 
-        otherwise.
+`AutoIonization.displayLines(stream::IO, lines::Array{AutoIonization.Line,1})`
+    ... lists the Auger lines that have been selected, together with the electron energy and the kappa values of the partial waves that will
+        be computed for each of them, and counts the lines and partial waves involved. The total symmetry is taken from the autoionizing
+        level, which is where it belongs. A neat table is printed to stream; nothing::Nothing is returned.
+"""
+function  displayLines(stream::IO, lines::Array{AutoIonization.Line,1})
+    nx = 150;   noLines = 0;    noChannels = 0
+    println(stream, " ")
+    println(stream, "  Selected Auger lines:")
+    println(stream, " ")
+    println(stream, "  ", TableStrings.hLine(nx))
+    sa = "  ";   sb = "  "
+    sa = sa * TableStrings.center(18, "i-level-f"; na=2);                                sb = sb * TableStrings.hBlank(20)
+    sa = sa * TableStrings.center(18, "i--J^P--f"; na=4);                                sb = sb * TableStrings.hBlank(22)
+    sa = sa * TableStrings.center(14, "Energy"; na=4);              
+    sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
+    sa = sa * TableStrings.center(14, "Energy e_A"; na=4);              
+    sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
+    sa = sa * TableStrings.flushleft(37, "List of kappas and total symmetries"; na=4)  
+    sb = sb * TableStrings.flushleft(37, "partial (total J^P)                "; na=4)
+    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
+
+    for  line in lines
+        noLines = noLines + 1;    noChannels = noChannels + length(line.partialWaves)
+        sa  = "  ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
+                        fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
+        sa = sa * TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
+        sa = sa * TableStrings.center(18, TableStrings.symmetries_if(isym, fsym); na=4)
+        sa = sa * @sprintf("%.8e", Defaults.convertUnits("energy: from atomic", line.initialLevel.energy))  * "    "
+        sa = sa * @sprintf("%.8e", Defaults.convertUnits("energy: from atomic", line.electronEnergy))       * "   "
+        kappaSymmetryList = Tuple{Int64,LevelSymmetry}[]
+        # One entry per partial wave; the total symmetry is that of the autoionizing level, the same for all.
+        symi = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
+        for  pw in line.partialWaves
+            push!( kappaSymmetryList, (pw.kappa, symi) )
+        end
+        sa = sa * TableStrings.kappaSymmetryTupels(80, kappaSymmetryList)
+        println(stream,  sa )
+    end
+    println(stream, "  ", TableStrings.hLine(nx), "\n\n  A total of $noLines lines with $noChannels Auger channels will be compute. \n")
+
+    return( nothing )
+end
+
+
+"""
+`AutoIonization.displayRates(stream::IO, lines::Array{AutoIonization.Line,1}, settings::AutoIonization.Settings)`
+    ... lists, for every Auger line, the transition energy, the energy of the emitted electron and the total Auger rate; the intrinsic
+        angular parameter alpha_2 is shown in addition whenever settings.calcAnisotropy is true. A neat table is printed to stream;
+        nothing::Nothing is returned.
 """
 function  displayRates(stream::IO, lines::Array{AutoIonization.Line,1}, settings::AutoIonization.Settings)
     nx = 106
@@ -797,7 +1284,7 @@ function  displayRates(stream::IO, lines::Array{AutoIonization.Line,1}, settings
     sb = sb * TableStrings.center(14, TableStrings.inUnits("rate"); na=2)
     sa = sa * TableStrings.center(15, "alpha_2"; na=2);                           sb = sb * TableStrings.hBlank(18)     
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #   
+
     for  line in lines
         sa  = "  ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
                         fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
@@ -810,7 +1297,7 @@ function  displayRates(stream::IO, lines::Array{AutoIonization.Line,1}, settings
         println(stream, sa)
     end
     println(stream, "  ", TableStrings.hLine(nx))
-    #
+
     return( nothing )
 end
 

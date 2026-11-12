@@ -4,7 +4,6 @@
 #  Activation:                 ];   pkg> up;   pkg> activate
 #  Working with JAC:           using Revise;   using JAC;   include("../src/jac.jl");   pkg> test
 #  
-#  Copy to desktop             scp -r JAC.jl/ fritzsch@10.140.119.236:~/fri/.
 """
 `module JenaAtomicCalculator`  
     ... Jena Atomic Calculator (JAC) provides tools for performing atomic (structure) calculations at various degrees of complexity 
@@ -13,6 +12,41 @@
         operator, etc.] and, in particular, (atomic) transition probabilities, Auger rates, photoionization cross sections, 
         radiative and dielectronic recombination rates as well as cross sections for several other -- elementary or composed --
         processes. 
+
+    # WHAT IS PUBLIC, AND WHAT THAT PROMISES
+
+    Until now the answer was "whatever is exported", which is not a decision anybody took.  This is the decision,
+    and it exists because from 1.0.0 onwards an exported name is a PROMISE: a breaking change to the promised set
+    costs a major version, so it must be clear which names carry that weight and which do not.
+
+    Measured 08-Oct-2026: `names(JenaAtomicCalculator)` returns **318 names, and none of them resolves to
+    nothing**.  They are of four kinds, and the promise differs by kind.
+
+    **PROMISED.  A breaking change here costs a major version.**
+    + the **85 exported MODULES**, which are the main surface, because JAC's convention is the QUALIFIED call: one
+      writes `Hfs.Settings(...)` and `PhotoEmission.Settings(...)`, never an imported bare `Settings`.  This is why
+      an "exported names only" rule would be meaningless for JAC -- `AngularMomentum` exports 1 name of 70.
+    + the **35 exported FUNCTIONS**, the verbs: `perform`, `generate`, `compute...`, `display...`, `extract...`,
+      `convertUnits`, `setDefaults`, `integrate`, `diagonalize`, `evaluate`, `tabulate` and the rest.
+    + the **172 exported CONCRETE TYPES** that a user constructs: every `Settings`, every scheme, `Configuration`,
+      `Level`, `Shell`, `Subshell`, the nuclear models, the fields and the SCF routes.
+    + the **12 exported CONSTANTS**: `E1`..`E4`, `M1`..`M4`, `UseCoulomb`, `UseBabushkin`, `plus`, `minus`.
+
+    **PROMISED BY NAME ONLY -- the 14 exported ABSTRACT TYPES** (`AbstractProcessSettings`,
+    `AbstractPropertySettings`, `AbstractEeInteraction`, `AbstractNuclearModel`, `AbstractStartOrbitals`, ...).
+    The NAME will not change and may be dispatched on;  the LIST OF SUBTYPES is **not** promised, because a new
+    scheme, field or route must remain addable without a major version.  Code that enumerates the subtypes of one
+    of these is relying on something JAC does not offer.
+
+    **NOT PROMISED** -- everything not exported, reached as `JenaAtomicCalculator.X` or `SomeModule.helper`.  It
+    may change in any release.  `TestFrames` is deliberately in this class: it is the test suite, and promising its
+    API would make renaming a test function a breaking change.
+
+    **THESE NUMBERS ARE RE-DERIVED AND NEVER KEPT BY HAND.**  `names(JenaAtomicCalculator)` with `isdefined` and
+    `isa` answers all of it in a few lines, so the statement cannot go stale against the code the way a curated
+    list does.  It also follows that **an exported name which resolves to nothing is a DEFECT and not a
+    reservation**: it promises a capability that is not there, which is worse than its absence, because a reader
+    chooses a code on exactly that reading.  Twenty such names were deleted on 07-Oct-2026.
 
 """
 module JenaAtomicCalculator
@@ -29,16 +63,19 @@ incBasicProcesses       = true
 incAdvancedProcesses    = true
 incCascades             = true  ## Requires: incBasicProcesses
 incPlasma               = true  ## Requires: incProperties
+incLiouville            = true  ## Requires: incProperties
 incStrongField          = true
-incAtomicCompass        = true
 incRacahAlgebra         = true
+incDeepLearning         = true
 
-#==
+#== A CONVENIENCE BLOCK, deliberately kept: uncomment to switch the optional module groups OFF in one
+   step, which cuts load and precompile time when working on the core.  It is not dead code -- it is the
+   counterpart of the assignments above, and the two must be kept in step.  Labelled 13-Aug-2026.
 incAdvancedProcesses    = false
 incCascades             = false  ## Requires: incBasicProcesses
 incPlasma               = false  ## Requires: incProperties
+incLiouville            = false  ## Requires: incProperties
 incStrongField          = false
-incAtomicCompass        = false
 incRacahAlgebra         = false  ==#
 
 
@@ -46,107 +83,156 @@ incRacahAlgebra         = false  ==#
 using  Dates,  Printf,  BSplineKit, LinearAlgebra, SpecialFunctions, QuadGK, Cubature, GSL, JLD2, SymEngine, 
        HypergeometricFunctions  ## , Interact, GaussQuadrature, IJulia, FortranFiles
 
-export AbstractCImethod, AbstractConfigurationRestriction, AbstractEeInteraction, AbstractPotential, AbstractQedModel, AbstractStartOrbitals,
-       AbstractProcessSettings, AbstractEmpiricalSettings, AbstractPlasmaModel, AbstractPropertySettings, AbstractLineShiftSettings,
-       add, AlphaX, AlphaVariation, analyze, AnapoleMoment, 
-       AngularJ64, AngularM64, AngularJ, AngularMomentum, 
-       AsfSettings, Atomic, AtomicState, AtomicStructure, Auger, AugerInPlasma, AutoIonization, AverageAtom, AtomicCompass,
-       Basics, Basis, Beam, BeamPhotoExcitation, BreitInteraction, Bsplines, BsplinesN,
-       CartesianVector, Cartesian2DFieldVector, Cartesian3DFieldVector, CiSettings, CiExpansion, ClebschGordan, CloseCoupling, 
-       compute, convertUnits, Compton, Configuration, ConfigurationR, 
-       Cascade, Continuum, CorePolarization, Coulex, CoulombExcitation, Coulion, CoulombBreit, CoulombGaunt, 
-       CoulombInteraction, CoulombIonization, CsfR,        
-       diagonalize, Defaults, DecayYield, DielectronicRecombination, Dierec, Djpq, DoubleAutoIonization, DoubleAuger, 
-       DiagonalCoulomb, DefaultQuantizationAxis, 
-       Eimex, ElectronCapture, ElecCapture, estimate, ElectricDipoleMoment, Einstein, EinsteinX, EmMultipole, evaluate, ExpStokes, 
-       Empirical,
-       E1, M1, E2, M2, E3, M3, E4, M4,
-       FormFactor, FormF, FullCIeigen,
-       generate, GreenSettings, GreenChannel, GreenExpansion, getDefaults, Green, Gui,
-       Hamiltonian, Hfs, HyperfineInduced, HighHarmonic, HFS, HydrogenicIon, HarmonicQuantizationAxis,
-       interpolate, integrate, Integral, ImpactExcAuto, ImpactExcitation, ImpactExcitationAutoion, ImpactIonization, 
-       InteractionStrength, InternalConv, InternalConversion, InternalRecombination, Isotope, IsotopeShift, IsotopicFraction, 
+export AbstractComputeTheme, AbstractConfigurationRestriction, AbstractConfigurationTheme,
+       AbstractDisplayTheme, AbstractEeInteraction, AbstractEmpiricalSettings, AbstractLineShiftSettings,
+       AbstractNuclearModel, AbstractPlasmaModel, AbstractPlotTheme,
+       AbstractProcessSettings, AbstractPropertySettings, AbstractQedModel, AbstractStartOrbitals,
+       add, AddElectrons, AdjustedLevels, AllShells, AlphaVariation, analyze, AngularJ64, AngularM64, AngularMomentum,
+       Application, AsfSettings, Atomic, AtomicFeatures, AtomicModel, AtomicState,
+       Auger, AugerInPlasma, AutoIonization,
+       Basics, Basis, Beam, BeamPhotoExcitation, BiOrthogonal, BreitInteraction, Bsplines, ByMultipoles, ByNumber, ByParity,
+       Cartesian2DFieldVector, Cartesian3DFieldVector, Cascade, checkConfigurations, CiExpansion,
+       CImatrixWithSymmetryJP, CiSettings, ClebschGordan, ClosedCore, ClosedShells, ClosedSubshells,
+       CombinedPolicy, Compton, compute, computeBranchingFractions, computeChargeStateDistribution, computeCrossSections,
+       computeForPedestrians, computeLevelEnergies, computeLifetimes, computeProperties, computeResonanceStrength,
+       computeTransitionRates, Configuration, ConfigurationR, Continuum, ContractShells, convertUnits,
+       CorePolarization, CostCeiling, Coulex, Coulion, CoulombBreit, CoulombExcitation, CoulombGaunt, CoulombInteraction,
+       CoulombIonization, CrystalField, CrystalFieldEmission, CsfR, CurrentSettings,
+       DalgarnoLewis,
+       DecayYield, DeepLearning, DefaultQuantizationAxis, Defaults, DeformedFermiNucleus, DiagonalCoulomb, diagonalize,
+       DielectronicRecombination,
+       Dierec, DispersionCoefficient, displayConfiguration, displayConfigurations, displayCouplings, displaySpectrum, Distribution, Djpq,
+       DoubleAuger, DoubleAutoIonization,
+       E1, E2, E3, E4, Einstein, ElecCapture, ElectronCapture, EmMultipole, Empirical, EmProperty,
+       EmPropertyC, estimateCrossSections, evaluate, ExcitationLevel, ExciteElectrons, ExpandShells,
+       ExportAdas, ExportChianti, ExportDataSet, ExportVamdc,
+       ExpStokes, extractConfiguration, extractConfigurations, extractFromConfiguration, extractFromConfigurations,
+       FermiNucleus, FineStructure, FineStructureLS, FixedLayerCount, ForAutoIonization, ForDielectronicCapture, ForDielectronicRecombination,
+       ForElectronCapture, ForGivenConfigs, ForHollowIons, ForImpactIonization, ForIsoelectronicSequence,
+       FormFactor, ForPedestrians,
+       ForPhotoEmission, ForPhotoIonization, ForPhotoRecombination, ForRasExcitations, ForStepwiseDecay, FromBasis,
+       FromMultiplet,
+       GeneralizedConfigurations, GeneralizedOscillatorStrength, generate, generateConfigurations, getDefaults, GetParity,
+       GreenChannel, GreenExpansion, GreenSettings, GroundConfiguration,
+       Hamiltonian, HarmonicQuantizationAxis, Hfs, HfsPaschenBack, HundsRules, HydrogenicIon, HyperfineInduced,
+       HyperfineStructure,
+       ZeemanStructure,
+       ImpactExc, ImpactExcAuto, ImpactExcitation, ImpactIonization, IncrementBelow, IncrementRatioBelow,
+       Integral, integrate,
+       InteractionStrength, InternalConv, InternalConversion, InternalRecombination, IsOccupied,
+       IsotopeShift, IsotopicFraction,
        Kronecker,
-       LandeF, LandeJ, LandeZeeman, Level, LevelSelection, LevelSymmetry, LineSelection, LSjj, LSjjSettings, LeftCircular,
-       ManyElectron, MeanFieldSettings, MeanFieldBasis, MeanFieldMultiplet, minus, Model, modify, 
-       MultiPhotonDE, MultiPhotonDeExcitation, MultiPhotonDoubleIon, 
-       MultiPI, MultiPDI, MultiPhotonIonization, MultipoleMoment, MultipolePolarizibility, Multiplet, 
-       NoAmplitude, Nuclear, NoneQed, NoProcess, NoProperty, 
-       OneElectronSettings, OneElectronSpectrum, Orbital, oplus,
-       PairA1P, PairAnnihilation1Photon, PairAnnihilation2Photon, PairProduction, Parity, ParityNonConservation, ParticleScattering, 
-       PathwaySelection, PeriodicTable, perform, 
-       Photo, PhotoDouble, PhotoDoubleIonization, PhotoEmission, PhotoExc, PhotoExcAuto, PhotoExcFluor, 
-       PhotoExcitation, PhotoExcitationAutoion, PhotoExcitationFluores, PhotoIonAuto, PhotoIonFluor, PhotoIonization, 
-       PhotoIonizationAutoion, PhotoIonizationFluores, PhotoRecombination,   
-       Plasma, plus, Polarity, PrintWarnings, provide, Pulse,
-       QedPetersburg, QedSydney, 
-       RacahAlgebra, RacahExpression, Radial, RadialIntegrals, Radiative, RadiativeAuger, RAuger, RasSettings, RasStep, 
-       RasExpansion, RayleighCompton, recast, Rec, REDA, READI, Representation, ReducedDensityMatrix, RadiativeOpacity,
-       RestrictMaximumDisplacements, RestrictNoElectronsTo, RestrictParity, RestrictToShellDoubles, RequestMinimumOccupation, RequestMaximumOccupation,
-       ResonantInelastic,
-       SchiffMoment, Semiempirical, setDefaults, Shell, ShellSelection, SolidAngle, Spectroscopy, SphericalTensor, SpinAngular, StarkShift,
-       StartFromHydrogenic, StartFromPrevious, StrongField, StrongField2, Subshell, StaticQuantizationAxis, StaticField, SelfConsistent,
-       tabulate, TestFrames, tools, Triangle, TwoElectronOnePhoton, TimeHarmonicField,
-       UseBabushkin, UseCoulomb, UseGauge,
-       WeightedCartesian, W3j, W6j, W9j,
-       Yields, Ylm, 
-       Zeeman
+       LandeZeeman, LeadingConfiguration, LeadingConfigurationR, LeftCircular, Level, LevelSelection,
+       LevelSymmetry, LineSelection, Liouville, LSjj, LSjjSettings,
+       M1, M2, M3, M4, ManyElectron, MeanConfiguration, MeanFieldBasis, MeanFieldMultiplet, MeanFieldSettings,
+       MeanOccupation, MuonicAtom, minus, Model, MultiPhotonDE, MultiPhotonIonization,
+       MultiPhotonTransition, MultiPI, Multiplet, Multiplicity, MultipoleAmplitude, MultipoleMoment,
+       MultipolePolarizibility,
+       NistCalibration, NoneQed, NonrelativisticBasis, NoProcess, Nuclear, NuclearShielding, NumberOfElectrons,
+       OccupationDifference, OneElectronSettings, OneElectronSpectrum, OpenShellNumber, OpenShells, OpenSubshells, oplus,
+       Orbital,
+       PairA1P, Parity,
+       ParticleScattering, PathwaySelection, perform, PeriodicTable, Photo, PhotoDouble, PhotoDoubleIonization,
+       PhotoEmission, PhotoExc, PhotoExcAuto, PhotoExcFluor, PhotoExcitation, PhotoExcitationAutoion,
+       PhotoExcitationFluores, PhotoIonization, PhotoIonizationInterference, PhotonScattering, PhotoRecombination,
+       PhotoRecombinationInterference, PhysicalConstants, Plasma, plus,
+       PointNucleus, PrintWarnings, Pulse,
+       QedPetersburg, QedSydney,
+       RacahAlgebra, RacahExpression, Radial, RadialIntegrals, RadialOrbitalsBoth, RadialOrbitalsLarge,
+       RadialOrbitalsSmall,
+       RadialPotentials, Radiative, RadiativeAuger, RandomPhase, RasAutoSettings, RasCompleteShellPolicy, RasExpansion,
+       RasLayer, RasLimitedAngularMomentumPolicy, RasSettings, RasSpectrumOrderedShellPolicy, RasStep,
+       RAuger, RayleighCompton, Rec, recast, ReducedDensityMatrix,
+       ResonantImpactIonization,
+       RelativisticConfigurations, RemoveElectrons, Representation, RequestMaximumOccupation,
+       RequestMinimumOccupation, ResonantInelastic, RestrictExcitations, RestrictMaximumDisplacements,
+       RestrictNoElectronsTo, RestrictParity, RestrictToShellDoubles,
+       SelfConsistent, Semiempirical, setDefaults, Shell, ShellSelection, SolidAngle,
+       SphericalMesh, SphericalTensor, SpinAngularGaigalas, SpinAngular, SpinAngularTables, StarkBroadening, StarkShift, StarkZeeman, StartFromHydrogenic,
+       StartFromPrevious, StartFromThomasFermi, StaticField,
+       StaticQuantizationAxis, Statistical, StrongField, Subshell, SuperConfigurations,
+       tabulate, ThomasFermiField, ThreeBodyRecombination, ThreeParameterFermiNucleus, TimeHarmonicField, TotalAM,
+       Triangle,
+       TwoElectronOnePhoton,
+       UncertaintyEstimate, UniformNucleus, UseBabushkin, UseCoulomb, UseGauge,
+       ValenceOccupation, ValenceShells,
+       W3j, W6j, W9j, WeakInteractionEnhancement, WeakInteractionMoment,
+       Ylm
      
 # Basic data and data structures
 include("module-Basics.jl");            using ..Basics
+# NO `using ..ResultKeys` HERE, DELIBERATELY: that module names its keys `Multiplet` and `Grid`, and bringing
+# them into this namespace would shadow `ManyElectron.Multiplet` and `Radial.Grid`.  They are written qualified.
+include("module-ResultKeys.jl")
+# The MODULE NAME alone is exported, so that `using JenaAtomicCalculator` makes `ResultKeys.Multiplet` resolve in a
+# user's script.  The module itself exports nothing, so none of its key names can leak into that namespace and
+# shadow `Multiplet` or `Grid` -- which is the whole reason the keys live in a module of their own.
+export ResultKeys
 include("module-Radial.jl");            using ..Radial
 include("module-Math.jl");              using ..Math
 include("module-Defaults.jl");          using ..Defaults
 include("module-Distribution.jl");      using ..Defaults
 include("module-ManyElectron.jl");      using ..ManyElectron
 include("module-Nuclear.jl");           using ..Nuclear
-# include("module-BiOrthogonal.jl");      using ..BiOrthogonal
 
 
 # Specialized functions/methods to manipulate these data
 include("module-AngularMomentum.jl")
-## include("module-AngularCoefficients-Ratip2013.jl")  ## keep for internal test purposes only
-include("module-SpinAngular.jl");       using ..SpinAngular
-##x include("module-Bsplines.jl");          using ..Bsplines
-include("module-BsplinesN.jl");         using ..BsplinesN
-include("module-Pulse.jl")
+## The Ratip2013 angular-coefficient module -- a Julia wrapper around the old Fortran
+## implementation -- was RETIRED on 30-Aug-2026. Its source was already absent from src/ and this
+## include already disabled; every call site sat behind Defaults.saRatip(), hardcoded false.
+include("module-SpinAngularTables.jl"); using ..SpinAngularTables
+include("module-SpinAngularGaigalas.jl"); using ..SpinAngularGaigalas
+include("module-SpinAngular.jl");    using ..SpinAngular
+include("module-Bsplines.jl");          using ..Bsplines
+include("module-Pulse.jl");             using ..Pulse
 include("module-Beam.jl")
 include("module-Continuum.jl")
-##x include("module-Details.jl")
 include("module-RadialIntegrals.jl");   using ..RadialIntegrals
 include("module-HydrogenicIon.jl")
 include("module-InteractionStrength.jl")
 include("module-InteractionStrengthQED.jl")
+include("module-DalgarnoLewis.jl");     using ..DalgarnoLewis
+include("module-RandomPhase.jl");       using ..RandomPhase
 include("module-Hamiltonian.jl");       using ..Hamiltonian
 include("module-SelfConsistent.jl");    using ..SelfConsistent
 include("module-PeriodicTable.jl")
+# Statistical tensors of an atomic ensemble; needed by the process modules that report an alignment
+include("module-Statistical.jl")
 include("module-TableStrings.jl")
-include("module-Tools.jl")
 include("module-AtomicState.jl");       using ..AtomicState
 include("module-LSjj.jl");              using ..LSjj
+include("module-BiOrthogonal.jl");      using ..BiOrthogonal
 
 include("module-PhotoEmission.jl")
 
 if  incProperties
 # Functions/methods for atomic amplitudes
 include("module-MultipoleMoment.jl")
-include("module-ParityNonConservation.jl")
+include("module-WeakInteractionMoment.jl")
 # Functions/methods for atomic properties
 include("module-Einstein.jl")    
 include("module-Hfs.jl")
 include("module-IsotopeShift.jl")
 include("module-LandeZeeman.jl")
-include("module-StarkShift.jl")
 include("module-FormFactor.jl")
 include("module-ReducedDensityMatrix.jl")
 include("module-AlphaVariation.jl")
-include("module-RadiativeOpacity.jl")
 include("module-MultipolePolarizibility.jl")
+include("module-DispersionCoefficient.jl")
+include("module-NuclearShielding.jl")
+include("module-StarkShift.jl")
+include("module-StarkZeeman.jl")
+include("module-HfsPaschenBack.jl")
+include("module-CrystalField.jl")
+include("module-CrystalFieldEmission.jl")
+include("module-WeakInteractionEnhancement.jl")
 end
 
 if  incBasicProcesses
 # Functions/methods for atomic processes
 include("module-PhotoExcitation.jl")
+include("module-StarkBroadening.jl")
 include("module-PhotoIonization.jl")
 include("module-PhotoRecombination.jl")
 include("module-AutoIonization.jl")
@@ -156,55 +242,59 @@ include("module-PhotoExcitationFluores.jl")
 include("module-PhotoExcitationAutoion.jl")
 include("module-RayleighCompton.jl")
 include("module-ParticleScattering.jl")
+include("module-PhotonScattering.jl")
 include("module-BeamPhotoExcitation.jl") 
 include("module-HyperfineInduced.jl") 
 include("module-ResonantInelastic.jl") 
 include("module-DecayYield.jl")
 include("module-ImpactExcitation.jl")
+include("module-CoulombExcitation.jl")
+include("module-PhotoRecombinationInterference.jl")
+include("module-PhotoIonizationInterference.jl")
+include("module-GeneralizedOscillatorStrength.jl")
 end
 
 if incAdvancedProcesses
 # Functions/methods for more advanced atomic processes
-include("module-MultiPhotonDeExcitation.jl")
-include("module-CoulombExcitation.jl")
+include("module-MultiPhotonTransition.jl")
 include("module-CoulombIonization.jl")
 include("module-PhotoDoubleIonization.jl")
-include("module-PhotoIonizationFluores.jl")
-include("module-PhotoIonizationAutoion.jl")
-include("module-ImpactExcitationAutoion.jl")
 include("module-RadiativeAuger.jl")
 include("module-MultiPhotonIonization.jl")
-include("module-MultiPhotonDoubleIon.jl")
 include("module-InternalConversion.jl") 
+include("module-MuonicAtom.jl")
 include("module-InternalRecombination.jl") 
 include("module-TwoElectronOnePhoton.jl") 
 include("module-DoubleAutoIonization.jl")
-#= Further processes, not yet included into the code
-include("module-REDA.jl")
-include("module-READI.jl")
-include("module-PairProduction.jl")
-include("module-PairAnnihilation1Photon.jl")
-include("module-PairAnnihilation2Photon.jl")  =#
+include("module-ResonantImpactIonization.jl")
 end
 
-# Functions/methods for atomic responses and time evolutions
-# include("module-Statistical.jl")
 
 if incStrongField
 # Functions/methods for the computation of atomic responses
-## include("module-HighHarmonic.jl")
 include("module-StrongField.jl") 
-end
-
-if incAtomicCompass
-# Functions/methods for the computation of atomic-compass simulations
-include("module-AtomicCompass.jl") 
 end
 
 # Functions/methods for semi-empirical estimations
 include("module-ImpactIonization.jl")
+include("module-ThreeBodyRecombination.jl")
 include("module-Semiempirical.jl")
 include("module-Empirical.jl");         using ..Empirical
+
+# Functions for exporting computed results into external, non-JAC data formats
+include("module-ExportDataSet.jl")
+include("module-ExportAdas.jl")
+include("module-ExportChianti.jl")
+include("module-ExportVamdc.jl")
+
+# Functions for calibrating computed level energies against externally supplied (e.g. NIST ASD) data
+include("module-NistCalibration.jl")
+
+# Functions for reporting the spread of a computed quantity across a few named, alternative calculations
+include("module-UncertaintyEstimate.jl")
+
+# Functions for fitting a Coulomb scale factor against measured levels, at the end of an SCF+RAS line
+include("module-AdjustedLevels.jl")
 
 # Functions/methods for atomic computations
 include("module-Atomic.jl");            using ..Atomic
@@ -214,11 +304,19 @@ if  incPlasma
 include("module-Plasma.jl");            using ..Plasma
 end
 
+if  incLiouville
+# Functions/methods for plasma computations
+include("module-Liouville.jl");         using ..Liouville
+end
+
 
 if  incCascades
 # Functions/methods for cascade computations
 include("module-Cascade.jl");           using ..Cascade
 end
+
+# ForPedestrians depends on Cascade and must be included after it
+include("module-ForPedestrians.jl");    using ..ForPedestrians
 
 # Functions/methods for symbolic computations
 if  incRacahAlgebra
@@ -226,24 +324,106 @@ include("module-RacahAlgebra.jl");      using ..RacahAlgebra
 include("module-SphericalTensor.jl");   using ..SphericalTensor
 end
 
+if  incDeepLearning
+include("module-AtomicFeatures.jl");    using ..AtomicFeatures
+include("module-DeepLearning.jl");      using ..DeepLearning
+end
+
 # Basic functions/methods to manipulate these data
 include("module-BasicsAZ.jl")
 include("module-ManyElectronAZ.jl")
+
+# Gaussian (mean + variance) statistical description of one configuration's unresolved level spectrum,
+# without diagonalizing it -- the building block a future superconfiguration opacity scheme needs.
+# Depends on BasicsAZ.meanEnergyInClosedForm, so it must be included AFTER module-BasicsAZ.jl above.
+include("module-SuperConfigurations.jl")
 
 # Specialized macros
 
 # All test functions/methods stay with the JAC root module
 include("module-TestFrames.jl");        using ..TestFrames
-    
+
+"""
+`JenaAtomicCalculator.detectPerformanceCoreCount(nCpu::Int64)`
+    ... looks for a performance/efficiency (P/E) core split among `nCpu` logical CPUs, for the `-t` hint
+        printed by `__init__` (step 6 of the 25-Oct-2026 multi-threading analysis).  A hybrid chip (Intel's
+        12th generation and later) reports its full logical CPU count in `Sys.CPU_THREADS`, but the slower
+        E-cores are not a good `-t` target: they do not scale the way the P-cores do, so recommending `-t
+        nCpu` on such a machine overstates what parallel work actually gains.  There is no portable Julia API
+        for this, so it is detected the way the chips expose it on Linux: P-cores and E-cores differ in their
+        maximum clock speed, published per logical CPU under `/sys/devices/system/cpu/cpuN/cpufreq/
+        cpuinfo_max_freq`.  A real chip's P-cores do not all report the identical speed either -- some boost
+        higher than others -- so the P/E boundary is found as the LARGEST relative drop between two
+        consecutive distinct speeds, not as equality to the single maximum.  Where the clock-speed files are
+        unavailable (non-Linux, a container without `sysfs`, or uniform silicon with no such gap), this
+        returns `nothing` and the caller prints no hint -- a report that cannot be made honestly is no report,
+        not a wrong one.  A `nP::Int64` giving the count of logical CPUs on the faster side of that boundary
+        is returned, or `nothing`.
+"""
+function detectPerformanceCoreCount(nCpu::Int64)
+    freqs = Vector{Int64}()
+    for  cpu = 0:(nCpu-1)
+        path = "/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq"
+        isfile(path)  ||  return nothing
+        local v
+        try
+            v = parse(Int64, strip(read(path, String)))
+        catch
+            return nothing
+        end
+        push!(freqs, v)
+    end
+
+    distinct = sort(unique(freqs), rev=true)
+    length(distinct) < 2    &&    return nothing
+
+    gaps  = [ (distinct[i] - distinct[i+1]) / distinct[i]   for i = 1:length(distinct)-1 ]
+    split = argmax(gaps)
+    gaps[split] < 0.15    &&    return nothing                 ## no gap large enough to call this heterogeneous
+
+    highSpeeds = Set(distinct[1:split])
+    nP = count(f -> f in highSpeeds, freqs)
+    nP < nCpu    ||    return nothing                           ## every CPU reported the same side; nothing to say
+
+    return( nP )
+
+end
+
+
 function __init__()
     # The following variables need to be initialized at runtime to enable precompilation
     global JAC_SUMMARY_IOSTREAM = stdout
     global JAC_TEST_IOSTREAM    = stdout
-end
 
-println("\nWelcome to JenaAtomicCalculator (JAC):  A community approach to the computation of atomic structures, " *
-        "cascades and time evolutions [(C) Copyright by Stephan Fritzsche, Jena (2018-2025)].")
-        
+    println("\nWelcome to JenaAtomicCalculator (JAC):  A community approach to the computation of atomic structures, " *
+            "cascades and time evolutions [(C) Copyright by Stephan Fritzsche, Jena (2018-2026)].")
+
+    # A print-only report of the threading environment JAC was started in -- step 2 of the 25-Oct-2026
+    # multi-threading analysis.  Several process modules and Hamiltonian.performCI already thread over
+    # independent work (lines, symmetry blocks), but only when Julia itself was started with more than one
+    # thread; nothing before this told a user whether that condition was met.  MUST live in __init__, not as
+    # bare top-level code: top-level statements run only once, at the precompile that CREATES the cached
+    # image, while __init__ reruns on every session that merely LOADS it -- the Welcome banner above has
+    # always had this limitation too, printing only on the session that happens to trigger precompilation.
+    # Changes no behaviour, prints three numbers (plus one conditional hint) once per session.
+    nThreads = Threads.nthreads();   nCpu = Sys.CPU_THREADS;   nBlas = LinearAlgebra.BLAS.get_num_threads()
+    println(">> threading: Julia started with $nThreads thread(s); this machine reports $nCpu logical CPUs; " *
+            "BLAS is using $nBlas thread(s).")
+    if  nThreads == 1  &&  nCpu > 1
+        println(">>   JAC's own threaded routines (CI matrix construction, process amplitude loops) are " *
+                "idle at -t 1 -- start Julia with -t N to use them.")
+    end
+
+    # Step 6 of the same analysis, 26-Oct-2026: on a hybrid P+E chip, nCpu above is the LOGICAL CPU total and
+    # includes the slower E-cores, which do not scale the same way; see detectPerformanceCoreCount's own
+    # docstring for how the split is found and why it can legitimately find nothing to report.
+    nPerf = detectPerformanceCoreCount(nCpu)
+    if  nPerf !== nothing  &&  nPerf < nCpu
+        println(">>   this CPU looks heterogeneous ($nPerf of $nCpu logical CPUs run at the higher of two " *
+                "reported clock speeds) -- -t $nPerf is a better target than -t $nCpu; the remaining cores " *
+                "do not scale the same way.")
+    end
+end
 
 end
 

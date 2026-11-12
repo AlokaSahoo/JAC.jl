@@ -29,26 +29,41 @@ end
 
 
 """
-`Plasma.computeFormFactors(qValues::Array{Float64,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64, 
-                            grid::Radial.Grid)`  
+`Plasma.computeFormFactors(qValues::Array{Float64,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64,
+                            grid::Radial.Grid)`
     ... computes the (standard) form factor F(q) for the electron density as given by the AA orbitals.
         A list of formFactors::Array{Float64,1} is returned that directly refers to the given q-values.
+
+        **THE INTEGRAL STOPS AT THE CELL**, given `radiusCell`.  A form factor is the transform of ONE atom's
+        electron density, and in this model that atom is the Wigner-Seitz cell;  the average-atom orbitals are
+        now normalised over a B-spline box several times wider than the cell, so integrating to the end of the
+        grid adds the neighbouring cells' electrons to this atom.  Measured 08-Oct-2026 on boron at 2.463 g/cm^3:
+        F(1) came out 2.716 over the whole box against 4.210 over the cell, the oscillating `sin(qr)/qr` outside
+        the cell cancelling part of what belongs inside it.  `radiusCell = 0.` keeps the whole grid, which is
+        correct only where the box IS the cell.
 """
-function computeFormFactors(qValues::Array{Float64,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64, 
-                            grid::Radial.Grid)
-    formFactors = Float64[];    wa = zeros( grid.NoPoints )
+function computeFormFactors(qValues::Array{Float64,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64,
+                            grid::Radial.Grid; radiusCell::Float64=0.)
+    formFactors = Float64[]
+    # The (Fermi-Dirac occupation-weighted) electron density does not depend on q; compute it once here, and take a
+    # fresh copy for each q below -- reusing (and mutating) a single array across the q loop previously accumulated
+    # the density afresh on top of the already q-transformed values of the *previous* iteration, silently corrupting
+    # every form factor but the first.
+    mtpCell = radiusCell > 0. ? something( findlast(r -> r <= radiusCell, grid.r), grid.NoPoints ) : grid.NoPoints
+    density = zeros( grid.NoPoints )
+    for (k,v) in orbitals
+        occ  = Basics.FermiDirac(v.energy, chemMu, temp) * (Basics.twice(Basics.subshell_j(k)) + 1)
+        nrho = length(v.P)
+        for    i = 1:nrho   density[i] = density[i] + occ * (v.P[i]^2 + v.Q[i]^2)    end
+    end
     #
     for  q in qValues
-        for (k,v) in orbitals
-            occ  = Basics.FermiDirac(v.energy, chemMu, temp) * (Basics.twice(Basics.subshell_j(k)) + 1) 
-            nrho = length(v.P)
-            for    i = 1:nrho   wa[i] = wa[i] + occ * (v.P[i]^2 + v.Q[i]^2)    end
-        end
         # Compute the full integrant; the factor 4pi * r^2 is already in the density
         if     q == 0.    error("q = 0. is not supported for form-factor computations.")
-        else   for    i = 2:grid.NoPoints   wa[i] = wa[i] / grid.r[i] * sin(q*grid.r[i]) / q    end
+        else   wa = deepcopy(density)
+               for    i = 2:mtpCell        wa[i] = wa[i] / grid.r[i] * sin(q*grid.r[i]) / q    end
         end
-        sF = RadialIntegrals.V0(wa, grid.NoPoints, grid)
+        sF = RadialIntegrals.V0(wa, mtpCell, grid)
         push!(formFactors, sF)
     end
     
@@ -66,80 +81,149 @@ end
 
 
 """
-`Plasma.computeMeanCharge(nm::Nuclear.Model, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64)`  
-    ... computes the mean charge state of an average-atom ion in the plasma of given density and temperature;
-        i.e. Z - sum occ (epsilon > 0); a mean charge state meanCharge::Float64 is returned.
+`Plasma.computeMeanCharge(nm::Nuclear.Model, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64)`
+    ... computes the mean charge of an average-atom ion from a given set of orbitals, i.e. the number of electrons
+        that are NOT bound to it, `Z* = sum_(eps>0) (2j+1) f(eps,mu,T)`;  a `meanCharge::Float64` is returned.
+
+        **IT USED TO RETURN `Z - sum_(eps>0) occ f`, WHICH IS THE COMPLEMENT -- the number of BOUND electrons --
+        under the name of the mean charge.**  Corrected 08-Oct-2026:  for aluminium at solid density and 10 eV it
+        printed 9.986 where the mean charge is 3.014, so the error was not small but exactly the complement, and
+        at neutrality the two are indistinguishable by eye only when Z/2 electrons happen to be free.
+
+        This form sums over whatever orbitals it is handed, so it is as complete as that set is.
+        `Plasma.perform(::AverageAtomScheme, ...)` does NOT use it:  it takes the mean charge from
+        `SelfConsistent.solveAverageAtomSpectra`, which counts the FULL per-kappa spectrum of the cell -- about
+        seventy-eight states per kappa against the half-dozen a subshell list carries -- and whose count satisfies
+        neutrality exactly.  The two agree only where the subshell list happens to hold the whole continuum.
 """
 function computeMeanCharge(nm::Nuclear.Model, orbitals::Dict{Subshell, Orbital}, chemMu::Float64, temp::Float64)
-    meanCharge = nm.Z
+    meanCharge = 0.
     for (k,v) in orbitals
-        if  v.energy > 0. 
-            occ        = Basics.FermiDirac(v.energy, chemMu, temp) * (Basics.twice(Basics.subshell_j(k)) + 1) 
-            meanCharge = meanCharge - occ
+        if  v.energy > 0.
+            meanCharge = meanCharge + Basics.FermiDirac(v.energy, chemMu, temp) * (Basics.twice(Basics.subshell_j(k)) + 1)
         end
     end
-    println(">> Mean charge = $meanCharge ")
-    
+    println(">> Mean charge Z* = $meanCharge  from the given " * string(length(orbitals)) * " subshells.")
+
     return ( meanCharge )
 end
 
 
 """
-`Plasma.determineChemicalPotential(orbitals::Dict{Subshell, Orbital}, temp::Float64, radiusWS::Float64, nm::Nuclear.Model,
-                                    grid::Radial.Grid)`  
-    ... determines the chemical potential so that Sum_i f(epsilon_i, mu, temp) = Z. 
-        The Newton-Raphson methods is used to iterate to the chemical potential; a chemMu::Float64 is returned.
+`Plasma.computePhotoionizationData(piSubshells::Array{Subshell,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64,
+                                   temp::Float64, grid::Radial.Grid, pot::Radial.Potential, omegas::Array{Float64,1})`
+    ... computes the bound-free photoionization cross section sigma_bf(omega) of each of the given bound subshells in
+        the converged average-atom potential, for every photon energy in omegas [a.u.];  a
+        Dict{Subshell, Array{Float64,1}} of cross sections [a.u.] is returned, one entry per subshell and one value
+        per omega.
+
+        **THIS IS EQ. (23) OF JOHNSON & NILSEN, HEDP 31 (2019) 92**, `sigma_bf = (8 pi^2/3) alpha omega |D|^2` with
+        the radial dipole matrix element `D = int P_eps,l(r) r P_b(r) dr` of Eq. (24).  The continuum electron takes
+        the energy `eps = omega + eps_b` left over after the binding energy, so a photon below threshold returns zero.
+
+        **THE FRACTIONAL OCCUPATION IS APPLIED HERE AND IS NOT A DETAIL.**  In a plasma the bound subshell is only
+        partly filled, and Johnson multiplies the cross section by the fractional occupation -- occ/2 for the K shell,
+        which is just the Fermi-Dirac factor f(eps_b) itself.  Their Fig. 7 shows that factor accounting for a 95 %
+        reduction of the opacity between 20 and 500 eV while the cross section proper contributes 18 %, so a
+        sigma_bf computed without it is not approximately right but wrong by more than an order of magnitude.
+
+        **THE ANGULAR FACTOR IS THE s -> p ONE.**  The 8 pi^2/3 of Eq. (23) already carries the angular algebra of a
+        K-shell (l = 0 -> l = 1) transition, which is what the paper computes and what this reproduces.  For a
+        subshell with l > 0 the two channels l-1 and l+1 would each need their own weight, so such a subshell is
+        REFUSED here rather than silently given the K-shell factor.  The two relativistic partial waves p_1/2 and
+        p_3/2 are combined with their statistical weights, which returns the single non-relativistic l = 1 channel
+        in the limit where they coincide.
 """
-function determineChemicalPotential(orbitals::Dict{Subshell, Orbital}, temp::Float64, radiusWS::Float64, nm::Nuclear.Model,
-                                    grid::Radial.Grid)
-    function g(mu::Float64, orbitals::Dict{Subshell, Orbital}, temp::Float64, nm::Nuclear.Model)
-        wa = - nm.Z
-        for  (k,v)  in orbitals
-            occ = Basics.twice( Basics.subshell_j(k)) + 1
-            ## occ = occ * Plasma.finiteNorm(v, radiusWS, grid)
-            wb  = (v.energy - mu) /temp
-            if  wb > 300.   wb = 300.   end
-            ## @show occ, wb, wa
-            wa  = wa + occ / (exp(wb) + 1)    
+function computePhotoionizationData(piSubshells::Array{Subshell,1}, orbitals::Dict{Subshell, Orbital}, chemMu::Float64,
+                                    temp::Float64, grid::Radial.Grid, pot::Radial.Potential, omegas::Array{Float64,1})
+    alpha    = Defaults.getDefaults("alpha")
+    piData   = Dict{Subshell, Array{Float64,1}}()
+    cSettings = Continuum.Settings(false, grid.NoPoints - 100)
+    for  sh  in  piSubshells
+        if  !haskey(orbitals, sh)   error("Plasma.computePhotoionizationData(): subshell $sh is not among the " *
+                                          "average-atom orbitals;  check scheme.piSubshells against nMax and lMax.")   end
+        if  Basics.subshell_l(sh) != 0
+            error("Plasma.computePhotoionizationData(): subshell $sh has l > 0, and Eq. (23) of Johnson & Nilsen " *
+                  "(2019) carries the angular factor of an s -> p transition only.  Only s subshells are supported.")
         end
-        return( wa )
-    end
-    ## for  mu = -18.1:0.005:-18.0  @show  mu, g(mu::Float64, orbitals::Dict{Subshell, Orbital}, temp::Float64, nm::Nuclear.Model)  end
-    ## error("stop x")
-    #
-    function gprime(mu::Float64, orbitals::Dict{Subshell, Orbital}, temp::Float64, nm::Nuclear.Model)
-        wa = 0.
-        for  (k,v)  in orbitals
-            occ = Basics.twice( Basics.subshell_j(k)) + 1
-            ## occ = occ # * Plasma.finiteNorm(v, radiusWS, grid)
-            wb  = (v.energy - mu) /temp
-            if  wb > 300.   wb = 300.   end
-            wc  = exp( wb )
-            wa  = wa + occ * wc^2 / temp / (wc+1)^2    
-            ## @show occ, wb, wc, wa
+        bOrb   = orbitals[sh];      epsB = bOrb.energy
+        fOcc   = Basics.FermiDirac(epsB, chemMu, temp)       ## the fractional occupation, occ/(2j+1)
+        sigmas = zeros(length(omegas))
+        for  (io, omega)  in  enumerate(omegas)
+            eps = omega + epsB                               ## epsB < 0, so this is the photoelectron energy
+            if  eps <= 0.    continue    end                 ## below threshold
+            dSum = 0.;    wSum = 0.
+            for  kappa  in  (1, -2)                          ## p_1/2 and p_3/2
+                wk = abs(2kappa)                             ## 2j+1
+                cOrb, phase = Continuum.generateOrbitalLocalPotential(eps, Subshell(101, kappa), pot, cSettings)
+                mtp = min(length(cOrb.P), length(bOrb.P), length(grid.r))
+                dip = 0.
+                for  ir = 2:mtp    dip = dip + grid.wr[ir] * cOrb.P[ir] * grid.r[ir] * bOrb.P[ir]    end
+                dSum = dSum + wk * dip^2;    wSum = wSum + wk
+            end
+            sigmas[io] = 8pi^2/3 * alpha * omega * (dSum/wSum) * fOcc
         end
-        return( wa )
+        piData[sh] = sigmas
     end
-    # Iterate for the chemical potential
-    chemMu = -0.1;     newMu = 0.;     nx = 0
-    while true
-        nx = nx + 1
-        newMu = chemMu - g(chemMu, orbitals, temp, nm) / gprime(chemMu, orbitals, temp, nm)
-        if  abs(newMu - chemMu) < 1.0e-4  break
-        else  ## println(">>> Newton-Raphson: $nx)  chemMu = $chemMu  g = $(g(chemMu, orbitals, temp, nm)) ")
-                chemMu = newMu
-        end
-    end
-    
-    chemMu = chemMu - 0.0011  ## Seems to bring better stability in the SCF computations
-    
-    println(">>> Newton-Raphson: $nx)  chemMu = $chemMu  g = $(g(chemMu, orbitals, temp, nm)) ")
-    return ( chemMu )
+
+    return( piData )
 end
 
 
 """
-`Plasma.determineWignerSeitzRadius(rho::Float64, nm::Nuclear.Model)`  
+`Plasma.displayPhotoionizationCrossSections(omegas::Array{Float64,1}, piData::Dict{Subshell, Array{Float64,1}})`
+    ... displays the bound-free photoionization cross sections of every subshell in piData, in barn and as a
+        function of the photon energy; nothing is returned.
+"""
+function displayPhotoionizationCrossSections(omegas::Array{Float64,1}, piData::Dict{Subshell, Array{Float64,1}})
+    println("\n  Bound-free photoionization cross sections of the average atom:\n")
+    println("  " * "-"^88)
+    print(  "   omega [eV]  ");   for sh in sort(collect(keys(piData)), by=x->string(x))   print("   sigma_bf($sh) [barn]")   end
+    println("\n  " * "-"^88)
+    for  (io, omega)  in  enumerate(omegas)
+        print("  " * @sprintf("%10.2f", Defaults.convertUnits("energy: from atomic to eV", omega)) * "  ")
+        for  sh  in  sort(collect(keys(piData)), by=x->string(x))
+            print("   " * @sprintf("%18.4e", Defaults.convertUnits("cross section: from atomic to barn", piData[sh][io])))
+        end
+        println("")
+    end
+    println("  " * "-"^88)
+
+    return( nothing )
+end
+
+
+"""
+`Plasma.computeScatteringFactors(omegas::Array{Float64,1}, piData::Dict{Subshell, Array{Float64,1}}, nm::Nuclear.Model)`
+    ... computes the imaginary part f_2 of the atomic scattering factor and the x-ray mass attenuation coefficient
+        mu/rho from the bound-free cross sections; a Tuple (f2::Array{Float64,1}, muOverRho::Array{Float64,1}) is
+        returned, with f_2 dimensionless and mu/rho in cm^2/g.
+
+        **EQS. (21) AND (27) OF JOHNSON & NILSEN (2019)**: `f_2 = sigma_bf / (2 r_0 lambda)` relates the imaginary
+        scattering factor to the cross section through the optical theorem, and `mu/rho = (N_A/A) sigma_bf` is the
+        mass attenuation coefficient that the x-ray intensity falls off with, `I = I_0 exp(-mu z)`.  Both are summed
+        over the subshells present in piData, since each contributes additively to the absorption.
+"""
+function computeScatteringFactors(omegas::Array{Float64,1}, piData::Dict{Subshell, Array{Float64,1}}, nm::Nuclear.Model)
+    alpha = Defaults.getDefaults("alpha");     r0 = alpha^2        ## classical electron radius in a.u.
+    f2 = zeros(length(omegas));     muOverRho = zeros(length(omegas))
+    for  (io, omega)  in  enumerate(omegas)
+        sigTot = 0.;    for (sh, sg) in piData    sigTot = sigTot + sg[io]    end
+        if  omega > 0.
+            lambda  = 2pi / (alpha * omega)                         ## lambda = 2 pi c / omega, c = 1/alpha
+            f2[io]  = sigTot / (2 * r0 * lambda)
+            # mu/rho = (N_A/A) sigma, with sigma converted from a.u. to cm^2 and A in g/mol
+            sigCm2        = Defaults.convertUnits("cross section: from atomic to barn", sigTot) * 1.0e-24
+            muOverRho[io] = 6.02214076e23 / nm.mass * sigCm2
+        end
+    end
+
+    return( (f2, muOverRho) )
+end
+
+
+"""
+`Plasma.determineWignerSeitzRadius(rho::Float64, nm::Nuclear.Model)`
     ... determines the Wigner-Seitz radius R^(WS) from the plasma density rho [g/cm^3] ne and the nuclear charge Z.
 """
 function determineWignerSeitzRadius(rho::Float64, nm::Nuclear.Model)
@@ -170,7 +254,6 @@ function displayElectronNumberDensity(grid::Radial.Grid, orbitals::Dict{Subshell
     println("\n Radial electron number density: \n" *
             "\n     r [a_o]       total n_e     n_e  (eps < 0.)   n_e  (eps > 0.)        " *
             "\n -------------------------------------------------------------------------")
-    ##x @show length(grid.r), length(totalNe), length(posNe), length(negNe)
     for  (ir, r)  in  enumerate(grid.r)
         if  r < 0.1         continue    end
         if  rem(ir ,5) != 1 continue    end
@@ -193,18 +276,12 @@ end
 """
 function finiteNorm(a::Radial.Orbital, radiusWS::Float64, grid::Radial.Grid)
     mtp = size(a.P, 1)
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp  
-            if  grid.r[i] > radiusWS    break   end
-            wa = wa + (a.P[i]^2 + a.Q[i]^2) * grid.wr[i]   
-        end
-        ##x @show "finite norm", wa
-        return( wa )
-    else
-        error("stop a")
+    wa = 0.
+    for  i = 2:mtp  
+        if  grid.r[i] > radiusWS    break   end
+        wa = wa + (a.P[i]^2 + a.Q[i]^2) * grid.wr[i]   
     end
+    return( wa )
 end
 
 
@@ -219,7 +296,7 @@ function  perform(scheme::Plasma.AverageAtomScheme, computation::Plasma.Computat
     if  output    results = Dict{String, Any}()    else    results = nothing    end
         
     nm   = computation.nuclearModel
-    RWS  = Plasma.determineWignerSeitzRadius(computation.settings.density, nm);   @show RWS
+    RWS  = Plasma.determineWignerSeitzRadius(computation.settings.density, nm);
     wa   = Bsplines.generatePrimitives(computation.grid)
     temp = Defaults.convertUnits("temperature: from Kelvin to (Hartree) units", computation.settings.temperature)
     println(" ")
@@ -229,51 +306,181 @@ function  perform(scheme::Plasma.AverageAtomScheme, computation::Plasma.Computat
     subshells = Basics.generateSubshellList(shells)
     println(">> Subshells included into the average-atom scheme: \n   $subshells")
     # Generate hydrogenic orbitals for all subshells and display comparison
-    orbitals  = Bsplines.generateOrbitalsHydrogenic(wa, nm, subshells; printout=false)
-    chemMu    = Plasma.determineChemicalPotential(orbitals, temp, RWS, nm, computation.grid)
+    orbitals  = Bsplines.generateOrbitalsHydrogenic(subshells, nm, wa; printout=false)
+    chemMu    = SelfConsistent.determineChemicalPotential(orbitals, temp, RWS, nm, computation.grid)
     Basics.displayOrbitalProperties(stdout, orbitals, chemMu, temp, RWS, nm, computation.grid)
-    # Solve the orbitals and chemical potential self-consistently in the average-atom model
-    orbitals  = Bsplines.solveSelfConsistentAverageAtom(wa, nm, orbitals, temp, RWS, scheme.scField, printout=true)
-    chemMu    = Plasma.determineChemicalPotential(orbitals, temp, RWS, nm, computation.grid)
+    # Solve the orbitals, the density and the chemical potential self-consistently in the average-atom model.
+    # ONE CALL, AND ITS NUMBERS ARE THE ONES REPORTED.  Until 08-Oct-2026 the chemical potential was solved a
+    # second time here, from the subshell list, and that value -- not the converged one -- went into the results
+    # and into every property computed below.  The two differ by whatever the subshell list leaves out of the
+    # continuum, which is most of it.
+    wScf      = SelfConsistent.solveAverageAtomSpectra(orbitals, nm, scheme.scField, temp, RWS, wa; printout=true)
+    orbitals  = wScf.orbitals;    chemMu = wScf.chemMu;    meanCharge = wScf.nCont
     # Diplay orbital properties
     Basics.displayOrbitalProperties(stdout, orbitals, chemMu, temp, RWS, nm, computation.grid)
     Plasma.displayElectronNumberDensity(computation.grid, orbitals, chemMu, temp, RWS)
     # Generate electron number densities and mean charge state
     totalNe, posNe, negNe = Plasma.computeElectronNumberDensity(computation.grid, orbitals, chemMu, temp)
-    meanCharge            = Plasma.computeMeanCharge(nm, orbitals, chemMu, temp)
+    # The table above is built from the SUBSHELL LIST and is therefore as incomplete as that list; say by how
+    # much, so that a reader does not take it for the density the field was built from.  That one is in
+    # results["radial density"] and integrates to Z.
+    wSub      = RadialIntegrals.V0(totalNe, wScf.iCell, computation.grid)
+    println(">> Mean charge Z* = " * @sprintf("%.5f", meanCharge) * " free and " * @sprintf("%.5f", wScf.nBound) *
+            " bound electrons at mu = " * @sprintf("%.6f", chemMu) * " Ha, from the full per-kappa spectrum " *
+            "(lMax = $(wScf.lMax), free partial waves to $(wScf.lMaxFree)).")
+    println("   The subshell-list density tabulated above accounts for " * @sprintf("%.4f", wSub) * " of the " *
+            "$(nm.Z) electrons INSIDE THE CELL;  the density the field was built from is " *
+            "the outcome's radialDensity, and it carries Z over the same range.")
+    # WHERE IN THE (rho,T) PLANE THIS CELL SITS, printed always and never behind a switch.  Both parameters are
+    # free -- they follow from mu, T and the cell -- and a number quoted without them can be used in a regime
+    # this model does not describe.  They are named in words as well as in symbols, deliberately.
+    outcome = Plasma.AverageAtomOutcome(temp, computation.settings.density, RWS, wScf.iCell, chemMu, meanCharge,
+                                        wScf.nBound, wScf.rhot, orbitals)
+    println(">> The cell sits at  coupling parameter Gamma = " * @sprintf("%.4f", outcome.couplingParameter) *
+            "  (" * (outcome.couplingParameter < 1. ? "weakly" : "strongly") * " coupled ions)  and  " *
+            "degeneracy parameter Theta = " * @sprintf("%.4f", outcome.degeneracyParameter) *
+            "  (" * (outcome.degeneracyParameter < 1. ? "degenerate" : "classical") * " electrons).")
+    if  outcome.couplingParameter < 1.0  &&  outcome.degeneracyParameter > 1.0
+        println("   Both of these put it in the weakly-coupled, classical corner, where an ideal-gas or " *
+                "Saha-Boltzmann treatment is cheaper and at least as good as an average atom.")
+    elseif  outcome.couplingParameter > 1.0  &&  outcome.degeneracyParameter < 10.0
+        println("   Gamma > 1 with Theta of order one is the WARM-DENSE regime this model is built for.")
+    end
     # Return results if required
     if  output   
         results["chemical mu"]   = chemMu;                  results["mean charge"]   = meanCharge
         results["AA orbitals"]   = orbitals;                results["density n_e"]   = totalNe
-        results["negative n_e"]  = negNe;                   results["positive n_e"]  = posNe;                  
+        results["negative n_e"]  = negNe;                   results["positive n_e"]  = posNe;
+        results["bound electrons"] = wScf.nBound;           results["radial density"] = wScf.rhot
     end
     #
     #
     # Calculate photoionization data and cross sections
     if  scheme.calcPhotoionizationCs
-        piData = Plasma.computePhotoionizationData(scheme.piSubshells, orbitals, chemMu, temp, computation.grid)
+        # THE CONVERGED AVERAGE-ATOM POTENTIAL IS TAKEN FROM THE SCF, not rebuilt.  The continuum electron must be
+        # generated in the SAME field the bound orbital sits in -- a continuum wave from a bare nuclear potential
+        # would carry no screening and give a cross section that is wrong wherever the plasma is dense -- and
+        # until 08-Oct-2026 it was rebuilt here from the subshell list, which is a DIFFERENT and incomplete field
+        # from the one the orbitals were converged in.
+        totalPot = wScf.pot
+        piData   = Plasma.computePhotoionizationData(scheme.piSubshells, orbitals, chemMu, temp, computation.grid,
+                                                     totalPot, scheme.omegas)
         Plasma.displayPhotoionizationCrossSections(scheme.omegas, piData)
-        # Add omegas and cross sections to results ... computePhotoionizationCrossSections(subshell, scheme.omegas, piData)
+        if  output
+            results["pi omegas"]       = scheme.omegas
+            results["pi cross sections"] = piData
+        end
+    end
+    #
+    # Calculate the Kubo-Greenwood conductivity and the optical constants
+    if  scheme.calcConductivity
+        if  isempty(scheme.condOmegas)
+            error("Plasma.perform(::AverageAtomScheme, ...): calcConductivity = true needs condOmegas;  carry " *
+                  "them well past the deepest ionization threshold and log-spaced, since the Kramers-Kronig " *
+                  "integral runs to infinity.")
+        end
+        wBroad   = scheme.condBroadening > 0. ? scheme.condBroadening : 0.05
+        condLines = Plasma.computeConductivityLines(wScf, temp, RWS, computation.grid, wa)
+        freeLines = Plasma.computeConductivityLines(wScf, temp, RWS, computation.grid, wa; useFreeSpectra=true)
+        sumRules  = Plasma.computeConductivitySumRules(condLines, wScf.nCont, RWS; freeLines=freeLines)
+        Plasma.displayConductivitySumRules(sumRules, condLines)
+        # The free-free part is left OUT of the spectrum and the free electrons are carried by the Drude term
+        # instead, whenever a collision rate is given:  the subtracted free-free spectrum of a box changes sign
+        # towards zero frequency, which is where the free electrons respond.  See Plasma.drudeConductivity.
+        condSigma = Plasma.computeConductivitySpectrum(condLines, scheme.condOmegas, wBroad;
+                        freeLines=freeLines,
+                        kinds = scheme.condCollisionRate != 0. ? [:boundBound, :boundFree] :
+                                                                 [:boundBound, :boundFree, :freeFree])
+        # A NEGATIVE collision rate means COMPUTE it, from the average atom's own scattering phase shifts, so
+        # that nothing in the optical chain is supplied from outside.  See Plasma.dcConductivity:  on Johnson,
+        # Guet & Bertsch's aluminium it gives sigma(0) = 0.1276 (mOhm m)^-1 against the 0.125 of the Ziman
+        # formula they check themselves against, with no adjustable parameter.
+        condGamma = scheme.condCollisionRate
+        if  condGamma < 0.
+            wDC       = Plasma.dcConductivity(wScf, temp, RWS, computation.grid)
+            condGamma = wDC.gamma
+            println(">> [AA] the collision rate is COMPUTED from the scattering phase shifts: gamma = "       *
+                    @sprintf("%.6f a.u.", condGamma) * ", i.e. sigma(0) = " * @sprintf("%.6f a.u.", wDC.sigma0) *
+                    " = " * @sprintf("%.4f (mOhm m)^-1", wDC.sigma0 * 0.121/0.0262) * ";  nothing is fitted.")
+            if  output   results["dc conductivity"] = wDC   end
+        end
+        if  condGamma > 0.
+            condSigma = condSigma .+ Plasma.drudeConductivity(wScf.nCont, RWS, condGamma, scheme.condOmegas)
+        end
+        optical = Plasma.computeOpticalProperties(scheme.condOmegas, condSigma)
+        Plasma.displayOpticalProperties(scheme.condOmegas, condSigma, optical)
+        # THE TWO THERMAL MEANS, which are functionals of the spectrum just formed and cost nothing beside it.
+        if  scheme.calcMeanOpacities
+            wOp = Plasma.computeMeanOpacities(scheme.condOmegas, condSigma, temp, computation.settings.density)
+            println("\n  Mean opacities of the absorption spectrum above:\n")
+            println("  " * "-"^78)
+            println("   Planck mean (arithmetic, weight x^3/(e^x-1))        " *
+                    @sprintf("%14.4f cm^2/g", wOp.planck))
+            println("   Rosseland mean (HARMONIC, weight x^4 e^x/(e^x-1)^2) " *
+                    @sprintf("%14.4f cm^2/g", wOp.rosseland))
+            println("  " * "-"^78)
+            println("   The Rosseland mean is the HARMONIC one and is therefore never the larger: radiation")
+            println("   leaks through the transparent WINDOWS of the spectrum, so that mean follows the floor")
+            println("   while the Planck mean follows the peaks.  Use Planck where the radiation escapes and")
+            println("   Rosseland where the plasma is optically thick;  here R/P = " *
+                    @sprintf("%.4f", wOp.rosseland/max(wOp.planck,1.0e-99)) * ".")
+            println("   SCATTERING IS NOT INCLUDED, so these are ABSORPTION means;  a hot, thin plasma needs at")
+            println("   least the Thomson term added before a Rosseland mean is used for transport.")
+            if  output   results["mean opacities"] = wOp   end
+        end
+        if  output
+            results["cond omegas"]     = scheme.condOmegas;      results["conductivity"]   = condSigma
+            results["cond sum rules"]  = sumRules;               results["cond lines"]     = condLines
+            results["optical"]         = optical
+        end
     end
     #
     # Calculate form factors
     if  scheme.calcFormFactor
-        formF = Plasma.computeFormFactors(scheme.qValues, orbitals, chemMu, temp, computation.grid)
-        # Add q-values and form factors to results 
+        formF = Plasma.computeFormFactors(scheme.qValues, orbitals, chemMu, temp, computation.grid;
+                                          radiusCell=RWS)
+        if  output    results["ff q-values"] = scheme.qValues;    results["form factors"] = formF    end
     end
     #
-    # Calculate form factors
+    # Calculate the scattering factor f_2 and the mass attenuation coefficient
     if  scheme.calcScatteringFactor
         if !scheme.calcPhotoionizationCs    
             error("Scattering factors also require the computation of photoionization cross sections")    end
-        scatteringF = Plasma.computeScatteringFactors(scheme.omegas, piData, orbitals, chemMu, temp)
-        # Add scattering factors to results 
+        (f2, muOverRho) = Plasma.computeScatteringFactors(scheme.omegas, piData, nm)
+        println("\n  Imaginary scattering factor f_2 and mass attenuation coefficient:\n")
+        println("  " * "-"^62)
+        println("   omega [eV]            f_2        mu/rho [cm^2/g]")
+        println("  " * "-"^62)
+        for  (io, om)  in  enumerate(scheme.omegas)
+            println("  " * @sprintf("%10.2f", Defaults.convertUnits("energy: from atomic to eV", om)) *
+                    @sprintf("%17.5e", f2[io]) * @sprintf("%19.5e", muOverRho[io]))
+        end
+        println("  " * "-"^62)
+        if  output    results["scattering factor f2"] = f2;    results["mass attenuation"] = muOverRho    end
     end
 
+    # THE OUTCOME IS ASSEMBLED HERE, from whatever the optional blocks above actually produced.  The string
+    # keys are KEPT, so nothing that reads them breaks;  the outcome is the form to prefer, because it can say
+    # `nothing` where a Dict can only say "absent", and absent reads the same as zero to whoever gets the file.
+    outcome = Plasma.AverageAtomOutcome( outcome.temperature, outcome.massDensity, outcome.radiusWS,
+                 outcome.iCell, outcome.chemicalMu, outcome.meanCharge, outcome.noBoundElectrons,
+                 outcome.radialDensity, outcome.orbitals, outcome.couplingParameter,
+                 outcome.degeneracyParameter,
+                 get(results, "ff q-values", nothing),            get(results, "form factors", nothing),
+                 get(results, "pi omegas", nothing),               get(results, "pi cross sections", nothing),
+                 get(results, "scattering factor f2", nothing),    get(results, "mass attenuation", nothing),
+                 get(results, "cond omegas", nothing),             get(results, "conductivity", nothing),
+                 get(results, "cond lines", nothing),              get(results, "cond sum rules", nothing),
+                 get(results, "optical", nothing),                 get(results, "dc conductivity", nothing),
+                 get(results, "mean opacities", nothing) )
+    if  output    results["average atom"] = outcome    end
+    println("\n>> The complete result is also returned as one `Plasma.AverageAtomOutcome` under the key " *
+            "\"average atom\":  named fields throughout, with every optional property `nothing` exactly when " *
+            "its switch was not set.")
     
     Defaults.warn(PrintWarnings())
     Defaults.warn(ResetWarnings())
-    return( results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end
 
 

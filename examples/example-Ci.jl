@@ -1,0 +1,120 @@
+
+println("Ci) Apply & test the AlphaVariation module: q- and Q-sensitivity coefficients for the ground 2s^2 2p^2")
+println("    fine-structure multiplet (3P0, 3P1, 3P2, 1D2, 1S0) of Carbon-like ions, by the finite-difference method.")
+println("    Reference Q-values (Kozlov, Tupitsyn & Reimers, arXiv:0812.3210, Table I -- relative to the 3P0 ground level):")
+println("       C I  (Z=6):   3P1  Q=1.0086    3P2  Q=1.0004    1D2  Q=0.0052    1S0  Q=0.0031")
+println("       O III(Z=8):   3P1  Q=1.0197    3P2  Q=1.0040    1D2  Q=0.0099    1S0  Q=0.0058")
+println("       Si IX(Z=14):  3P1  Q=1.1403    3P2  Q=1.0254    1D2  Q=0.0990    1S0  Q=0.0573")
+println("    Nd13+/Sm15+: single valence electron above a Pd-like ([Kr] 4d^10) closed core, with a near 5s-4f level")
+println("    crossing that gives a huge, opposite-sign q for the two ions (Berengut, Dzuba & Flambaum, arXiv:1208.4157):")
+println("       Nd13+(Z=60):  ground 5s_1/2,   4f_5/2 at  58897 cm^-1,  q(5s-4f5/2)  = +106000 cm^-1")
+println("       Sm15+(Z=62):  ground 4f_5/2,   5s_1/2 at  55675 cm^-1,  q(4f5/2-5s)  = -136000 cm^-1")
+println("    Cf17+: a trivalent clock-transition candidate with a 6s^2 5f_5/2 ground level and a near-degenerate")
+println("    6s^2 6p_1/2 excited level (Porsev et al., Phys. Rev. A 102, 012802 (2020)):")
+println("       Cf17+(Z=98): ground 5f_5/2,   6p_1/2 at ~20611 cm^-1 (correlated calculation),  q ~ -4.5e5 cm^-1")
+println("    UNLIKE Nd13+/Sm15+ above, here q*2x at this module's own DEFAULT step (x=0.125) is several times")
+println("    LARGER than the level spacing itself, so the four reference levels change ORDER between alpha_0,")
+println("    alpha+ and alpha- -- the regime AlphaVariation.matchLevelByOverlap exists for (challenge S6).")
+
+if true
+    # Last visit:  20-Oct-2026
+    # Last successful:  21-Jul-2026 -- 3P1 Q=1.0035, 3P2 Q=1.0003, 1D2 Q=0.0033, 1S0 Q=0.0012 (vs literature above)
+    # C I -- the lightest, simplest member of the sequence; small but nonzero relativistic sensitivity.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    wa = Atomic.Computation(Atomic.Computation(), name="CI-alpha", grid=Radial.Grid(true), nuclearModel=Nuclear.Model(6.),
+                            configs=[Configuration("1s^2 2s^2 2p^2")],
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+elseif true
+    # Last successful:  21-Jul-2026 -- 3P1 Q=1.0174, 3P2 Q=1.0028, 1D2 Q=0.0115, 1S0 Q=0.0046 (vs literature above)
+    # O III -- doubly-ionized, moderate Z; noticeably larger Q than C I for the same 2s^2 2p^2 configuration.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    wa = Atomic.Computation(Atomic.Computation(), name="OIII-alpha", grid=Radial.Grid(true), nuclearModel=Nuclear.Model(8.),
+                            configs=[Configuration("1s^2 2s^2 2p^2")],
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+elseif true
+    # Last successful:  21-Jul-2026 -- 3P1 Q=1.1240, 3P2 Q=1.0166, 1D2 Q=0.1039, 1S0 Q=0.0454 (vs literature above)
+    # Si IX -- highest Z of the three, clearly enhanced relativistic sensitivity; still a single configuration.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    wa = Atomic.Computation(Atomic.Computation(), name="SiIX-alpha", grid=Radial.Grid(true), nuclearModel=Nuclear.Model(14.),
+                            configs=[Configuration("1s^2 2s^2 2p^2")],
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+elseif true
+    # Last successful:  21-Jul-2026 -- q(5s-4f5/2) = 105889 cm^-1 (0.10% from literature 106000 cm^-1); excitation
+    # 6.256 eV vs literature 7.302 eV (~14% low, expected for a bare single-configuration calculation without
+    # core-valence correlation -- q itself is far more robust, being dominated by near-nucleus one-electron
+    # relativistic contraction of the s vs f orbital).
+    # Nd13+ -- single valence electron (5s or 4f) above a Pd-like [Kr]4d^10 core; an open-f-shell/near-crossing case.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    # Same fault, and same fix, as the Sm15 branch below: Radial.Grid(true) reaches 614 a.u. where these
+    # subshells want about 7 a.u., and checkOrbitalConsistency then reports the spin-orbit partners as
+    # describing different states -- Rule 12's signature for a box not matched to the orbitals.
+    grid = Basics.recommendedGrid([Configuration("[Kr] 4d^10 5s"), Configuration("[Kr] 4d^10 4f")],
+                                  Nuclear.Model(60.), printout=false)
+    wa = Atomic.Computation(Atomic.Computation(), name="Nd13-alpha", grid=grid, nuclearModel=Nuclear.Model(60.),
+                            configs=[Configuration("[Kr] 4d^10 5s"), Configuration("[Kr] 4d^10 4f")],
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+elseif true
+    # Last visit:  21-Oct-2026
+    # Last reproduced:  21-Oct-2026 (the claim line below, re-measured)
+    # Last successful:  21-Oct-2026 -- q(4f5/2-5s) = -136247 cm^-1 (0.18% from literature -136000 cm^-1); excitation
+    # 8.3055 eV vs literature 6.903 eV (~20% high, same expected cause as Nd13+ above). Ground state comes out as
+    # 4f_5/2 (not 5s_1/2), correctly reproducing the level crossing between the Nd13+ and Sm15+ members of this
+    # isoelectronic sequence -- and the SIGN of q flips accordingly, exactly as in the literature.
+    #   RE-DATED 21-Oct-2026 ON THE MAINTAINER'S DECISION, and the two numbers it carries were 8.235 eV and
+    # -136121 cm^-1 when first recorded on 21-Jul-2026. Neither is drift to be chased: the cause is `1d05ab3b`
+    # (13-Sep-2026), which repaired `SpinAngular.twoParticleMoveOne` where the spectator subshell lies BETWEEN
+    # donor and acceptor -- validated against GRASP2018 to nine figures -- so a pre-13-Sep MULTI-REFERENCE
+    # energy such as this 4f/5s pair is expected to move, and the new value is the better one. The excitation
+    # energy moved 0.86% and q only 0.09%, which is itself the point: q is a DIFFERENCE of relativistic shifts
+    # of the two levels and not the transition energy, which is why it sits at 0.18% of the literature while
+    # the energy sits at 20%. The 20% is BY CONSTRUCTION -- single configuration, plain Coulomb, no Breit, no
+    # QED, no correlation layer -- so a percent on top of it changes no statement this branch makes.
+    # Sm15+ -- same recipe as Nd13+, two charge states further along the sequence, past the 5s-4f crossing.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    # Bsplines.checkOrbitalConsistency refuses Radial.Grid(true) here: its two spin-orbit partners come out
+    # describing DIFFERENT states, which Rule 12 names as the signature of a box not matched to the orbitals.
+    # Radial.Grid(true) reaches 614 a.u.; Basics.recommendedGrid sizes Sm15+ at 7.4 a.u., an 83-fold oversize.
+    grid = Basics.recommendedGrid([Configuration("[Kr] 4d^10 5s"), Configuration("[Kr] 4d^10 4f")],
+                                  Nuclear.Model(62.), printout=false)
+    wa = Atomic.Computation(Atomic.Computation(), name="Sm15-alpha", grid=grid, nuclearModel=Nuclear.Model(62.),
+                            configs=[Configuration("[Kr] 4d^10 5s"), Configuration("[Kr] 4d^10 4f")],
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+elseif true
+    # Last successful:  08-Oct-2026 -- clock q = -457873 cm^-1 (1.8% from the Breit+correlation literature
+    # value ~-450000 cm^-1 above, good agreement for a bare, Coulomb-only, uncorrelated reference level);
+    # excitation 13494 cm^-1, matching the Coulomb-only reference-level value independently established for
+    # this ion elsewhere. |q*2x| = 114468 cm^-1 against that 13494 cm^-1 gap -- an 8.5-fold overshoot -- so
+    # the four reference levels DO change order between alpha_0, alpha+ and alpha- here, and the computation
+    # completed cleanly through that crossing: this is the regression demonstration for challenge S6.
+    # Cf17+ -- the crossing case itself, continuing the Nd13+/Sm15+ pair above to where the crossing actually
+    # happens WITHIN one run. Before AlphaVariation.matchLevelByOverlap (fixing challenge S6), this branch
+    # would have paired levels by their energy-sorted POSITION and silently returned a wrong q with no
+    # warning, since the upper clock level (J=1/2) and the ground level (J=5/2) swap positions under the
+    # shift. No Breit and no correlation layer are included here, matching this file's existing plain-Coulomb
+    # style throughout -- the published comparison above used both, so do not expect tight agreement on the
+    # absolute energy; the point of this branch is the CROSSING and its safe handling, not precision.
+    setDefaults("print summary: open", "zzz-AlphaVariation.sum")
+    refs = [Configuration("[Xe] 4f^14 5d^10 6s^2 5f^1"), Configuration("[Xe] 4f^14 5d^10 6s^2 6p^1")]
+    grid = Basics.recommendedGrid(refs, Nuclear.Model(98.), printout=false)
+    wa = Atomic.Computation(Atomic.Computation(), name="Cf17-alpha", grid=grid, nuclearModel=Nuclear.Model(98.),
+                            configs=refs,
+                            propertySettings=[AlphaVariation.Settings(true, 0.125, true, LevelSelection())] )
+    wb = perform(wa)
+    setDefaults("print summary: close", "")
+    #
+end

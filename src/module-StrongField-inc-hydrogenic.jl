@@ -45,40 +45,11 @@ end
 
 """
 `StrongField.computeScalarProdBoundContHydrogenicUncoupled(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, 
-                                                            epsiloni::Float64, volkov::AbstractVolkovState)`  
-    ... computes the scalar product of the bound (hydrogenic) and continuum (Volkov) states in the 
-        one-particle picture
-"""
-function  computeScalarProdBoundContHydrogenicUncoupledOLD(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, m::Int64, 
-                                                            epsiloni::Float64, volkov::AbstractVolkovState)
-    rmax  = 1000.;       orderGL = 1000;     gaussLegendre = Radial.GridGL("Finite",0.0,rmax,orderGL)
-    rgrid = gaussLegendre.t;                 weights = gaussLegendre.wt
-    
-    Pnl = hydrogenPnl( epsiloni, n, l, rgrid )
-    
-    if      typeof(volkov) == FreeVolkov        Pepsplp = VolkovP( epsilonp, lp, rgrid )
-    elseif  typeof(volkov) == CoulombVolkov     Pepsplp = CoulombVolkovP( epsilonp, lp, volkov.Z, rgrid )
-    end
-    
-    DPnl = hydrogenDPnlDr( epsiloni, n, l, rgrid )
-    integral = ComplexF64(0.)
-    
-    # Sum over grid and compute Gauss-Legendre sum
-    for    j = 1:orderGL
-        r = rgrid[j]
-        integrand = conj( Pepsplp[j] ) * Pnl[j]
-        # Gauss-Legendre sum
-        integral = integral + weights[j] * integrand
-    end
-    
-    return((-im)^l * integral)
-end
-
-
-"""
-`StrongField.computeScalarProdBoundContHydrogenicUncoupled(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, 
                                                             epsiloni::Float64, volkov::AbstractVolkovState, grid::Radial.Grid)`  
     ... computes the scalar product of the bound (hydrogenic) and continuum (Volkov) states in the one-particle picture.
+
+        NO CALLER IN `src/`: it is the UNCOUPLED one-particle form, kept beside the coupled route the strong-field
+        drivers actually use, as the simpler expression to check the coupled one against by hand.
 """
 function  computeScalarProdBoundContHydrogenicUncoupled(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, m::Int64, 
                                                         epsiloni::Float64, volkov::AbstractVolkovState, grid::Radial.Grid)
@@ -115,11 +86,6 @@ end
 function  computeScalarProdBoundContHydrogenic(Pepsplp::Array{ComplexF64,1}, epsiloni::Float64, 
                                                 n::Int64, l::Int64, rGrid::Radial.Grid)
     
-    if rGrid.meshType != Radial.MeshGL()
-        println("StrongField module needs a radial grid of meshType Radial.MeshGL() to perform the radial integrals.")
-        return(0.)
-    end
-    
     rgrid = rGrid.r;        orderGL = size(rgrid)[1];      weights = rGrid.wr
     
     #Prepare radial wave functions
@@ -142,7 +108,7 @@ end
 
 """
 `StrongField.pReducedMEHydrogenic(Pepsplp::Array{ComplexF64,1} , lp::Int64, jp::Float64, epsiloni::Float64, 
-                                    n::Int64, l::Int64, j::Int64, rGrid::Radial.Grid )`  
+                                    n::Int64, l::Int64, j::Float64, rGrid::Radial.Grid )`  
     ... computes the reduced matrix elements of the momentum operator <epsilonp lp jp||p||n l j> in the one-particle 
         picture for hydrogenic initial states, where the radial wave function Pepsplp of |epsilonp lp jp> needs to be 
         provided as an argument on the grid rGrid.
@@ -151,11 +117,6 @@ end
 """
 function  pReducedMEHydrogenic(Pepsplp::Array{ComplexF64,1}, lp::Int64, jp::Float64, epsiloni::Float64, 
                                 n::Int64, l::Int64, j::Float64, rGrid::Radial.Grid )
-
-    if rGrid.meshType != Radial.MeshGL()
-        println("StrongField module needs a radial grid of meshType Radial.MeshGL() to perform the radial integrals.")
-        return(0.)
-    end
 
     # Compute the factor in <epsilonp lp jp||p||n l j> = fac * <epsilonp lp||p||n l>
     fac = 0.
@@ -166,9 +127,9 @@ function  pReducedMEHydrogenic(Pepsplp::Array{ComplexF64,1}, lp::Int64, jp::Floa
             mj = ml + ms 
             for    mlp = -lp:lp
                 mjp = mlp + ms 
-                fac = fac + AngularMomentum.ClebschGordan_old(  AngularJ64(lp), AngularM64(mlp),  AngularJ64(1//2),           
+                fac = fac + AngularMomentum.ClebschGordan(      AngularJ64(lp), AngularM64(mlp),  AngularJ64(1//2),           
                                             AngularM64(Rational(ms)), AngularJ64(Rational(jp)),   AngularM64(Rational(mjp)) ) * 
-                            AngularMomentum.ClebschGordan_old(  AngularJ64(l),  AngularM64(ml),   AngularJ64(1//2),           
+                            AngularMomentum.ClebschGordan(      AngularJ64(l),  AngularM64(ml),   AngularJ64(1//2),           
                                             AngularM64(Rational(ms)), AngularJ64(Rational(j)),    AngularM64(Rational(mj)) )    
             end
         end
@@ -195,42 +156,6 @@ function  pReducedMEHydrogenic(Pepsplp::Array{ComplexF64,1}, lp::Int64, jp::Floa
     integral = integral * (-im)^(lp+1) * (-1)^lp * GSL.sf_coupling_3j( 2*lp, 2*1, 2*l, 0, 0, 0 )
     
     return( fac * integral )
-end
-
-
-"""
-`StrongField.pReducedMEHydrogenicUncoupledOLD(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, 
-                                                epsiloni::Float64, volkov::AbstractVolkovState)`  
-    ... computes the reduced matrix elements of the momentum operator <epsilonp lp ||p||n l> in the one-particle picture
-    
-        FORMULATION in l-ml-BASIS:
-"""
-function  pReducedMEHydrogenicUncoupledOLD(epsilonp::Float64, lp::Int64, n::Int64, l::Int64, epsiloni::Float64, 
-                                            volkov::AbstractVolkovState)
-    rmax  = 100.;        orderGL = 1000;     gaussLegendre = Radial.GridGL("Finite",0.0,rmax,orderGL)
-    rgrid = gaussLegendre.t;                 weights = gaussLegendre.wt
-    
-    Pnl = hydrogenPnl( epsiloni, n, l, rgrid )
-    if  typeof(volkov) == FreeVolkov            Pepsplp = VolkovP( epsilonp, lp, rgrid )
-    elseif  typeof(volkov) == CoulombVolkov     Pepsplp = CoulombVolkovP( epsilonp, lp, volkov.Z, rgrid )
-    end
-    
-    DPnl = HydrogenDPnlDr( epsiloni, n, l, rgrid )
-    
-    integral = ComplexF64(0.)
-    
-    # Sum over grid and compute Gauss-Legendre sum
-    for    j = 1:orderGL
-        r = rgrid[j]
-        integrand = conj( Pepsplp[j] )/r * ( r*DPnl[j] - ((lp-l)*(lp+l+1))/2 * Pnl[j] )
-        # Gauss-Legendre sum
-        integral = integral + weights[j] * integrand
-    end
-
-    # Note that GSL.sf_coupling_3j takes takes the input (2*j1,2*j2,2*j3,2*m1,2*m2,2*m3)
-    integral = integral * (-im)^(lp+1) * (-1)^lp * GSL.sf_coupling_3j( 2*lp, 2*1, 2*l, 0, 0, 0 )
-    
-    return( integral )
 end
 
 

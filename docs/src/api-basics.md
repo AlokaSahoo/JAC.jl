@@ -1,10 +1,4 @@
 
-##  Angular momentum
-```@autodocs ; canonical=false
-Modules = [AngularMomentum]
-Order   = [:type, :function]
-```
-
 ##  Atomic interaction strength
 ```@autodocs
 Modules = [InteractionStrength]
@@ -14,27 +8,47 @@ Order   = [:type, :function]
 ##  Basics: data types
 ```@autodocs ; canonical=false
 Modules = [Basics]
-Pages   = ["Basics-inc-abstract.jl", "module-Basics-inc-first.jl", "module-Basics-inc-second.jl"]
+Pages   = ["module-Basics.jl", "module-Basics-inc-abstract.jl", "module-Basics-inc-first.jl", "module-Basics-inc-second.jl"]
+Order   = [:type, :function]
+```
+
+##  Basics: electron configurations
+```@autodocs ; canonical=false
+Modules = [JenaAtomicCalculator.BasicsAZ]
+Pages   = ["module-BasicsAZ-inc-configurations.jl"]
 Order   = [:type, :function]
 ```
 
 ##  Basics: functions
 ```@autodocs ; canonical=false
-Modules = [Basics]
-Pages   = ["module-BascisAZ-inc-AZ.jl", "module-BascisAZ-inc-AG.jl", "module-BascisAZ-inc-HP.jl", "module-BascisAZ-inc-QZ.jl"]
+Modules = [JenaAtomicCalculator.BasicsAZ]
+Pages   = ["module-BasicsAZ.jl", "module-BasicsAZ-inc-AG.jl", "module-BasicsAZ-inc-HP.jl", "module-BasicsAZ-inc-QZ.jl"]
 Order   = [:function]
 ```
 
 ##  Basics: compute & generate
 ```@autodocs ; canonical=false
-Modules = [Basics]
-Pages   = ["BascisAZ-inc-compute.jl", "BascisAZ-inc-generate.jl"]
+Modules = [JenaAtomicCalculator.BasicsAZ]
+Pages   = ["module-BasicsAZ-inc-compute.jl", "module-BasicsAZ-inc-generate.jl"]
+Order   = [:type, :function]
+```
+
+##  Basics: perform
+```@autodocs ; canonical=false
+Modules = [JenaAtomicCalculator.BasicsAZ]
+Pages   = ["module-BasicsAZ-inc-perform.jl"]
 Order   = [:type, :function]
 ```
 
 ##  B-Spline basis
 ```@autodocs
-Modules = [BsplinesN]
+Modules = [Bsplines]
+Order   = [:type, :function]
+```
+
+##  Bi-orthogonal transformation
+```@autodocs
+Modules = [BiOrthogonal]
 Order   = [:type, :function]
 ```
 
@@ -50,9 +64,8 @@ Modules = [HydrogenicIon]
 Order   = [:type, :function]
 ```
 
-##  Spin angular coefficients
+##  Multipole moments
 ```@autodocs
-Modules = [SpinAngular]
-Order   = [:type]
+Modules = [MultipoleMoment]
+Order   = [:type, :function]
 ```
-

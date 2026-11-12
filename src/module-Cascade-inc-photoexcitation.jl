@@ -32,7 +32,6 @@ function computeSteps(scheme::Cascade.PhotoExcitationScheme, comp::Cascade.Compu
                                                 "giving now rise to a total of $nt $(string(step.process)) decay lines." )   end      
     end
     #
-    ##x data = Cascade.ExcitationData(linesE)
     return( linesE )
 end
 
@@ -52,8 +51,11 @@ function determineSteps(scheme::Cascade.PhotoExcitationScheme, comp::Cascade.Com
         for  initialBlock in initialList
             for  excitedBlock in excitedList
                 if  initialBlock.NoElectrons == excitedBlock.NoElectrons
-                    settings = PhotoExcitation.Settings([E1], [UseCoulomb, UseBabushkin], false, false, false, false, LineSelection(), 
-                                                        0., 0., 1.0e6, Basics.ExpStokes() )
+                    ## The multipoles must be taken from the scheme; a hard-wired [E1] made the multipole list of
+                    ## PhotoExcitationScheme act on the configuration filter (generateConfigurationsForPhotoexcitation)
+                    ## only, so that M1/E2/M2 enlarged the cascade by same-parity blocks that could never yield a line.
+                    settings = PhotoExcitation.Settings(scheme.multipoles, [UseCoulomb, UseBabushkin], false, false, false, false, false,
+                                                        LineSelection(), 0., 0., 1.0e6, Basics.ExpStokes() )
                     push!( stepList, Cascade.Step(Basics.PhotoExc(), settings, initialBlock.confs, excitedBlock.confs, 
                                                                                 initialBlock.multiplet, excitedBlock.multiplet) )
                 end
@@ -78,15 +80,20 @@ function generateBlocks(scheme::Cascade.PhotoExcitationScheme, comp::Cascade.Com
     #
     if    comp.approach == AverageSCA()
         if  printout
-        println("\n* Generate blocks for excitation computations:")
-        println("\n  In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println("    + orbitals are generated independently for each block for a Dirac-Fock-Slater potential; ")
-        println("    + all blocks (multiplets) are generated from single-CSF levels and without any configuration mixing even in the SC; ")
+            println("\n* Generate blocks for excitation computations:")
+            Cascade.displayApproach(stdout, comp.approach, comp.asfSettings)
+        end
+        ## Cascade.generateBoundOrbitals prints the bound-orbital assumption itself, to stdout and to the
+        ## summary file, so that what is announced can never drift from what is done.
+        ## It takes the APPROACH, not its conditions: that signature changed in 46dd775 and this call site was
+        ## missed, so every photoexcitation cascade has raised a MethodError since. Nothing caught it because
+        ## testModule_Cascade_PhotonExcitation is hollow -- it computes nothing and hardcodes success=true.
+        orbitals = Cascade.generateBoundOrbitals(comp.approach, comp, confs; printout=printout)
+        if  printout
         println("    + only E1 excitations are considered. \n")
-        if  printSummary   
+        if  printSummary
         println(iostream, "\n* Generate blocks for excitation computations:")
         println(iostream, "\n  In the cascade approach $(comp.approach), the following assumptions/simplifications are made: ")
-        println(iostream, "    + orbitals are generated independently for each block for a Dirac-Fock-Slater potential; ")
         println(iostream, "    + all blocks (multiplets) are generated from single-CSF levels and without any configuration mixing even in the SC; ")
         println(iostream, "    + only E1 excitations are considered. \n")
         end
@@ -95,12 +102,11 @@ function generateBlocks(scheme::Cascade.PhotoExcitationScheme, comp::Cascade.Com
         for  confa  in confs
             print("  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")
             if  printSummary   println(iostream, "\n*  Multiplet computations for $(string(confa)[1:end])   with $(confa.NoElectrons) electrons ... ")   end
-            ##x basis     = Basics.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            multiplet = SelfConsistent.performSCF([confa], comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            ##x multiplet = Basics.perform("computation: mutiplet from orbitals, no CI, CSF diagonal", [confa],  basis.orbitals, 
-            ##x                            comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-            multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa], multiplet.levels[1].basis.orbitals, 
-                                                                comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
+            ## generateBoundOrbitals returns one orbital set PER CHARGE STATE, keyed by the electron count,
+            ## so it has to be indexed here; passing the whole dictionary was the second half of the same
+            ## signature change missed in 46dd775.
+            multiplet = Hamiltonian.performCIwithFrozenOrbitals([confa], orbitals[confa.NoElectrons], comp.nuclearModel, comp.grid,
+                                                                Cascade.asfSettingsForApproach(comp.approach, comp.asfSettings); printout=false)
             push!( blockList, Cascade.Block(confa.NoElectrons, [confa], true, multiplet) )
             println("and $(length(multiplet.levels[1].basis.csfs)) CSF done. ")
         end
@@ -122,35 +128,34 @@ function generateConfigurationsForPhotoexcitation(multiplets::Array{Multiplet,1}
     # Determine all (reference) configurations from multiplets and generate the 'excited' configurations due to the specificed excitations
     initialConfList = Configuration[]
     for mp  in  multiplets   
-        confList = Basics.extractNonrelativisticConfigurations(mp.levels[1].basis)
+        confList = Basics.extractConfigurations(Basics.FromBasis(), mp.levels[1].basis)
         for  conf in confList   if  conf in initialConfList   nothing   else   push!(initialConfList, conf)      end      end
     end
     blockConfList = Basics.generateConfigurations(initialConfList, scheme.excitationFromShells, scheme.excitationToShells, scheme.NoExcitations)
     # Exclude configurations with too low or too high mean energies as well as those that are parity forbidden for the given multipoles
     hasPlus = false;   hasMinus = false
     for  conf  in  initialConfList   
-        if  Basics.determineParity(conf) == Basics.plus   hasPlus = true    else   hasMinus = true      end
+        if  Basics.extractFromConfiguration(Basics.GetParity(), conf) == Basics.plus   hasPlus = true    else   hasMinus = true      end
     end
     en     = Float64[];   
-    ##x for conf in initialConfList    push!(en, -Semiempirical.estimate("binding energy: XrayDataBooklet", round(Int64, nm.Z), conf))   end
     for conf in initialConfList    push!(en, Empirical.totalEnergy(round(Int64, nm.Z), conf, data = PeriodicTable.XrayDataBooklet() ))    end
     maxen  = maximum(en);    minen  = minimum(en);  
     println(">>> initial configuration(s) have energies from $minen  to  $maxen  [a.u.].")
     #
     newBlockConfList = Configuration[]
-    ##x for  conf  in  blockConfList    meanEnergy = -Semiempirical.estimate("binding energy: XrayDataBooklet", round(Int64, nm.Z), conf)
     for  conf  in  blockConfList    meanEnergy = Empirical.totalEnergy(round(Int64, nm.Z), conf, data = PeriodicTable.XrayDataBooklet() )
         minEn = 0.2* Defaults.convertUnits("energy: from predefined to atomic unit", scheme.minPhotonEnergy) 
         maxEn = 5*   Defaults.convertUnits("energy: from predefined to atomic unit", scheme.maxPhotonEnergy) 
         if  minen + minEn  <= meanEnergy <= maxen + maxEn
             if      hasPlus  &&  hasMinus                                                                        push!(newBlockConfList, conf)   
             elseif  M1 in scheme.multipoles  ||  E2 in scheme.multipoles  ||  M2 in scheme.multipoles            push!(newBlockConfList, conf)  
-            elseif  hasPlus  &&  E1 in scheme.multipoles  &&   Basics.determineParity(conf) == Basics.minus      push!(newBlockConfList, conf)  
-            elseif  hasMinus &&  E1 in scheme.multipoles  &&   Basics.determineParity(conf) == Basics.plus       push!(newBlockConfList, conf)  
-            else    println(">>> exclude $conf because of parity reasons.")
+            elseif  hasPlus  &&  E1 in scheme.multipoles  &&   Basics.extractFromConfiguration(Basics.GetParity(), conf) == Basics.minus 
+                push!(newBlockConfList, conf)  
+            elseif  hasMinus &&  E1 in scheme.multipoles  &&   Basics.extractFromConfiguration(Basics.GetParity(), conf) == Basics.plus 
+                push!(newBlockConfList, conf) 
             end
-        else        println(">>> exclude $conf with energy $meanEnergy [a.u.] because of energy reasons." *
-                            "\n min=$(minen + minEn) ... max=$(maxen + maxEn) ")
+        else    println(">>> exclude $conf with energy $meanEnergy [a.u.] because of energy reasons." *
+                        "\n min=$(minen + minEn) ... max=$(maxen + maxEn) ")
         end
     end
 
@@ -165,18 +170,16 @@ end
         regard to the initial multiplets. The results of these excitation are comprised into (output) data::PhotoExcData, while these 
         data are only printed during the generation and nothing is returned.
 
-`Cascade.perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; output=true, outputToFile::Bool=true)`   
+`Cascade.perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)`   
     ... to perform the same but to return the complete output in a dictionary that is written to disk and can be used in subsequent
         cascade simulation. The particular output depends on the specifications of the cascade.
 """
-function perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)
+function perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true, outputDirectory::String="")
     if  output    results = Dict{String, Any}()    else    results = nothing    end
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     #
     # Perform the SCF and CI computation for the intial-state multiplets if initial configurations are given
     if  comp.initialConfigs != Configuration[]
-        ##x basis      = Basics.performSCF(comp.initialConfigs, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
-        ##x multiplet  = Basics.performCI(basis, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
         multiplet  = SelfConsistent.performSCF(comp.initialConfigs, comp.nuclearModel, comp.grid, comp.asfSettings; printout=false)
         multiplets = [Multiplet("initial states", multiplet.levels)]
     else
@@ -188,8 +191,8 @@ function perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; outpu
     #
     # Generate subsequent cascade configurations as well as display and group them together
     wa  = Cascade.generateConfigurationsForPhotoexcitation(multiplets, comp.scheme, comp.nuclearModel)
-    wb1 = Cascade.groupDisplayConfigurationList(comp.nuclearModel.Z, wa[1], sa="(initial part of the) photo-excited ")
-    wb2 = Cascade.groupDisplayConfigurationList(comp.nuclearModel.Z, wa[2], sa="(generated part of the) photo-excited ")
+    wb1 = Basics.displayConfigurations(comp.nuclearModel.Z, wa[1]; sa="(initial part of the) photo-excited ")
+    wb2 = Basics.displayConfigurations(comp.nuclearModel.Z, wa[2]; sa="(generated part of the) photo-excited ")
     #
     # Determine first all configuration 'blocks' and from them the individual steps of the cascade
     wc1 = Cascade.generateBlocks(scheme, comp::Cascade.Computation, wb1)
@@ -221,9 +224,9 @@ function perform(scheme::PhotoExcitationScheme, comp::Cascade.Computation; outpu
                     "\n   results = JLD2.load(''$filename'')    ... to load the results back from file.")
             if  printSummary   println(iostream, "\n* Write all results to disk; use:\n   JLD2.save(''$filename'', results) \n   using JLD2 " *
                                                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file." )      end      
-            JLD2.@save filename results
+            Cascade.writeDataFile(filename, results)
         end
     end
-    ## return( results )
-    return( results )
+    ## return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end

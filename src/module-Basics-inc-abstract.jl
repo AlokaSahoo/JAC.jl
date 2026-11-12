@@ -1,5 +1,12 @@
 
 
+# LINE WIDTH: THIS FILE IS EXEMPT FROM THE 140-COLUMN RULE (maintainer's decision, 31-Aug-2026). 126 of its 140
+# over-long lines are single-line `@doc "..."` strings attached to a struct definition, which cannot be wrapped
+# without being rewritten as triple-quoted blocks -- a change that would add three lines per struct and make the
+# list of concrete types harder, not easier, to scan. The remainder are the aligned `+ Name  ... description`
+# entries of the abstract-type overviews, which are tables in the same sense.
+
+
 """
 `abstract type Basics.AbstractAngularMomentum` 
     ... defines an abstract and a number of concrete types for dealing with angular momentum variables.
@@ -26,7 +33,7 @@ end
 
 
 """
-`Basics.AngularJ64(m::Integer)`  ... constructor for a given integer (numerator).
+`Basics.AngularJ64(j::Integer)`  ... constructor for a given integer (numerator).
 """
 function AngularJ64(j::Integer)
     j < 0   &&   error("j must be positive.")
@@ -55,8 +62,8 @@ end
 
 """
 `Basics.oplus(ja::AngularJ64, jb::AngularJ64)`  
-    ... adds the angular momenta ja `oplus` jb and returns a list::Array{AngularJ64,1} of j-valuescin the interval 
-        |ja - jb| <= j <= ja + jb.
+    ... adds the angular momenta ja `oplus` jb and returns a list::Array{AngularJ64,1} of j-valuescin the interval |ja - jb| <= j <= ja +
+        jb.
 """
 function  oplus(ja::AngularJ64, jb::AngularJ64)
     if  ja.den == 1   ja2 = 2ja.num   else   ja2 = ja.num   end
@@ -231,12 +238,13 @@ function Base.string(sym::LevelSymmetry)
     end
 end
 
+
 #################################################################################################################################
 #################################################################################################################################
 
 
 """
-`abstract type Basics.AbstractContinuumNormalization` 
+`abstract type Basics.ContinuumNormalization` 
     ... defines an abstract and a number of singleton types for dealing with the normalization of continuum orbitals.
 
     + PureSineNorm       ... normalize with regard to an (asymtotic) pure sine funtion, sin(kr).
@@ -250,7 +258,943 @@ struct     CoulombSineNorm      <:  ContinuumNormalization     end
 struct     OngRussekNorm        <:  ContinuumNormalization     end
 struct     AlokNorm             <:  ContinuumNormalization     end
 
-export  AbstractContinuumNormalization,   PureSineNorm,   CoulombSineNorm,   OngRussekNorm,   AlokNorm
+@doc "... normalize with regard to an (asymtotic) pure sine funtion, sin(kr)."                                                            PureSineNorm
+@doc "... normalize with regard to an (asymtotic) Coulombic-sine funtion, sin(kr + ...)."                                              CoulombSineNorm
+@doc "... normalize by following Ong & Russek (1973)."                                                                                   OngRussekNorm
+@doc "... normalize following Salvats Radial code"                                                                                            AlokNorm
+
+export  ContinuumNormalization,   PureSineNorm,   CoulombSineNorm,   OngRussekNorm,   AlokNorm
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractCascadeApproach`
+    ... defines an abstract and a number of singleton types for the computational approach/model that is applied in order to
+        generate and evaluate all many-electron amplitudes of a given cascade. Lives here (not in Cascade.jl) because DecayYield.Settings
+        needs it as a compile-time field type, and module-DecayYield.jl is included BEFORE module-Cascade.jl in JenaAtomicCalculator.jl,
+        while Cascade itself needs DecayYield.Outcome/Settings as compile-time function-argument types (module-Cascade-inc-computations.jl)
+        -- a genuine circular dependency that only a shared, early-loaded supertype (the same pattern already used for
+        AbstractPropertySettings/AbstractProcessSettings) can resolve.
+
+    + struct AverageSCA
+    ... all levels in the cascade are described in single-configuration and single-CSF approximation; this (rather crude) approach neglects
+        all configuration-interactions and also applies just a single set of one-electron orbitals (from the least-ionized charge state) for
+        all considered charge states.
+
+    + struct SCA
+    ... all levels in the cascade are described in single-configuration approximation but with 'mixtures' within the configuration;
+        an individual mean-field is generated for each charge state and all continuum orbitals are generated for the correct transition
+        energy in the field of the remaining ion. Moreover, all the fine-structure transitions are calculated individually.
+
+    + struct UserMCA
+    ... placeholder for a genuine multiconfiguration cascade approach; declared but NOT (yet) implemented anywhere in the
+        codebase -- selecting it does not raise an explicit error and currently falls through to the same code path as SCA in the
+        Cascade-inc-*.jl dispatch sites, which do not special-case it either.
+"""
+abstract type  AbstractCascadeApproach                   end
+struct         AverageSCA  <:  AbstractCascadeApproach   end
+struct         SCA         <:  AbstractCascadeApproach   end
+struct         UserMCA     <:  AbstractCascadeApproach   end
+
+@doc "... all levels in the cascade are described in single-configuration and single-CSF approximation; this (rather crude) approach " *
+     "neglects all configuration-interactions and also applies just a single set of one-electron orbitals (from the least-ionized " *
+     "charge state) for all considered charge states."   AverageSCA
+@doc "... all levels in the cascade are described in single-configuration approximation but with 'mixtures' within the " *
+     "configuration; an individual mean-field is generated for each charge state and all continuum orbitals are generated for the " *
+     "correct transition energy in the field of the remaining ion. Moreover, all the fine-structure transitions are calculated " *
+     "individually."   SCA
+@doc "... placeholder for a genuine multiconfiguration cascade approach; declared but NOT (yet) implemented anywhere in the codebase " *
+     "-- selecting it does not raise an explicit error and currently falls through to the same code path as SCA in the " *
+     "Cascade-inc-*.jl dispatch sites, which do not special-case it either."   UserMCA
+
+export  AbstractCascadeApproach, AverageSCA, SCA, UserMCA
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractConfigurationRestriction`
+    ... defines an abstract types for dealing with restrictions that need to be applied to a list of configurations. Typically, a loop
+        through is made through all given restrictions and all configurations are tested to obey all these restrictions. Two contradicting
+        restrictions, for instance RestrictParity(plus) & RestrictParity(minus), therefore leads zero configurations in all cases. It
+        remains the reponsibility of the user to make sure that the given restrictions are consistent with what is to be achieved. The given
+        set of restrictions can be easily extended if this need arises by the users.
+
+    + RestrictMaximumDisplacements(..)  ... to restrict the maximum replacements wrt a (2nd) configuration.
+    + RestrictNoElectronsTo(..)         ... to restrict the total number of electron in high subshells.
+    + RestrictParity(..)                ... to restrict to configurations with a given parity.
+    + RestrictToShellDoubles(..)        ... to allow only double occupations in high subshells.
+    + RequestMinimumOccupation(..)      ... to request a minimum occupation in a given set of shells.
+    + RequestMaximumOccupation(..)      ... to request a maximum occupation in a given set of shells.
+"""
+abstract type  AbstractConfigurationRestriction      end
+
+export  AbstractConfigurationRestriction, RestrictMaximumDisplacements, RestrictNoElectronsTo, RestrictParity, 
+        RestrictToShellDoubles, RequestMinimumOccupation, RequestMaximumOccupation
+
+"""
+`struct  Basics.RestrictMaximumDisplacements  <: AbstractConfigurationRestriction`   
+    ... restrict the maximum replacements w.r.t. (another) given configuration, which can have a different number of electrons. A
+        "displacement" is simply defined as the difference of occuation numbers. This restriction is useful to determine allowed
+        configurations in a second-order treatment of atomic processes. An odd number of displacement naturally arise for all configurations
+        which differ by one or three electrons from the reference configurations. Several restrictions of this type can be formulated but
+        are treated separately.
+
+    + conf          ::Configuration   ... configuration w.r.t. which displacements are taken.
+    + maxDisplace   ::Int64           ... maximum number of displacements >= 0.
+"""
+struct   RestrictMaximumDisplacements  <: AbstractConfigurationRestriction
+    conf            ::Configuration
+    maxDisplace     ::Int64
+end
+
+
+# `Base.string(res::RestrictMaximumDisplacements)`  ... provides a proper printout of the variable res::RestrictMaximumDisplacements.
+function Base.string(res::RestrictMaximumDisplacements)
+    sa = "Restrict to configurations with maximum $(res.maxDisplace) displacements w.r.t. $(res.conf)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RestrictMaximumDisplacements)`  ... prepares a proper printout of the variable res::RestrictMaximumDisplacements.
+function Base.show(io::IO, res::RestrictMaximumDisplacements)
+    sa = string(res);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.RestrictNoElectronsTo  <: AbstractConfigurationRestriction`   
+    ... restrict the number of electron in all shells with principal quantum number n >= nmin or orbital angular momentum l >= lmin to a
+        total of ne electrons.
+
+    + ne            ::Int64     ... maximum number of (allowed) electrons in the specicied higher subshells.
+    + nmin          ::Int64     ... principal quantum number nmin.
+    + lmin          ::Int64     ... orbital angular momentum lmin.
+"""
+struct   RestrictNoElectronsTo  <: AbstractConfigurationRestriction
+    ne              ::Int64
+    nmin            ::Int64
+    lmin            ::Int64
+end
+
+
+# `Base.string(res::RestrictNoElectronsTo)`  ... provides a proper printout of the variable res::RestrictNoElectronsTo.
+function Base.string(res::RestrictNoElectronsTo)
+    sa = "Restrict to configurations with a maximum of $(res.ne) electrons in shells with n >= $(res.nmin) & l >= $(res.lmin)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RestrictNoElectronsTo)`  ... prepares a proper printout of the variable res::RestrictNoElectronsTo.
+function Base.show(io::IO, res::RestrictNoElectronsTo)
+    sa = string(res);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.RestrictParity  <: AbstractConfigurationRestriction`   
+    ... restrict to configurations with a given parity.
+
+    + parity        ::Basics.Parity   ... given parity.
+"""
+struct   RestrictParity  <: AbstractConfigurationRestriction
+    parity          ::Basics.Parity
+end
+
+
+# `Base.string(res::RestrictParity)`  ... provides a proper printout of the variable res::RestrictParity.
+function Base.string(res::RestrictParity)
+    sa = "Restrict to configurations with parity $(res.parity)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RestrictParity)`  ... prepares a proper printout of the variable res::RestrictParity.
+function Base.show(io::IO, res::RestrictParity)
+    sa = string(res);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.RestrictToShellDoubles  <: AbstractConfigurationRestriction`   
+    ... restrict to a double electron occupation in all shells with principal quantum number n >= nmin or orbital angular momentum l >= lmin. 
+
+    + nmin          ::Int64     ... principal quantum number nmin.
+    + lmin          ::Int64     ... orbital angular momentum lmin.
+"""
+struct   RestrictToShellDoubles  <: AbstractConfigurationRestriction
+    nmin            ::Int64
+    lmin            ::Int64
+end
+
+
+# `Base.string(res::RestrictToShellDoubles)`  ... provides a proper printout of the variable res::RestrictToShellDoubles.
+function Base.string(res::RestrictToShellDoubles)
+    sa = "Restrict to configurations with a double electron occupation in shells with n >= $(res.nmin) & l >= $(res.lmin)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RestrictToShellDoubles)`  ... prepares a proper printout of the variable res::RestrictToShellDoubles.
+function Base.show(io::IO, res::RestrictToShellDoubles)
+    sa = string(res);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.RequestMinimumOccupation  <: AbstractConfigurationRestriction`   
+    ... request a minimum occupation ne in the given (list of) shells. 
+
+    + ne            ::Int64           ... minimum electron occupation.
+    + shells        ::Array{Shell,1}  ... list of shells.
+"""
+struct   RequestMinimumOccupation  <: AbstractConfigurationRestriction
+    ne              ::Int64 
+    shells          ::Array{Shell,1}
+end
+
+
+# `Base.string(res::RequestMinimumOccupation)`  ... provides a proper printout of the variable res::RequestMinimumOccupation.
+function Base.string(res::RequestMinimumOccupation)
+    sa = "Request a minimum occupation of $(res.ne) electron in the (list of) shells $(res.shells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RequestMinimumOccupation)`  ... prepares a proper printout of the variable res::RequestMinimumOccupation.
+function Base.show(io::IO, res::RequestMinimumOccupation)
+    sa = string(res);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.RequestMaximumOccupation  <: AbstractConfigurationRestriction`   
+    ... request a maximum occupation ne in the given (list of) shells. 
+
+    + ne            ::Int64           ... maximum electron occupation.
+    + shells        ::Array{Shell,1}  ... list of shells.
+"""
+struct   RequestMaximumOccupation  <: AbstractConfigurationRestriction
+    ne              ::Int64 
+    shells          ::Array{Shell,1}
+end
+
+
+# `Base.string(res::RequestMaximumOccupation)`  ... provides a proper printout of the variable res::RequestMaximumOccupation.
+function Base.string(res::RequestMaximumOccupation)
+    sa = "Request a maximum occupation of $(res.ne) electron in the (list of) shells $(res.shells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, res::RequestMaximumOccupation)`  ... prepares a proper printout of the variable res::RequestMaximumOccupation.
+function Base.show(io::IO, res::RequestMaximumOccupation)
+    sa = string(res);       print(io, sa)
+end
+
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractConfigurationTheme` 
+    ... defines an abstract and a number of concrete (detailed and singleton) data types to distinguish a good number of concrete themes for
+        manipulating (list of) configurations. These themes are listed and briefly explained below; they typically provide the data central
+        to the particular theme, while other input for applying the theme is handled by multiple dispatch.
+
+    + AddElectrons            ... to add to the given configurations one or several electrons into specified shells.
+    + ExciteElectrons         ... to excite for the given configurations one or several electrons into specified shells.
+    + RemoveElectrons         ... to remove from the given configurations one or several electrons from specified shells.
+    + RestrictExcitations     ... to restrict the given configurations due to one or several configuration restrictions.
+    
+    + ForAutoIonization       ... to generate configurations that are related by autoionization (deexcitation + single remove).
+    + ForDielectronicCapture  ... to generate configurations that are related by dielectronic capture (excitation + single capture).
+    + ForDielectronicRecombination     ... to compute the DR resonance strength (for pedestrians only).
+    + ForElectronCapture      ... to generate configurations that are related by the capture of an additional electron.
+    + ForImpactIonization     ... to estimate electron impact-ionization cross sections (for pedestrians only)
+    + ForHollowIons           ... to generate configurations that are related by multiple capture into high-n shells.
+    + ForPhotoEmission        ... to generate configurations that are related by photoemission (single replacement of electrons).
+    + ForPhotoIonization      ... to generate configurations that are related by photoionization (single removement of electrons).
+    + ForPhotoRecombination   ... to generate configurations that are related by radiative capture (just single-electron capture).
+    + ForStepwiseDecay        ... to generate configurations that are related by photoemission and autoionization.
+
+    + ForGivenConfigs         ... to perform computations for given configurations.
+    + ForIsoelectronicSequence  ... to compute configuration-averaged energies along an isoelectronic sequence.
+    
+    + GroundConfiguration     ... to generate the ground configuration for a given number of electrons.
+    + MeanConfiguration       ... to generate the mean configuration, i.e. a configuration with mean occupation numbers.
+    + RelativisticConfigurations  to generate/deal with relativistic configurations.
+
+    + AllShells               ... to extract all occupied shells from a set of configurations.
+    + ByMultipoles            ... to extract the configurations due to multipole selection themes.
+    + ByParity                ... to extract the configurations due to parity.
+    + ClosedCore              ... to extract the closed core from the given configuration.
+    + ClosedShells            ... to extract the closed shells from given configurations.
+    + ClosedSubshells         ... to extract the closed subshells from given configurations.
+    + ContractShells          ... to extract the configurations without empty shell occupation (contracted shells).
+    + ExcitationLevel         ... to determine the excitation level of a configuration.
+    + ExpandShells            ... to extract the configurations with empty shell occupation (expanded shells).
+    + FromBasis               ... to extract the configuration from the basis.
+    + FromMultiplet           ... to extract the configuration from the multiplet(s).
+    + GeneralizedConfiguration .. to extract the generalized configuration.
+    + GetParity               ... to extract the parity of a configurations.
+    + IsOccupied              ... to extract where a shell or subshell is occupied in the given configuration.
+    + LeadingConfiguration    ... to extract the leading configuration.
+    + LeadingConfigurationR   ... to extract the leading relativistic configuration.
+    + MeanOccupation          ... to extract occupation numbers from given configurations.
+    + Multiplicity            ... to extract the multiplicity of a configuration.
+    + NonrelativisticBasis    ... to extract the configurations from a non-relativistic basis.
+    + NumberOfElectrons       ... to extract the number of electrons from a set of configurations.
+    + OccupationDifference    ... to extract differences of occupation numbers from given configurations.
+    + OpenShells              ... to extract the open shells from the given configurations.
+    + OpenSubshells           ... to extract the open subshells from the given configurations.
+    + TotalAM                 ... to extract the total angular momenta J that are associated with the configuration.
+    + ValenceOccupation       ... to extract the remaining configuration beyond a given (closed) core configuration.
+    
+    + FineStructure           ... to display the total J fine-structure levels of a configuration (without energies).
+    + FineStructureLS         ... to display the total LSJ fine-structure levels of a configuration (without energies).
+    + HyperfineStructure      ... to display the total F hyperfine-structure levels of a configuration (without energies).
+    + HundRules               ... to display the total LSJ fine-structure levels, ordered by Hund's themes (not yet).
+        
+"""
+abstract type  AbstractConfigurationTheme                                  end
+
+
+struct   ForAutoIonization              <:  AbstractConfigurationTheme     end
+struct   ForImpactIonization            <:  AbstractConfigurationTheme     end
+struct   ForPhotoEmission               <:  AbstractConfigurationTheme     end
+struct   ForPhotoIonization             <:  AbstractConfigurationTheme     end
+
+@doc "... to generate configurations that are related by autoionization (deexcitation + single remove)."                             ForAutoIonization
+@doc "... to estimate electron impact-ionization cross sections (for pedestrians only)"                                            ForImpactIonization
+@doc "... to generate configurations that are related by photoemission (single replacement of electrons)."                            ForPhotoEmission
+@doc "... to generate configurations that are related by photoionization (single removement of electrons)."                         ForPhotoIonization
+
+struct   ForGivenConfigs                <:  AbstractConfigurationTheme     end
+struct   ForIsoelectronicSequence       <:  AbstractConfigurationTheme     end
+
+@doc "... to perform computations for given configurations."                                                                           ForGivenConfigs
+@doc "... to compute configuration-averaged energies along an isoelectronic sequence."                                        ForIsoelectronicSequence
+
+struct   MeanConfiguration              <:  AbstractConfigurationTheme     end
+struct   RelativisticConfigurations     <:  AbstractConfigurationTheme     end
+
+@doc "... to generate/deal with relativistic configurations."                                                               RelativisticConfigurations
+
+@doc "... to generate the mean configuration, i.e. a configuration with mean occupation numbers."                                    MeanConfiguration
+
+struct   AllShells                      <:  AbstractConfigurationTheme     end
+struct   ByMultipoles                   <:  AbstractConfigurationTheme     end
+struct   ClosedCore                     <:  AbstractConfigurationTheme     end
+struct   ClosedShells                   <:  AbstractConfigurationTheme     end
+struct   ClosedSubshells                <:  AbstractConfigurationTheme     end
+struct   ContractShells                 <:  AbstractConfigurationTheme     end
+struct   ExcitationLevel                <:  AbstractConfigurationTheme     end
+struct   FromBasis                      <:  AbstractConfigurationTheme     end
+struct   FromMultiplet                  <:  AbstractConfigurationTheme     end
+struct   GeneralizedConfigurations      <:  AbstractConfigurationTheme     end
+struct   GetParity                      <:  AbstractConfigurationTheme     end 
+struct   IsOccupied                     <:  AbstractConfigurationTheme     end 
+struct   LeadingConfiguration           <:  AbstractConfigurationTheme     end
+struct   LeadingConfigurationR          <:  AbstractConfigurationTheme     end
+struct   MeanOccupation                 <:  AbstractConfigurationTheme     end
+struct   Multiplicity                   <:  AbstractConfigurationTheme     end
+struct   NonrelativisticBasis           <:  AbstractConfigurationTheme     end
+struct   NumberOfElectrons              <:  AbstractConfigurationTheme     end
+struct   OccupationDifference           <:  AbstractConfigurationTheme     end
+struct   OpenShellNumber                <:  AbstractConfigurationTheme     end
+struct   OpenShells                     <:  AbstractConfigurationTheme     end
+struct   OpenSubshells                  <:  AbstractConfigurationTheme     end
+struct   ValenceOccupation              <:  AbstractConfigurationTheme     end
+struct   ValenceShells                  <:  AbstractConfigurationTheme     end
+
+@doc "... theme for Basics.generateConfigurations, to generate generalized configurations in which shell occupations may be given as " *
+     "ranges."   GeneralizedConfigurations
+@doc "... theme for Basics.extractFromConfiguration, to extract the NUMBER of open shells of a configuration."                         OpenShellNumber
+@doc "... theme for Basics.extractFromConfiguration, to extract the valence shells of a configuration, decided on the configuration " *
+     "itself."   ValenceShells
+
+@doc "... to extract all occupied shells from a set of configurations."                                                                      AllShells
+@doc "... to extract the configurations due to multipole selection themes."                                                               ByMultipoles
+@doc "... to extract the closed core from the given configuration."                                                                         ClosedCore
+@doc "... to extract the closed shells from given configurations."                                                                        ClosedShells
+@doc "... to extract the closed subshells from given configurations."                                                                  ClosedSubshells
+@doc "... to extract the configurations without empty shell occupation (contracted shells)."                                            ContractShells
+@doc "... to determine the excitation level of a configuration."                                                                       ExcitationLevel
+@doc "... to extract the configuration from the basis."                                                                                      FromBasis
+@doc "... to extract the configuration from the multiplet(s)."                                                                           FromMultiplet
+@doc "... to extract the parity of a configurations."                                                                                        GetParity
+@doc "... to extract where a shell or subshell is occupied in the given configuration."                                                     IsOccupied
+@doc "... to extract the leading configuration."                                                                                  LeadingConfiguration
+@doc "... to extract the leading relativistic configuration."                                                                    LeadingConfigurationR
+@doc "... to extract occupation numbers from given configurations."                                                                     MeanOccupation
+@doc "... to extract the multiplicity of a configuration."                                                                                Multiplicity
+@doc "... to extract the configurations from a non-relativistic basis."                                                           NonrelativisticBasis
+@doc "... to extract the number of electrons from a set of configurations."                                                          NumberOfElectrons
+@doc "... to extract differences of occupation numbers from given configurations."                                                OccupationDifference
+@doc "... to extract the open shells from the given configurations."                                                                        OpenShells
+@doc "... to extract the open subshells from the given configurations."                                                                  OpenSubshells
+@doc "... to extract the remaining configuration beyond a given (closed) core configuration."                                        ValenceOccupation
+
+struct   FineStructure                  <:  AbstractConfigurationTheme     end
+struct   FineStructureLS                <:  AbstractConfigurationTheme     end
+struct   HundsRules                     <:  AbstractConfigurationTheme     end
+
+@doc "... to display the total LSJ fine-structure levels, ordered by Hund's rules (not yet)."                                               HundsRules
+
+@doc "... to display the total J fine-structure levels of a configuration (without energies)."                                           FineStructure
+@doc "... to display the total LSJ fine-structure levels of a configuration (without energies)."                                       FineStructureLS
+
+export  AbstractConfigurationTheme, AddElectrons, ExciteElectrons, RemoveElectrons, RestrictExcitations,
+        ForAutoIonization, ForElectronCapture, ForDielectronicCapture, ForDielectronicRecombination, ForGivenConfigs,
+        ForHollowIons, ForImpactIonization, ForIsoelectronicSequence,
+        ForPhotoEmission, ForPhotoIonization,  ForPhotoRecombination, ForRasExcitations, ForStepwiseDecay,
+        GeneralizedConfigurations, GroundConfiguration, MeanConfiguration, RelativisticConfigurations,
+        AllShells, ByMultipoles, ByNumber, ByParity, ClosedCore, ClosedShells, ClosedSubshells, ContractShells, ExcitationLevel,
+        ExpandShells, FromBasis, FromMultiplet, GetParity, IsOccupied, LeadingConfiguration, LeadingConfigurationR, 
+        MeanOccupation, Multiplicity, NonrelativisticBasis, NumberOfElectrons, OccupationDifference, OpenShellNumber, 
+        OpenShells, OpenSubshells, TotalAM, ValenceOccupation, ValenceShells,
+        FineStructure, FineStructureLS, HundsRules, HyperfineStructure, ZeemanStructure
+
+        
+"""
+`struct  Basics.AddElectrons          <:  AbstractConfigurationTheme`   
+    ... to add ne electrons in the intoshells for each of the given configurations. 
+
+    + ne             ::Int64            ... number of electrons to be added.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are added.
+"""
+struct   AddElectrons                 <:  AbstractConfigurationTheme
+    ne               ::Int64           
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.AddElectrons)`  ... provides a proper printout of the variable theme::Basics.AddElectrons.
+function Base.string(theme::Basics.AddElectrons)
+    sa = "AddElectrons theme with number of electrons ne=$(theme.ne) added into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.AddElectrons)`  ... prepares a proper printout of the variable theme::Basics.AddElectrons.
+function Base.show(io::IO, theme::Basics.AddElectrons)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ByNumber              <:  AbstractConfigurationTheme`   
+    ... to select configurations due to given numbers of electrons. 
+
+    + NoElectrons    ::Array{Int64,1}   ... List of selected electron numbers
+"""
+struct   ByNumber                     <:  AbstractConfigurationTheme
+    NoElectrons      ::Array{Int64,1}           
+end
+
+
+# `Base.string(theme::Basics.ByNumber)`  ... provides a proper printout of the variable theme::Basics.ByNumber.
+function Base.string(theme::Basics.ByNumber)
+    sa = "ByNumber theme with selected numbers of electrons $(theme.NoElectrons)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ByNumber)`  ... prepares a proper printout of the variable theme::Basics.ByNumber.
+function Base.show(io::IO, theme::Basics.ByNumber)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ByParity              <:  AbstractConfigurationTheme`   
+    ... select configurations due to a given parity. 
+
+    + P              ::Basics.Parity  ... Selected parity.
+"""
+struct   ByParity                     <:  AbstractConfigurationTheme
+    P                ::Basics.Parity           
+end
+
+
+# `Base.string(theme::Basics.ByParity)`  ... provides a proper printout of the variable theme::Basics.ByParity.
+function Base.string(theme::Basics.ByParity)
+    sa = "ByParity theme with selected parity P=$(theme.P)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ByParity)`  ... prepares a proper printout of the variable theme::Basics.ByParity.
+function Base.show(io::IO, theme::Basics.ByParity)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ExciteElectrons       <:  AbstractConfigurationTheme`   
+    ... to excite ne electrons fromShells to the intoshells for each of the given configurations. 
+
+    + ne             ::Int64            ... number of electrons to be added.
+    + fromShells     ::Array{Shell,1}   ... The shells from which the electrons are excited.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are excited.
+"""
+struct   ExciteElectrons              <:  AbstractConfigurationTheme
+    ne               ::Int64           
+    fromShells       ::Array{Shell,1}
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ExciteElectrons)`  ... provides a proper printout of the variable theme::Basics.ExciteElectrons.
+function Base.string(theme::Basics.ExciteElectrons)
+    sa = "ExciteElectrons theme with number of electrons ne=$(theme.ne) from $(theme.fromShells) into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ExciteElectrons)`  ... prepares a proper printout of the variable theme::Basics.ExciteElectrons.
+function Base.show(io::IO, theme::Basics.ExciteElectrons)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ExpandShells          <:  AbstractConfigurationTheme`   
+    ... expand a configuration with empty shells due to a given number of shells
+
+    + shells         ::Array{Shell,1}  ... Shells that will occur in the expanded form.
+"""
+struct   ExpandShells                 <:  AbstractConfigurationTheme
+    shells           ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ExpandShells)`  ... provides a proper printout of the variable theme::Basics.ExpandShells.
+function Base.string(theme::Basics.ExpandShells)
+    sa = "ExpandShells theme with shells=$(theme.shells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ExpandShells)`  ... prepares a proper printout of the variable theme::Basics.ExpandShells.
+function Base.show(io::IO, theme::Basics.ExpandShells)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ForDielectronicCapture  <:  AbstractConfigurationTheme`   
+    ... to excite one electron fromShells to the toshells and add another electron into the intoShells for each of the given configurations.
+
+    + fromShells     ::Array{Shell,1}   ... The shells from which the electrons are excited from --> to.
+    + toShells       ::Array{Shell,1}   ... The shells to which the electrons are excited from --> to.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the additional electron is captured.
+"""
+struct   ForDielectronicCapture         <:  AbstractConfigurationTheme
+    fromShells       ::Array{Shell,1}
+    toShells         ::Array{Shell,1}
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForDielectronicCapture)`  ... provides a proper printout of the variable theme::Basics.ForDielectronicCapture.
+function Base.string(theme::Basics.ForDielectronicCapture)
+    sa = "ForDielectronicCapture theme with electron excitaton from $(theme.fromShells) to $(theme.toShells) " *
+         "as well as the capture of an additional electron into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForDielectronicCapture)`  ... prepares a proper printout of the variable theme::Basics.ForDielectronicCapture.
+function Base.show(io::IO, theme::Basics.ForDielectronicCapture)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ForDielectronicRecombination     <:  AbstractConfigurationTheme`   
+    ... to excite one electron fromShells to the toshells and add another electron into the intoShells for each of the given configurations.
+        The subsequent stabiliztion is considered into the
+            decayShells.
+
+    + fromShells     ::Array{Shell,1}   ... The shells from which the electrons are excited from --> to.
+    + toShells       ::Array{Shell,1}   ... The shells to which the electrons are excited from --> to.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the additional electron is captured.
+    + decayShells    ::Array{Shell,1}   ... The shells into which (radiative) stabilization occurs.
+"""
+struct   ForDielectronicRecombination           <:  AbstractConfigurationTheme
+    fromShells       ::Array{Shell,1}
+    toShells         ::Array{Shell,1}
+    intoShells       ::Array{Shell,1}
+    decayShells      ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForDielectronicRecombination)`  ... provides a proper printout of the variable theme::Basics.ForDielectronicRecombination.
+function Base.string(theme::Basics.ForDielectronicRecombination)
+    sa = "ForDielectronicRecombination theme with electron excitaton from $(theme.fromShells) to $(theme.toShells), " *
+         "together with the capture of an additional electron into $(theme.intoShells) " *
+        "\nand the (raditive) stabilization in the $(theme.decayShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForDielectronicRecombination)`  ... prepares a proper printout of the variable theme::Basics.ForDielectronicRecombination.
+function Base.show(io::IO, theme::Basics.ForDielectronicRecombination)
+    sa = string(theme);       print(io, sa)
+end  
+
+  
+"""
+`struct  Basics.ForElectronCapture      <:  AbstractConfigurationTheme`   
+    ... to add ne electrons in the intoshells for each of the given configurations. 
+
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are added.
+"""
+struct   ForElectronCapture             <:  AbstractConfigurationTheme
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForElectronCapture)`  ... provides a proper printout of the variable theme::Basics.ForElectronCapture.
+function Base.string(theme::Basics.ForElectronCapture)
+    sa = "ForElectronCapture theme with one additional electron into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForElectronCapture)`  ... prepares a proper printout of the variable theme::Basics.ForElectronCapture.
+function Base.show(io::IO, theme::Basics.ForElectronCapture)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ForHollowIons           <:  AbstractConfigurationTheme`   
+    ... to excite ne electrons fromShells to the intoshells for each of the given configurations. 
+
+    + ne             ::Int64            ... number of electrons to be captured.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are captured
+    + decayShells    ::Array{Shell,1}   ... The shells which need to be considered between the shells of the ions and the intoShells in
+                                            order to model the decay of hollow ions.
+"""
+struct   ForHollowIons                  <:  AbstractConfigurationTheme
+    ne               ::Int64           
+    intoShells       ::Array{Shell,1}
+    decayShells      ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForHollowIons)`  ... provides a proper printout of the variable theme::Basics.ForHollowIons.
+function Base.string(theme::Basics.ForHollowIons)
+    sa = "ForHollowIons theme with number of electrons ne=$(theme.ne), the capture into into $(theme.intoShells) and " *
+         "the subsequent decay into $(theme.decayShells)"
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForHollowIons)`  ... prepares a proper printout of the variable theme::Basics.ForHollowIons.
+function Base.show(io::IO, theme::Basics.ForHollowIons)
+    sa = string(theme);       print(io, sa)
+end
+  
+  
+"""
+`struct  Basics.ForPhotoRecombination   <:  AbstractConfigurationTheme`   
+    ... to add ne electrons in the intoshells for each of the given configurations. 
+
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are added.
+"""
+struct   ForPhotoRecombination          <:  AbstractConfigurationTheme
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForPhotoRecombination)`  ... provides a proper printout of the variable theme::Basics.ForPhotoRecombination.
+function Base.string(theme::Basics.ForPhotoRecombination)
+    sa = "ForPhotoRecombination theme with one additional electron into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForPhotoRecombination)`  ... prepares a proper printout of the variable theme::Basics.ForPhotoRecombination.
+function Base.show(io::IO, theme::Basics.ForPhotoRecombination)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.ForRasExcitations       <:  AbstractConfigurationTheme`   
+    ... to excite ne electrons fromShells to the intoshells for each of the given configurations. 
+
+    + se             ::Bool             ... True if single excitations to be included, and false otherwise.
+    + de             ::Bool             ... True if double excitations to be included, and false otherwise.
+    + te             ::Bool             ... True if triple excitations to be included, and false otherwise.
+    + qe             ::Bool             ... True if quadruple excitations to be included, and false otherwise.
+    + fromShells     ::Array{Shell,1}   ... The shells from which the electrons are excited.
+    + intoShells     ::Array{Shell,1}   ... The shells into which the electrons are excited.
+"""
+struct   ForRasExcitations               <:  AbstractConfigurationTheme
+    se               ::Bool   
+    de               ::Bool   
+    te               ::Bool   
+    qe               ::Bool   
+    fromShells       ::Array{Shell,1}
+    intoShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.ForRasExcitations)`  ... provides a proper printout of the variable theme::Basics.ForRasExcitations.
+function Base.string(theme::Basics.ForRasExcitations)
+    sa = "ForRasExcitations theme with SDTQ = ($(theme.se), $(theme.de), $(theme.te), $(theme.qe)) and excitations " *
+         "from $(theme.fromShells) into $(theme.intoShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForRasExcitations)`  ... prepares a proper printout of the variable theme::Basics.ForRasExcitations.
+function Base.show(io::IO, theme::Basics.ForRasExcitations)
+    sa = string(theme);       print(io, sa)
+end
+  
+  
+"""
+`struct  Basics.ForStepwiseDecay        <:  AbstractConfigurationTheme`   
+    ... to generate all those configurations that occur due to the stepwise photoemission autoionization of configurations with some
+        inner-shell hole.
+
+    + maximallyReleased   ::Int64   ... Maximum number of electrons that can be released from the given configurations.
+    + decayShells         ::Array{Shell,1}
+        ... Shells that are to take part in the decay even though they do not occur in the given configurations.
+            The generator decides which shells may participate from the CONFIGURATION itself, so a shell that is
+            simply absent can never contribute: Configuration("1s^2 2p^4") offers only 2p and therefore yields NO
+            decay configuration at all, silently, although such an ion plainly decays via its 2s. Listing 2s here
+            makes it available. A shell already present in a configuration need not be listed.
+"""
+struct   ForStepwiseDecay               <:  AbstractConfigurationTheme
+    maximallyReleased     ::Int64
+    decayShells           ::Array{Shell,1}
+end
+
+
+"""
+`Basics.ForStepwiseDecay(maximallyReleased::Int64)`
+    ... constructor for a stepwise-decay theme that adds no shells of its own; an theme::Basics.ForStepwiseDecay is returned.
+"""
+function ForStepwiseDecay(maximallyReleased::Int64)
+    ForStepwiseDecay(maximallyReleased, Shell[])
+end
+
+
+# `Base.string(theme::Basics.ForStepwiseDecay)`  ... provides a proper printout of the variable theme::Basics.ForStepwiseDecay.
+function Base.string(theme::Basics.ForStepwiseDecay)
+    sa = "ForStepwiseDecay theme with the maximum number of released electrons $(theme.maximallyReleased) " *
+         "and the additional decay shells $(theme.decayShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ForStepwiseDecay)`  ... prepares a proper printout of the variable theme::Basics.ForStepwiseDecay.
+function Base.show(io::IO, theme::Basics.ForStepwiseDecay)
+    sa = string(theme);       print(io, sa)
+end
+  
+  
+"""
+`struct  Basics.HyperfineStructure      <:  AbstractConfigurationTheme`   
+    ... to display the total F hyperfine-structure levels of a configuration (without energies).
+
+    + spinI        ::AngularJ64   ... Nuclear spin I.
+"""
+struct   HyperfineStructure             <:  AbstractConfigurationTheme
+    spinI          ::AngularJ64 
+end
+
+
+# `Base.string(theme::Basics.HyperfineStructure)`  ... provides a proper printout of the variable theme::Basics.HyperfineStructure.
+function Base.string(theme::Basics.HyperfineStructure)
+    sa = "HyperfineStructure theme with nuclear spin $(theme.spinI)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.HyperfineStructure)`  ... prepares a proper printout of the variable theme::Basics.HyperfineStructure.
+function Base.show(io::IO, theme::Basics.HyperfineStructure)
+    sa = string(theme);       print(io, sa)
+end
+
+
+        
+"""
+`struct  Basics.ZeemanStructure        <:  AbstractConfigurationTheme`   
+    ... to compute the Lande g_J factors of a configuration, and the Zeeman splittings if a field is given.
+
+    + BField       ::Float64      ... Magnetic flux density in Tesla; g_J alone needs none, so 0. is the usual value.
+"""
+struct   ZeemanStructure                <:  AbstractConfigurationTheme
+    BField         ::Float64
+end
+
+
+# `Base.string(theme::Basics.ZeemanStructure)`  ... provides a proper printout of the variable theme::Basics.ZeemanStructure.
+function Base.string(theme::Basics.ZeemanStructure)
+    sa = "ZeemanStructure theme with a magnetic flux density of $(theme.BField) Tesla."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.ZeemanStructure)`  ... prepares a proper printout of the variable theme::Basics.ZeemanStructure.
+function Base.show(io::IO, theme::Basics.ZeemanStructure)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.RemoveElectrons       <:  AbstractConfigurationTheme`   
+    ... to remove ne electrons fromShells for each of the given configurations. 
+
+    + ne             ::Int64            ... number of electrons to be added.
+    + fromShells     ::Array{Shell,1}   ... The shells from which the electrons are removed.
+"""
+struct   RemoveElectrons              <:  AbstractConfigurationTheme
+    ne               ::Int64           
+    fromShells       ::Array{Shell,1}
+end
+
+
+# `Base.string(theme::Basics.RemoveElectrons)`  ... provides a proper printout of the variable theme::Basics.RemoveElectrons.
+function Base.string(theme::Basics.RemoveElectrons)
+    sa = "RemoveElectrons theme with number of electrons ne=$(theme.ne) from $(theme.fromShells)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.RemoveElectrons)`  ... prepares a proper printout of the variable theme::Basics.RemoveElectrons.
+function Base.show(io::IO, theme::Basics.RemoveElectrons)
+    sa = string(theme);       print(io, sa)
+end
+
+        
+"""
+`struct  Basics.RestrictExcitations   <:  AbstractConfigurationTheme`   
+    ... to restrict (reduce the number of) the given configurations by applying one or several configuration restrictions.
+
+    + ne             ::Int64                                       ... number of electrons to be added.
+    + fromShells     ::Array{Shell,1}                              ... The shells from which the electrons are excited.
+    + toShells       ::Array{Shell,1}                              ... The shells into which the electrons are excited.
+    + restrictions   ::Array{AbstractConfigurationRestriction,1}   ... set of restrictions that will be applied.
+"""
+struct   RestrictExcitations          <:  AbstractConfigurationTheme
+    ne               ::Int64        
+    fromShells       ::Array{Shell,1} 
+    toShells         ::Array{Shell,1} 
+    restrictions     ::Array{AbstractConfigurationRestriction,1}
+end
+
+
+"""
+`Basics.RestrictExcitations(restrictions::Array{AbstractConfigurationRestriction,1})`  
+    ... constructor to just provide a set of restriction.
+"""
+function Basics.RestrictExcitations(restrictions::Array{AbstractConfigurationRestriction,1})
+    Basics.RestrictExcitations(0, Shell[], Shell[], restrictions)
+end
+
+
+"""
+`Basics.RestrictExcitations(theme::Basics.ExciteElectrons, restrictions::Array{AbstractConfigurationRestriction,1})`  
+    ... constructor to specify the paraemterss by the ExciteElectron() theme.
+"""
+function Basics.RestrictExcitations(theme::Basics.ExciteElectrons, restrictions::Array{AbstractConfigurationRestriction,1})
+    Basics.RestrictExcitations(theme.ne, theme.fromShells, theme.intoShells, restrictions)
+end
+
+
+# `Base.string(theme::Basics.RestrictExcitations)`  ... provides a proper printout of the variable theme::Basics.RestrictExcitations.
+function Base.string(theme::Basics.RestrictExcitations)
+    sa = "RestrictExcitations theme with the excitation of $(theme.ne) electrons from $(theme.fromShells) " *
+         "to $(theme.toShells) and with the following $(length(theme.restrictions)) restriction:"
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.RestrictExcitations)`  ... prepares a proper printout of the variable theme::Basics.RestrictExcitations.
+function Base.show(io::IO, theme::Basics.RestrictExcitations)
+    sa = string(theme);       print(io, sa)
+    for  restriction  in  theme.restrictions
+        print(io, restriction)
+    end
+end
+
+
+"""
+`struct  Basics.GroundConfiguration   <:  AbstractConfigurationTheme`   
+    ... to generate the ground configuration for a given (Z,N), i.e. the (nuclearCharge, NoElectrons). 
+
+    + Z             ::Float64         ... nuclear charge Z
+    + NoElectrons   ::Int64           ... number of electrons.
+"""
+struct   GroundConfiguration          <:  AbstractConfigurationTheme
+    Z               ::Float64
+    NoElectrons     ::Int64
+end
+
+
+# `Base.string(theme::Basics.GroundConfiguration)`  ... provides a proper printout of the variable theme::Basics.GroundConfiguration.
+function Base.string(theme::Basics.GroundConfiguration)
+    sa = "GroundConfiguration theme with charge Z=$(theme.Z) and NoElectrons=$(theme.NoElectrons)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.GroundConfiguration)`  ... prepares a proper printout of the variable theme::Basics.GroundConfiguration.
+function Base.show(io::IO, theme::Basics.GroundConfiguration)
+    sa = string(theme);       print(io, sa)
+end
+
+
+"""
+`struct  Basics.TotalAM      <:  AbstractConfigurationTheme`   
+    ... to extract the total angular momenta (AM) to which the CSF of a configuration can couple. 
+
+    + allJ          ::Bool                  ... True, if all J-values (including multiple couplings) are to be returned, and false
+                                                otherwise.
+    + totalJs       ::Array{AngularJ64,1}   ... Selected total angular momenta J.
+"""
+struct   TotalAM             <:  AbstractConfigurationTheme
+    allJ            ::Bool
+    totalJs         ::Array{AngularJ64,1}
+end
+
+
+"""
+`Basics.TotalAM()`  ... constructor for the default `TotalAM(true, AngularJ64[])`, i.e. ALL total angular momenta
+    to which the CSF of a configuration can couple, with none selected in particular; a theme::Basics.TotalAM is
+    returned. It exists so that this theme is written like every other `AbstractConfigurationTheme` -- `ClosedShells()`,
+    `OpenSubshells()`, `ValenceShells()` are all empty structs called with no argument, and `TotalAM` is the only one
+    carrying fields, so a caller who writes `TotalAM()` beside them is following the family rather than making a
+    mistake. The `allJ` field is exactly what expresses "all of them".
+"""
+TotalAM() = TotalAM(true, AngularJ64[])
+
+
+# `Base.string(theme::Basics.TotalAM)`  ... provides a proper printout of the variable theme::Basics.TotalAM.
+function Base.string(theme::Basics.TotalAM)
+    sa = "Total angular momenta with allJ=$(theme.allJ) and totalJs=$(theme.totalJs)."
+    return( sa )
+end
+
+
+# `Base.show(io::IO, theme::Basics.TotalAM)`  ... prepares a proper printout of the variable theme::Basics.TotalAM.
+function Base.show(io::IO, theme::Basics.TotalAM)
+    sa = string(theme);       print(io, sa)
+end
+
 
 #################################################################################################################################
 #################################################################################################################################
@@ -264,7 +1208,8 @@ export  AbstractContinuumNormalization,   PureSineNorm,   CoulombSineNorm,   Ong
     + ContSine                ... generate a pure Sine function for the large component together with kinetic balance.
     + NonrelativisticCoulomb  ... generate a non-relativistic Coulomb function for the large component together with kinetic balance.
     + AsymptoticCoulomb       ... generate a pure (asymptotic) Coulombic function for both components.
-    + BsplineGalerkin         ... generate a continuum orbital with the Galerkin method.dealing with warnings that are made during a run or REPL session.
+    + BsplineGalerkin         ... generate a continuum orbital with the Galerkin method.dealing with warnings that are made during a run or
+                                  REPL session.
 """
 abstract type  AbstractContinuumSolutions                            end
 struct     ContBessel             <:  AbstractContinuumSolutions     end
@@ -272,6 +1217,12 @@ struct     ContSine               <:  AbstractContinuumSolutions     end
 struct     NonrelativisticCoulomb <:  AbstractContinuumSolutions     end
 struct     AsymptoticCoulomb      <:  AbstractContinuumSolutions     end
 struct     BsplineGalerkin        <:  AbstractContinuumSolutions     end
+
+@doc "... generate a pure Bessel function for the large component together with kinetic balance."                                           ContBessel
+@doc "... generate a pure Sine function for the large component together with kinetic balance."                                               ContSine
+@doc "... generate a non-relativistic Coulomb function for the large component together with kinetic balance."                  NonrelativisticCoulomb
+@doc "... generate a pure (asymptotic) Coulombic function for both components."                                                      AsymptoticCoulomb
+@doc "... generate a continuum orbital with the Galerkin method.dealing with warnings that are made during a run or REPL session."     BsplineGalerkin
 
 export  AbstractContinuumSolutions, ContBessel, ContSine, NonrelativisticCoulomb, AsymptoticCoulomb, BsplineGalerkin 
 
@@ -283,13 +1234,22 @@ export  AbstractContinuumSolutions, ContBessel, ContSine, NonrelativisticCoulomb
 `abstract type Basics.AbstractEeInteraction` 
     ... defines an abstract and a number of singleton types for specifying the electron-electron interaction.
 
-    + struct DiagonalCoulomb                   ... to represent the Coulomb part of the e-e interaction for just diagonal ME.        
-    + struct CoulombInteraction                ... to represent the Coulomb part of the electron-electron interaction.        
-    + struct CoulombGaunt                      ... to represent the Coulomb part of the electron-electron interaction.        
-    + struct BreitInteraction(factor::Float64) 
-        ... to represent the (frequency-dependent) Breit part of the electron-electron interaction with factor*omega,
-            including the zero-Breit approximation (if factor=0.).
-    + struct CoulombBreit(factor::Float64)     ... to represent the Coulomb+Breit part of the electron-electron interaction.        
+    + struct DiagonalCoulomb                   ... to represent the Coulomb part of the e-e interaction for just diagonal ME.
+    + struct CoulombInteraction                ... to represent the Coulomb part of the electron-electron interaction.
+    + struct CoulombGaunt                      ... to represent the Coulomb part of the electron-electron interaction.
+    + struct BreitInteraction(factor::Float64)
+        ... to represent the Breit part of the electron-electron interaction, with factor scaling the photon
+            wave number omega = factor * |E_a - E_c| / c.
+            factor = 0 gives the standard frequency-independent Breit interaction and factor = 1 the full
+            frequency-dependent one; the former is the exact omega -> 0 limit of the latter, taken within the
+            same expressions rather than by a separate code path.  Both the Gaunt and the retardation part
+            are frequency dependent since 14-Aug-2026; before that date no JAC number contained a retardation
+            correction, and factor = 1 applied a hard-coded 1.05 that had no derivation.  See the reference
+            formulation heading the Breit section of module-InteractionStrength.jl.
+            NOTE ALSO THE GAUGE: the omega -> 0 limit taken in the Coulomb gauge is the BREIT operator (this
+            type), whereas the omega -> 0 limit in the Feynman gauge is the GAUNT operator (CoulombGaunt).
+            They are different approximations, not two names for one.
+    + struct CoulombBreit(factor::Float64)     ... to represent the Coulomb+Breit part of the electron-electron interaction.
 """
 abstract type  AbstractEeInteraction                          end
 struct     DiagonalCoulomb      <:  AbstractEeInteraction     end
@@ -298,15 +1258,134 @@ struct     CoulombGaunt         <:  AbstractEeInteraction     end
 struct     BreitInteraction     <:  AbstractEeInteraction     
     factor ::Float64
 end
+
+@doc "... to represent the Breit part of the electron-electron interaction, with factor scaling the photon wave number omega = " *
+     "factor * |E_a - E_c| / c. factor = 0 gives the standard frequency-independent Breit interaction and factor = 1 the full " *
+     "frequency-dependent one; the former is the exact omega -> 0 limit of the latter, taken within the same expressions rather than " *
+     "by a separate code path. Both the Gaunt and the retardation part are frequency dependent since 14-Aug-2026; before that date " *
+     "no JAC number contained a retardation correction, and factor = 1 applied a hard-coded 1.05 that had no derivation. See the " *
+     "reference formulation heading the Breit section of module-InteractionStrength.jl. NOTE ALSO THE GAUGE: the omega -> 0 limit " *
+     "taken in the Coulomb gauge is the BREIT operator (this type), whereas the omega -> 0 limit in the Feynman gauge is the GAUNT " *
+     "operator (CoulombGaunt). They are different approximations, not two names for one."   BreitInteraction
+@doc "... to represent the Coulomb part of the e-e interaction for just diagonal ME."                                                  DiagonalCoulomb
+@doc "... to represent the Coulomb part of the electron-electron interaction."                                                      CoulombInteraction
+@doc "... to represent the Coulomb part of the electron-electron interaction."                                                            CoulombGaunt
 struct     CoulombBreit         <:  AbstractEeInteraction     
-    factor ::Float64
+    factor     ::Float64
+    quadrature ::Symbol
 end
+
+CoulombBreit(factor::Float64) = CoulombBreit(factor, :direct)
+
+@doc "... to represent the Coulomb+Breit part of the electron-electron interaction, with factor as for BreitInteraction and quadrature " *
+     "selecting HOW the radial integrals are evaluated -- the SAME physics either way. :direct (the default, and what every JAC number " *
+     "before 04-Sep-2026 used) evaluates each sub-coefficient as a full double sum over the grid, O(N^2); :swept exploits the fact that " *
+     "every Breit kernel factorises into a function of r_< times a function of r_>, and accumulates the inner integral in one pass, " *
+     "O(N) -- the same construction the Coulomb path has always used through RadialIntegrals.SlaterRkKinkAware. The two agree to the " *
+     "accuracy of the quadrature but NOT bit for bit, because the summation order differs; :direct is kept as the readable reference " *
+     "form and as the oracle the swept form is tested against. Quadrature is deliberately NOT a separate AbstractEeInteraction: that " *
+     "type answers WHICH TERMS of the Hamiltonian are included and is consumed by seventeen `typeof(kind) in [...]` lists across six " *
+     "modules, where a missing entry silently drops a whole interaction -- as happened to CoulombGaunt in ImpactExcitation."           CoulombBreit
 
 export  AbstractEeInteraction, DiagonalCoulomb, CoulombInteraction, CoulombGaunt, BreitInteraction, CoulombBreit
 
-function Base.show(io::IO, eeint::Union{BreitInteraction,CoulombBreit}) 
+
+"""
+`abstract type Basics.AbstractTransitionOperator`
+    ... defines an abstract and a number of types for specifying WHICH OPERATOR carries a transition amplitude.  It answers a different
+        question from AbstractEeInteraction, which says which TERMS OF THE HAMILTONIAN are included, and the two are deliberately kept
+        disjoint: an AbstractEeInteraction is consumed by seventeen `typeof(kind) in [...]` lists across six modules, so a transition
+        operator smuggled in as a subtype of it would fall silently through every one of them -- the failure mode that lost CoulombGaunt in
+        ImpactExcitation.  A transition operator CARRIES an interaction; it is not one.
+
+    + struct VeeOnly(kind)       ... the bare electron-electron interaction, i.e. the historical shortcut.
+    + struct HminusE(kind)       ... the operator H - E, which is what a transition amplitude actually requires.
+
+        WHY THE DISTINCTION IS NOT COSMETIC.  An Auger-like amplitude is <f| H - E |i>.  Where the two states are built on ONE orthonormal
+        orbital set and differ in TWO or more orbitals, the one-body part of H cannot connect them and the overlap vanishes, so H - E
+        reduces exactly to V_ee -- which is why VeeOnly has carried every validated first-order Auger, DR and cascade number in JAC.  The
+        shortcut fails in two places, and both are now live:
+          * states differing in ONE orbital a -> b, which is what a SECOND-ORDER sum produces at its Green-multiplet junctions.  There
+            <b|h|a> = -<b|U|a> cancels V_ee's spectator direct+exchange <b|U_HF|a> down to the residual <b|(U_HF - U)|a>, and keeping only
+            V_ee returns the WHOLE mean field.  Measured 23-Oct-2026 on Ar 2p^-2 -> 3p^-3: V_ee gives 43.5x the measured rate and dropping
+            the spectator terms by hand gives 12x too little, a factor 523 apart and bracketing the measurement.
+          * NON-ORTHOGONAL orbital sets, where <f|i> no longer vanishes and the -E<f|i> term is what represents it.  THAT HALF IS NOT
+            YET IMPLEMENTED: the term vanishes under the orthonormality JAC assumes throughout, so HminusE carries no E field until the
+            biorthogonal route lifts the assumption and something would actually read it.
+        THE ONE-BODY TERM IS THE BARE h, not -U, and that is the point: it needs no knowledge of which mean field produced the orbitals and
+        it stays correct when they are eigenfunctions of nothing.
+
+        AND `kind` MUST MATCH THE HAMILTONIAN THAT PRODUCED THE LEVELS AND THEIR ENERGY E.  E is an eigenvalue of that Hamiltonian, so a
+        Coulomb-only multiplet paired with a Coulomb+Breit H - E subtracts against the wrong E and returns a wrong number in silence.
+        Breit on top of Coulomb-only levels is an ADDITIONAL perturbation and carries no one-body counterterm, since it sits in neither U
+        nor E.  Parameterising on the interaction lets a contraction be defined for matching pairs only, so a mismatch raises a MethodError
+        naming both types instead.
+"""
+abstract type  AbstractTransitionOperator                                  end
+
+struct     VeeOnly{K <: AbstractEeInteraction}   <:  AbstractTransitionOperator
+    kind  ::K
+end
+
+struct     HminusE{K <: AbstractEeInteraction}   <:  AbstractTransitionOperator
+    kind  ::K
+end
+
+@doc "... the bare electron-electron interaction as the transition operator -- the historical shortcut, exact wherever the two " *
+     "states are built on one orthonormal orbital set and differ in two or more orbitals.  Every validated first-order Auger, DR " *
+     "and cascade number in JAC is a VeeOnly number."                                                                           VeeOnly
+@doc "... the operator H - E, with `kind` the e-e interaction of the Hamiltonian that produced the levels.  Required wherever " *
+     "the VeeOnly shortcut fails: a ONE-orbital difference, as every second-order sum produces at its Green-multiplet junctions.  " *
+     "`kind` must match the Hamiltonian behind the levels' energy, or the cancellation is referenced to the wrong one.  NO `E` " *
+     "FIELD: the -E<r|s> term vanishes under the orthonormality JAC already assumes, so nothing would read it;  it returns with " *
+     "the biorthogonal route that lifts that assumption."                                                                       HminusE
+
+
+# `Base.show(io::IO, op::VeeOnly)`  ... prepares a proper printout of the variable op::VeeOnly.
+function Base.show(io::IO, op::VeeOnly)
+    print(io, "V^(e-e) only [$(op.kind)]")
+end
+
+
+# `Base.show(io::IO, op::HminusE)`  ... prepares a proper printout of the variable op::HminusE.
+function Base.show(io::IO, op::HminusE)
+    print(io, "H - E [$(op.kind)]")
+end
+
+export  AbstractTransitionOperator, VeeOnly, HminusE
+
+# `Base.show(io::IO, CoulombBreit}::)`  ... prepares a proper printout of the variable CoulombBreit}::.
+function Base.show(io::IO, eeint::BreitInteraction) 
     sa = "$(typeof(eeint)) [factor=$(eeint.factor)]";                print(io, sa)
 end
+
+function Base.show(io::IO, eeint::CoulombBreit) 
+    sa = "$(typeof(eeint)) [factor=$(eeint.factor), quadrature=:$(eeint.quadrature)]";     print(io, sa)
+end
+
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractEmissionKind`
+    ... defines an abstract and two singleton types to distinguish between the emission and absorption direction of a radiative amplitude.
+
+    + struct Emission    ... to compute the photon-emission amplitude  <f || O^(Mp) || i>.
+    + struct Absorption  ... to compute the photon-absorption amplitude <f || O^(Mp) || i>; equal to the conjugate of the emission amplitude
+                             with initial and final levels interchanged.
+"""
+abstract type  AbstractEmissionKind                      end
+struct         Emission    <:  AbstractEmissionKind      end
+struct         Absorption  <:  AbstractEmissionKind      end
+
+@doc "... to compute the photon-emission amplitude  <f || O^(Mp) || i>."                                                                      Emission
+@doc "... to compute the photon-absorption amplitude <f || O^(Mp) || i>; equal to the conjugate of the emission amplitude with " *
+     "initial and final levels interchanged."   Absorption
+
+export  AbstractEmissionKind, Emission, Absorption
+
 
 #################################################################################################################################
 #################################################################################################################################
@@ -314,30 +1393,27 @@ end
 
 """
 `abstract type Basics.AbstractExcitationScheme` 
-    ... defines an abstract and a number of singleton types to distinguish between different schemes for
-        generating configuration lists as they frequently occur in Green function and cascade computations.
+    ... defines an abstract and a number of singleton types to distinguish between different schemes for generating configuration lists as
+        they frequently occur in Green function and cascade computations.
 
     + struct NoExcitationScheme        
     ... dummy scheme for (unsupported) initialization of this abstract tpye.
 
     + struct DeExciteSingleElectron        
-    ... generates all excitations and de-excitations of a single electron from a given list of bound
-        electron configurations. The number of electrons of the generated configurations is the same as 
-        for the given bound configurations.
+    ... generates all excitations and de-excitations of a single electron from a given list of bound electron configurations. The number of
+        electrons of the generated configurations is the same as for the given bound configurations.
 
     + struct DeExciteTwoElectrons       
-    ... generates all excitations and de-excitations of one or two electrons from a given list of bound
-        electron configurations. The number of electrons of the generated configurations is the same as 
-        for the given bound configurations.
+    ... generates all excitations and de-excitations of one or two electrons from a given list of bound electron configurations. The number
+        of electrons of the generated configurations is the same as for the given bound configurations.
         
     + struct AddSingleElectron             
-    ... generates configurations by just adding a single electrons to a given list of bound
-        electron configurations. The number of electrons of the generated configurations is N+1.
+    ... generates configurations by just adding a single electrons to a given list of bound electron configurations. The number of electrons
+        of the generated configurations is N+1.
         
     + struct ExciteByCapture             
-    ... generates all excitations and de-excitations of one or more electron from a given list of bound
-        electron configurations, together with an capture of an additional electron. 
-        The number of electrons of the generated configurations is N+1.
+    ... generates all excitations and de-excitations of one or more electron from a given list of bound electron configurations, together
+        with an capture of an additional electron. The number of electrons of the generated configurations is N+1.
 """
 abstract type  AbstractExcitationScheme                               end
 struct         NoExcitationScheme      <:  AbstractExcitationScheme   end
@@ -345,6 +1421,16 @@ struct         DeExciteSingleElectron  <:  AbstractExcitationScheme   end
 struct         DeExciteTwoElectrons    <:  AbstractExcitationScheme   end
 struct         AddSingleElectron       <:  AbstractExcitationScheme   end
 struct         ExciteByCapture         <:  AbstractExcitationScheme   end
+
+@doc "... dummy scheme for (unsupported) initialization of this abstract tpye."                                                     NoExcitationScheme
+@doc "... generates all excitations and de-excitations of a single electron from a given list of bound electron configurations. The " *
+     "number of electrons of the generated configurations is the same as for the given bound configurations."   DeExciteSingleElectron
+@doc "... generates all excitations and de-excitations of one or two electrons from a given list of bound electron configurations. " *
+     "The number of electrons of the generated configurations is the same as for the given bound configurations."   DeExciteTwoElectrons
+@doc "... generates configurations by just adding a single electrons to a given list of bound electron configurations. The number of " *
+     "electrons of the generated configurations is N+1."   AddSingleElectron
+@doc "... generates all excitations and de-excitations of one or more electron from a given list of bound electron configurations, " *
+     "together with an capture of an additional electron. The number of electrons of the generated configurations is N+1."   ExciteByCapture
     
 export  AbstractExcitationScheme, NoExcitationScheme, DeExciteSingleElectron, DeExciteTwoElectrons, AddSingleElectron, ExciteByCapture
 
@@ -367,9 +1453,9 @@ export  AbstractEmpiricalSettings
 
 """
 `abstract type Basics.AbstractFieldValue` 
-    ... to specify and deal with the function values of different physical fields, such as f(x), f(x,y,z), 
-        f(rho,phi), f(r,theta,phi), and for both, scalar and vector fields. Often, such field values are the outcome
-        of some computation which can be used for integration, display, etc.
+    ... to specify and deal with the function values of different physical fields, such as f(x), f(x,y,z), f(rho,phi), f(r,theta,phi), and
+        for both, scalar and vector fields. Often, such field values are the outcome of some computation which can be used for integration,
+        display, etc.
         
     + struct Cartesian2DFieldValue{Type}     ... to specify a field value of type T in terms of x, y.
     + struct Cartesian3DFieldValue{Type}     ... to specify a field value of type T in terms of x, y, z.
@@ -475,12 +1561,11 @@ export  AbstractFieldValue, Cartesian2DFieldValue, Cartesian3DFieldValue, PolarF
 
 """
 `abstract type Basics.AbstractFieldVector` 
-    ... to specify and deal with different physical field vectors, such as (Ax, Ay),  (Ax, Ay, Az),  (A_1, A_0, A_-1).
-        Often, such field values are used to charaterize electric or magnetic fields (vector potentials).
+    ... to specify and deal with different physical field vectors, such as (Ax, Ay),  (Ax, Ay, Az),  (A_1, A_0, A_-1). Often, such field
+        values are used to charaterize electric or magnetic fields (vector potentials).
         
     + struct Cartesian2DFieldVector{Type}    ... to specify a field vector of type T in terms of (Ax, Ay).
     + struct Cartesian3DFieldVector{Type}    ... to specify a field vector of type T in terms of (Ax, Ay, Az).
-    + struct SphericalFieldVector{Type}      ... to specify a field vector of type T in terms of (A_1, A_0, A_-1).
     
 """
 abstract type  AbstractFieldVector               end
@@ -525,7 +1610,7 @@ function Base.show(io::IO, vector::Cartesian3DFieldVector{Type})
     sa = "Cartesian 3D field vector (Ax, Ay, Az) = ($(vector.x),$(vector.y),$(vector.z))";                print(io, sa)
 end
 
-export  AbstractFieldVector, Cartesian2DFieldVector, Cartesian3DFieldVector, SphericalFieldVector
+export  AbstractFieldVector, Cartesian2DFieldVector, Cartesian3DFieldVector
 
 
 #################################################################################################################################
@@ -539,11 +1624,13 @@ export  AbstractFieldVector, Cartesian2DFieldVector, Cartesian3DFieldVector, Sph
         
     + NoEmField               ... No electric and magnetic field is defined.
     + StaticField             ... A static field that is characterized by its (real) amplitude into a given direction.
-    + TimeHarmonicField       ... Define a time-harmonic field that is characterized by its (real) amplitude into a 
-                                  given direction and a (harmonic) frequency.
+    + TimeHarmonicField       ... Define a time-harmonic field that is characterized by its (real) amplitude into a given direction and a
+                                  (harmonic) frequency.
 """
 abstract type  AbstractEmField                    end
 struct         NoEmField    <:  AbstractEmField   end
+
+@doc "... No electric and magnetic field is defined."                                                                                        NoEmField
 
 
 # `Base.show(io::IO, field::AbstractEmField)`  ... prepares a proper printout of the variable field::AbstractEmField.
@@ -562,8 +1649,7 @@ end
 
 """
 `struct  Basics.StaticField   <:  AbstractEmField`  
-    ... to specify a static -- electric or magnetic -- field that is characterized by its (real) amplitude into a 
-        given direction.
+    ... to specify a static -- electric or magnetic -- field that is characterized by its (real) amplitude into a given direction.
 
     + amplitude    ::Basics.Cartesian3DFieldVector{Float64}  ... 3D vector that represents the amplitude A_o of the field.
 """
@@ -581,8 +1667,8 @@ end
 
 """
 `struct  Basics.TimeHarmonicField   <:  AbstractEmField`  
-    ... to specify a time-harmonic -- electric or magnetic -- field that is characterized by its (real) amplitude into a 
-        given direction and a (harmonic) frequency.
+    ... to specify a time-harmonic -- electric or magnetic -- field that is characterized by its (real) amplitude into a given direction and
+        a (harmonic) frequency.
 
     + amplitude    ::Basics.Cartesian3DFieldVector{Float64}  ... 3D vector that represents the amplitude A_o of the field.
     + omega        ::Float64                                ... Frequency of the time-harmonic field.
@@ -611,12 +1697,15 @@ export AbstractEmField, NoEmField, StaticField, TimeHarmonicField
 `abstract type Basics.AbstractLevelPopulation` 
     ... defines an abstract and a number of singleton types to distinguish between different level population (models).
 
-    + struct BoltzmannLevelPopulation     ... to represent a Boltzmann level population.       
-    + struct SahaLevelPopulation          ... to represent a Saha level population.        
+    + struct BoltzmannLevelPopulation     ... to represent a Boltzmann level population.
+    + struct SahaLevelPopulation          ... to represent a Saha level population.
 """
 abstract type  AbstractLevelPopulation                                end
 struct    BoltzmannLevelPopulation      <:  AbstractLevelPopulation   end
 struct    SahaLevelPopulation           <:  AbstractLevelPopulation   end
+
+@doc "... to represent a Boltzmann level population."                                                                         BoltzmannLevelPopulation
+@doc "... to represent a Saha level population."                                                                                   SahaLevelPopulation
 
 export  AbstractLevelPopulation, BoltzmannLevelPopulation, SahaLevelPopulation
 
@@ -626,15 +1715,15 @@ export  AbstractLevelPopulation, BoltzmannLevelPopulation, SahaLevelPopulation
 
 """
 `abstract type Basics.AbstractMesh` 
-    ... to specify different mesh types in terms of their basic parameters; these meshes can be used, for example,
-        for integration or for defining the representation of observables. 
+    ... to specify different mesh types in terms of their basic parameters; these meshes can be used, for example, for integration or for
+        defining the representation of observables.
         
         
     + struct Cartesian2DMesh    ... to specify a 2D Cartesian mesh in terms of x and y.
     + struct GLegenreMesh       ... to specify a Gauss-Legendre mesh in terms of [a,b] and number of zeros.
     + struct LinearMesh         ... to specify a linear mesh in terms of [a,b] and number of points.
     + struct PolarMesh          ... to specify a 2D mesh for rho and phi.
-    + struct SphercialMesh      ... to specify a 3D mesh in terms of r, theta, phi.
+    + struct SphericalMesh      ... to specify a 3D mesh in terms of r, theta, phi.
     
 """
 abstract type  AbstractMesh                     end
@@ -714,7 +1803,9 @@ end
 
 # `Base.show(io::IO, lMesh::LinearMesh)`  ... prepares a proper printout of the variable lMesh::LinearMesh.
 function Base.show(io::IO, lMesh::LinearMesh) 
-    sa = "Linear mesh for the interval  [a,b] = [$(glMesh.a),$(glMesh.b)]  and with $(lMesh.NoPoints) points."
+    # `lMesh`, not `glMesh` (fixed 09-Aug-2026): the two interpolations named the variable of the GLegenreMesh show method just above, so
+    # displaying a LinearMesh raised an UndefVarError.
+    sa = "Linear mesh for the interval  [a,b] = [$(lMesh.a),$(lMesh.b)]  and with $(lMesh.NoPoints) points."
     print(io, sa)
 end
 
@@ -776,7 +1867,7 @@ function Base.show(io::IO, sMesh::SphericalMesh)
     print(io, sa)
 end
 
-export  AbstractMesh, Cartesian2DMesh, GLegenreMesh, LinearMesh, PolarMesh, SphercialMesh
+export  AbstractMesh, Cartesian2DMesh, GLegenreMesh, LinearMesh, PolarMesh, SphericalMesh
 
 #################################################################################################################################
 #################################################################################################################################
@@ -787,15 +1878,27 @@ export  AbstractMesh, Cartesian2DMesh, GLegenreMesh, LinearMesh, PolarMesh, Sphe
     ... defines an abstract and a number of singleton types for the the (allowed) plasma models.
 
     + NoPlasmaModel                 ... No plasma model defined.
-    + DebyeHueckelModel             ... Debye-Hueckel plasma model.
-    + IonSphereModel                ... Ion-sphere (not yet supported).
-    + StewartPyattModel             ... Stewart-Pyatt model (not yet supported).
+    + DebyeHueckelModel             ... Debye-Hueckel plasma model; supported for IPD shifts (Plasma.determineIpShifts) and for the screened
+                                        CI matrix / amplitudes (Basics.compute(...,plasmaModel)).
+    + IonSphereModel                ... Ion-sphere model; supported for IPD shifts, not yet for the screened CI matrix / amplitudes
+                                        (InteractionStrength.XL_plasma_ionSphere).
+    + StewartPyattModel             ... Stewart-Pyatt model; supported for IPD shifts only, cf. IonSphereModel.
+    + EckerKroellModel              ... Ecker-Kroell model; supported for IPD shifts only, cf. IonSphereModel.
     + WithoutAutoionizationModel    ... Just excludes all autoionizing levels; no original plasma model.
+
+    The note that stood here until 23-Oct-2026 -- that Ecker-Kroell was deliberately not implemented because its strong-coupling
+    branch could not be confirmed from the secondary literature -- has been DISCHARGED exactly as it asked: the primary reference was
+    read, and Basics.EckerKroellModel below carries what it says together with the three places where the secondary literature states
+    it differently.
 """
 abstract type  AbstractPlasmaModel                                    end
 struct         NoPlasmaModel                <:  AbstractPlasmaModel   end
 struct         DebyeBox                     <:  AbstractPlasmaModel   end
 struct         WithoutAutoionizationModel   <:  AbstractPlasmaModel   end
+
+@doc "... to apply the Debye-box plasma model."                                                                                               DebyeBox
+
+@doc "... No plasma model defined."                                                                                                      NoPlasmaModel
 
 
 # `Base.show(io::IO, model::AbstractPlasmaModel)`  ... prepares a proper printout of the variable model::AbstractPlasmaModel.
@@ -815,29 +1918,29 @@ end
 
 
 """
-`struct  Basics.DebyeHueckelModel   <:  AbstractPlasmaModel`  
-    ... to specify (the parameters of) a Debye-Hückel potential.
+`struct  Basics.DebyeHueckelModel   <:  AbstractPlasmaModel`
+    ... to specify (the parameters of) a Debye-Hückel potential, screened as  exp(-r/debyeLength) / r.
 
-    + debyeLength  ::Float64               ... the Debye length D [a_o].
-    + radius       ::Float64               ... the Debye radius R_D [a_o].
+    + debyeLength  ::Float64               ... the (single, independent) Debye screening length lambda_D [a_o].
+        Some references also speak of a 'Debye radius'; in Debye-Hückel theory this coincides with the Debye length itself, so it is not
+        carried here as a separate parameter.
 """
 struct  DebyeHueckelModel   <:  AbstractPlasmaModel
     debyeLength   ::Float64
-    debyeRadius   ::Float64
-end 
+end
 
 
 """
 `Basics.DebyeHueckelModel()`  ... constructor for the default settings of Basics.DebyeHueckelModel().
 """
 function DebyeHueckelModel()
-    DebyeHueckelModel( 0.1, 0. )
+    DebyeHueckelModel( 0.1 )
 end
 
 
 # `Base.show(io::IO, model::DebyeHueckelModel)`  ... prepares a proper printout of the variable model::DebyeHueckelModel.
-function Base.show(io::IO, model::DebyeHueckelModel) 
-    sa = "Debye-Hueckel plasma model with Debye length D = $(model.debyeLength) a_o and radius R_D = $(model.debyeRadius) a_o."
+function Base.show(io::IO, model::DebyeHueckelModel)
+    sa = "Debye-Hueckel plasma model with Debye length D = $(model.debyeLength) a_o."
     print(io, sa)
 end
 
@@ -877,7 +1980,10 @@ end
 
     + radius          ::Float64               ... the Stewart-Pyatt radius R [a_o].
     + electronDensity ::Float64               ... electron density n_e (T).
-    + lambda          ::Float64               ... lambda^(ST) (T, ne, ni)
+    + lambda          ::Float64
+        ... the Debye screening length lambda_D [a_o], the same quantity as DebyeHueckelModel.debyeLength; the
+            ion-sphere radius R0 that enters the Stewart-Pyatt formula together with lambda is derived on-the-fly
+            from the total ion density (cf. Plasma.determineIpShifts), not stored here.
 """
 struct  StewartPyattModel           <:  AbstractPlasmaModel
     radius            ::Float64
@@ -901,7 +2007,75 @@ function Base.show(io::IO, model::StewartPyattModel)
     print(io, sa)
 end
 
-export  AbstractPlasmaModel, NoPlasmaModel, DebyeHueckelModel, DebeyBox, IonSphereModel, StewartPyattModel
+
+"""
+`struct  Basics.EckerKroellModel   <:  AbstractPlasmaModel`
+    ... defines the Ecker-Kroell plasma model [G. Ecker & W. Kroell, Phys. Fluids 6, 62 (1963)] for the IPD shifts
+        (Plasma.determineIpShifts); it is not (yet) supported for the screened CI matrix / amplitudes, cf. IonSphereModel.
+
+        The model is PIECEWISE in the total free-particle density n = n_e + n_i, switching at the critical density n_cr of its
+        Eq. (47).  Below n_cr it is Debye-Hueckel; above it the screening length is no longer the ion-sphere radius but the mean
+        separation r_0 of ALL free particles, electrons included, which is what makes it predict a markedly larger depression
+        than Stewart-Pyatt at high density.  In atomic units, and with q the net charge of the ion BEFORE the ionization step:
+
+            Delta I(q) = - (q+1) / lambda_D            for  n <= n_cr          ... Eq. (56), reduced
+            Delta I(q) = - cEK * (q+1) / r_0           for  n >  n_cr          ... Eq. (57), reduced
+
+        with  r_0 = (3/(4 pi (n_e+n_i)))^(1/3)  and  n_cr = (3/(4 pi)) * (kT / qmax^2)^3,  both derived on-the-fly in
+        Plasma.determineIpShifts from the densities and the temperature it already receives, and therefore NOT stored here --
+        the same division of labour as StewartPyattModel, which stores lambda and derives R0.
+
+        THREE POINTS WHERE THE SECONDARY LITERATURE DIFFERS FROM THE PAPER, each checked against the original on 23-Oct-2026,
+        because each would silently give a different number:
+        * the charge in n_cr is the LARGEST IONIC CHARGE PRESENT in the plasma (the paper's e_(beta max), Eq. 47), not the atomic
+          number.  The two coincide only when fully-stripped ions are present, which is how "Z, the atomic number" entered the
+          secondary literature.
+        * lambda_D is built from ALL charged components, electrons AND ions (Eq. 26, a sum over every component), i.e. exactly the
+          screening density JAC already forms in Plasma.updateIpdPlasmaModel.  An electron-only Debye length is NOT this model.
+        * cEK is NOT 1 in the paper.  Ecker and Kroell fix it by requiring the two branches to join at n_cr (Eq. 53) and evaluate
+          the resulting lattice constant as 1.73, calling the factor itself "somewhat uncertain".  The value 1 that the modern
+          literature uses is an EXPERIMENTAL choice -- it is what reproduces the LCLS aluminium measurement -- and not the
+          paper's own number.  Both are therefore offered, neither is hidden in the code, and a user who quotes a coefficient
+          should say which one they used.
+
+    + radius            ::Float64    ... the Wigner-Seitz radius R [a_o], carried for symmetry with IonSphereModel and
+                                         StewartPyattModel; the model's own radius r_0 is the all-free-particle one above.
+    + electronDensity   ::Float64    ... the electron density n_e (T) [a_o^-3].
+    + lambda            ::Float64    ... the Debye screening length lambda_D [a_o], the same quantity as
+                                         DebyeHueckelModel.debyeLength.
+    + cEK               ::Float64    ... the coefficient of the strong-coupling branch; 1.0 reproduces the modern literature and
+                                         1.73 is the paper's own value.  See the third point above before quoting either.
+"""
+struct  EckerKroellModel            <:  AbstractPlasmaModel
+    radius            ::Float64
+    electronDensity   ::Float64 
+    lambda            ::Float64 
+    cEK               ::Float64 
+end 
+
+
+"""
+`Basics.EckerKroellModel()`  ... constructor for the default settings of Basics.EckerKroellModel().
+"""
+function EckerKroellModel()
+    EckerKroellModel( 0., 0., 0., 1.0 )
+end
+
+
+# `Base.show(io::IO, model::EckerKroellModel)`  ... prepares a proper printout of the variable model::EckerKroellModel.
+function Base.show(io::IO, model::EckerKroellModel) 
+    # cEK is NAMED in the printout rather than left as a bare number: 1.0 and 1.73 are both defensible and give
+    # IPD shifts differing by 73 %, so a user must be able to see which one produced their number.
+    if      model.cEK == 1.0    sb = " (the value that reproduces the LCLS measurement; Ecker & Kroell's own analysis gives 1.73)"
+    elseif  model.cEK == 1.73   sb = " (Ecker & Kroell's own value; the modern literature uses 1.0)"
+    else                        sb = " (neither the modern 1.0 nor Ecker & Kroell's own 1.73 -- a deliberate choice of the caller)"
+    end
+    sa = "Ecker-Kroell plasma model with (Wigner-Seitz radius) R = $(model.radius) a_o, electron density n_e (T) = "  *
+         "$(model.electronDensity), lambda = $(model.lambda), and cEK = $(model.cEK)" * sb
+    print(io, sa)
+end
+
+export  AbstractPlasmaModel, NoPlasmaModel, DebyeHueckelModel, DebyeBox, EckerKroellModel, IonSphereModel, StewartPyattModel
 
 #################################################################################################################################
 #################################################################################################################################
@@ -916,6 +2090,9 @@ export  AbstractPlasmaModel, NoPlasmaModel, DebyeHueckelModel, DebeyBox, IonSphe
     + PhotoIonization.PlasmaSettings     ... Settings for photoionization-line computations.
 """
 abstract type  AbstractLineShiftSettings                end
+struct         NoLineShiftSettings   <:  AbstractLineShiftSettings   end
+
+@doc "... No line-shift settings are defined."                                                                                     NoLineShiftSettings
 
 # `Base.show(io::IO, settings::AbstractLineShiftSettings)`  ... prepares a proper printout of the variable settings::AbstractLineShiftSettings.
 function Base.show(io::IO, settings::AbstractLineShiftSettings) 
@@ -945,14 +2122,16 @@ export  AbstractLineShiftSettings, NoLineShiftSettings
     + LeftElliptical            ... to specify an elliptically polarized pulse/beam.
     + RightElliptical           ... to specify an elliptically polarized pulse/beam.
     + NonePolarization          ... to specify an upolarized pulse/beam.
-    + DensityMatrixPolarization ... to specify the polarization of a pulse/beam by its (2x2) 
-                                    density matrix (not yet).
 """
 abstract type  AbstractPolarization  end
 
 struct         LinearPolarization      <:  AbstractPolarization   end
 struct         LeftCircular            <:  AbstractPolarization   end
 struct         RightCircular           <:  AbstractPolarization   end
+
+@doc "... to specify a linearly-polarized pulse/beam."                                                                              LinearPolarization
+@doc "... to specify a left-circularly polarized pulse/beam."                                                                             LeftCircular
+@doc "... to specify a right-circularly polarized pulse/beam."                                                                           RightCircular
 
 
 """
@@ -977,6 +2156,8 @@ end
 
 struct         NonePolarization        <:  AbstractPolarization   end
 
+@doc "... to specify an upolarized pulse/beam."                                                                                       NonePolarization
+
 function Base.string(pol::LinearPolarization)   return( "linearly-polarized" )            end
 function Base.string(pol::LeftCircular)         return( "left-circularly polarized" )     end
 function Base.string(pol::RightCircular)        return( "right-circularly polarized" )    end
@@ -984,29 +2165,20 @@ function Base.string(pol::LeftElliptical)       return( "left-elliptically polar
 function Base.string(pol::RightElliptical)      return( "right-elliptically polarized with ellipticity $(pol.ellipticity)" )  end
 function Base.string(pol::NonePolarization)     return( "unpolarized" )                   end
     
-export  AbstractPolarization, LinearPolarization, LeftCircular, RightCircular, LeftElliptical, RightElliptical, NonePolarization, 
-        DensityMatrixPolarization
+export  AbstractPolarization, LinearPolarization, LeftCircular, RightCircular, LeftElliptical, RightElliptical, NonePolarization
 
 #################################################################################################################################
 #################################################################################################################################
 
 
-"""
-`abstract type Basics.AbstractPotential` 
-    ... defines an abstract and a number of singleton types to distinguish between different (electronic) atomic potentials.
-
-    + struct DFSpotential     ... to represent a Dirac-Fock-Slater potential.        
-    + struct CoreHartree      ... to represent a core-Hartree potential.        
-    + struct KohnSham         ... to represent a Kohn-Sham potential.        
-    + struct HartreeSlater    ... to represent a Hartree-Slater potential.        
-"""
-abstract type  AbstractPotential                        end
-struct    DFSpotential          <:  AbstractPotential   end
-struct    CoreHartree           <:  AbstractPotential   end
-struct    KohnSham              <:  AbstractPotential   end
-struct    HartreeSlater         <:  AbstractPotential   end
-
-export  AbstractPotential, DFSpotential, CoreHartree, KohnSham, HartreeSlater
+# Basics.AbstractPotential, with DFSpotential, CoreHartree, KohnSham and HartreeSlater, was REMOVED on 13-Aug-2026.  It named the same four
+# screened potentials a SECOND time -- DFSpotential/DFSField, CoreHartree/CHField, KohnSham/KSField, HartreeSlater/HSField -- and nothing
+# ever reached this copy: the abstract type and all four singletons were exported, but not one of them appeared in any dispatch, any call or
+# any example.  The live vocabulary is Basics.AbstractScField, which has twelve members and twelve Basics.computePotential methods
+# dispatching on it.
+#
+# The one apparent survivor is not a use of these types: module-BasicsAZ-inc-compute.jl builds Radial.Potential("CoreHartree", wb, grid),
+# where "CoreHartree" is the potential's NAME string.
 
 #################################################################################################################################
 #################################################################################################################################
@@ -1021,6 +2193,79 @@ struct   NoProcessSettings  <: AbstractProcessSettings  end
     
 export   AbstractProcessSettings
 
+
+"""
+`abstract type Basics.AbstractResultKey`
+    ... defines an abstract type for the keys under which `Basics.perform` stores a result that has no settings
+        type of its own -- the multiplets and the grid.  Every OTHER result is asked for by the settings type that
+        produced it, `res[PhotoEmission.Settings]` or `res[Hfs.Settings]`, so no key has to be invented for it.
+
+        THE CONCRETE KEYS LIVE IN THE `ResultKeys` MODULE, deliberately, and that is not a stylistic choice: the
+        two natural names are already taken by the DATA -- `ManyElectron.Multiplet` and `Radial.Grid`.  Putting a
+        key called `Multiplet` into `Basics` would place it one qualifier away from the datum of the same name,
+        which is the very near-miss that priority item 39 exists to remove (`"photon emission lines:"` was asked
+        for where `"radiative lines:"` was meant).  A namespace removes the ambiguity without inventing
+        vocabulary: `ResultKeys.Multiplet` is a key, `Multiplet` is the datum, and neither has to be renamed.
+
+        The keys are TYPES rather than instances so that both halves of the interface read alike -- a key is a
+        bare type qualified by the module that owns it, whether it is `PhotoEmission.Settings` or
+        `ResultKeys.FinalMultiplet`.
+"""
+abstract type  AbstractResultKey                        end
+
+export   AbstractResultKey
+
+
+"""
+`struct  Basics.PerformResults`
+    ... the `Dict{String,Any}` that `perform` returns, wrapped so that a WRONG KEY names the keys that exist
+        instead of raising a bare `KeyError`.  It behaves as the Dict did in every other respect -- `haskey`,
+        `keys`, `get`, `length`, iteration and `merge` all work as before -- so no existing script changes.
+
+    + dict ::Dict{String,Any}   ... the results themselves.
+
+        WHY THIS EXISTS, and the cost it removes.  One `perform` can produce any of FORTY-FOUR keys, carrying
+        spaces, colons and per-module wording -- `"radiative lines:"`, `"photo recombination lines:"` (with a
+        space), `"AutoIonization lines:"`.  Nothing related the key to the settings that produced it and nothing
+        listed the valid ones, so a near miss was indistinguishable from an absent result.  Measured in one week
+        of application work: four separate wrong-key stalls, among them `"photon emission lines:"` for
+        `"radiative lines:"` and `"photoRecombination lines:"` for `"photo recombination lines:"`, each costing a
+        full edit-run cycle.
+
+        A NEAR MISS IS NAMED BUT NOT ACCEPTED.  Where the requested key differs from an existing one only in
+        spacing, case or punctuation, the message says which key was meant -- that alone answers the second stall
+        above -- but it still raises.  Silently accepting a fuzzy key would turn a typo into a different kind of
+        bug, one that returns the wrong result rather than none.
+"""
+struct  PerformResults <: AbstractDict{String,Any}
+    dict ::Dict{String,Any}
+end
+
+
+# The AbstractDict interface, forwarded unchanged: only `getindex` is given new behaviour, and only when the key
+# is absent.  `get` deliberately keeps Base's semantics and returns its default rather than raising.
+Base.length(r::PerformResults)                        = length(r.dict)
+Base.iterate(r::PerformResults)                       = iterate(r.dict)
+Base.iterate(r::PerformResults, st)                   = iterate(r.dict, st)
+Base.keys(r::PerformResults)                          = keys(r.dict)
+Base.values(r::PerformResults)                        = values(r.dict)
+Base.haskey(r::PerformResults, key)                   = haskey(r.dict, key)
+Base.get(r::PerformResults, key, default)             = get(r.dict, key, default)
+Base.setindex!(r::PerformResults, value, key)         = setindex!(r.dict, value, key)
+
+
+"""
+`Basics.normalizeResultKey(key::AbstractString)`
+    ... reduces a results key to its letters and digits in lower case, so that two keys differing only in spacing,
+        case or punctuation compare equal; a `String` is returned.  `"photoRecombination lines:"` and
+        `"photo recombination lines:"` both reduce to `"photorecombinationlines"`.
+"""
+function  normalizeResultKey(key::AbstractString)
+    return( lowercase( filter(c -> isletter(c) || isdigit(c), key) ) )
+end
+
+export   PerformResults
+
 #################################################################################################################################
 #################################################################################################################################
 
@@ -1029,28 +2274,37 @@ export   AbstractProcessSettings
 `abstract type Basics.AbstractProcess` 
     ... defines an abstract and a number of singleton types to distinguish different atomic processes.
 
-    + struct Auger            ... Auger transitions, i.e. single autoionization or the emission of a single free electron into the continuum.
+    + struct Auger            ... Auger transitions, i.e. single autoionization or the emission of a single free electron into the
+                                  continuum.
     + struct AugerInPlasma    ... Auger transitions but calculated for a specified plasma model.
     + struct Compton          ... Rayleigh-Compton scattering cross sections.
+    + struct ElecCapture      ... the (dielectronic) electron-capture process, i.e. the capture of a free electron into a bound shell.
     + struct Coulex           ... Coulomb-excitation of target or projeticle electrons by fast, heavy ions.
     + struct Coulion          ... Coulomb-ionization of target or projeticle electrons by fast, heavy ions.
-    + struct Dierec           ... di-electronic recombination, i.e. the dielectronic capture of a free electron and the subsequent emission of a photon.
+    + struct Dierec           ... di-electronic recombination, i.e. the dielectronic capture of a free electron and the subsequent emission
+                                  of a photon.
     + struct DoubleAuger      ... Double Auger rates.
-    + struct ImpactExcAuto    ... di-electronic recombination, i.e. the dielectronic capture of a free electron and the subsequent emission of a photon.
+    + struct ImpactExcAuto    ... electron-impact excitation with subsequent autoionization, i.e. an inner-shell electron is raised by
+                                  electron impact to a level above the ionization threshold, which then autoionizes.
+    + struct InternalConv     ... internal conversion, i.e. the transfer of nuclear excitation energy to a bound electron which is thereby
+                                  ejected.
+    + struct NoProcess        ... dummy process for the initialization of a Cascade.Step or an atomic computation; it denotes the ABSENCE
+                                  of a process and is never computed.
+    + struct PairA1P          ... one-photon pair annihilation, in which a bound electron and a positron annihilate under emission of a
+                                  single photon.
     + struct MultiPhotonDE    ... multi-photon excitation and decay rates, including 2-photon, etc. processes.
     + struct MultiPI          ... multi-photon (single-electron) ionization.
-    + struct MultiPDI         ... multi-photon (single-electron) double ionization.
-    + struct Photo            ... Photoionization processes, i.e. the emission of a single free electron into the continuum due to an external light field.
+    + struct Photo            ... Photoionization processes, i.e. the emission of a single free electron into the continuum due to an
+                                  external light field.
     + struct PhotoDouble      ... Photo-double ionization rates.
     + struct PhotoExc         ... Photoexcitation rates.
     + struct PhotoExcFluor    ... photoexcitation fluorescence rates and cross sections.
     + struct PhotoExcAuto     ... photoexcitation autoionization cross sections and collision strengths.
     + struct PhotoInPlasma    ... Photoionization processes but calculated for a specified plasma model.
-    + struct PhotoIonFluor    ... photoionization fluorescence rates and cross sections.
-    + struct PhotoIonAuto     ... photoionization autoionization cross sections and collision strengths.
     + struct Radiative        ... Radiative (multipole) transitions between bound-state levels of the same charge state.
-    + struct Rec              ... radiative electron capture, i.e. the capture of a free electron with the simultaneous emission of a photon.
-    + struct Eimex            ... electron-impact excitation cross sections and collision strengths.
+    + struct Rec              ... radiative electron capture, i.e. the capture of a free electron with the simultaneous emission of a
+                                  photon.
+    + struct ImpactExc        ... electron-impact excitation cross sections and collision strengths.
     + struct RAuger           ... Radiative Auger rates.
 """
 abstract type  AbstractProcess                          end
@@ -1067,44 +2321,72 @@ struct    ImpactExcAuto         <:  AbstractProcess     end
 struct    InternalConv          <:  AbstractProcess     end
 struct    MultiPhotonDE         <:  AbstractProcess     end
 struct    MultiPI               <:  AbstractProcess     end
-struct    MultiPDI              <:  AbstractProcess     end
 struct    Photo                 <:  AbstractProcess     end
 struct    PhotoDouble           <:  AbstractProcess     end
 struct    PhotoExc              <:  AbstractProcess     end
 struct    PhotoExcFluor         <:  AbstractProcess     end
 struct    PhotoExcAuto          <:  AbstractProcess     end
 struct    PhotoInPlasma         <:  AbstractProcess     end
-struct    PhotoIonFluor         <:  AbstractProcess     end
-struct    PhotoIonAuto          <:  AbstractProcess     end
 struct    Radiative             <:  AbstractProcess     end
 struct    Rec                   <:  AbstractProcess     end
-struct    Eimex                 <:  AbstractProcess     end
+struct    ImpactExc             <:  AbstractProcess     end
 struct    RAuger                <:  AbstractProcess     end
 struct    PairA1P               <:  AbstractProcess     end
+
+@doc "... dummy process for the initialization of a Cascade.Step or an atomic computation; it denotes the ABSENCE of a process and " *
+     "is never computed."   NoProcess
+@doc "... to denote the (dielectronic) electron-capture process, i.e. the capture of a free electron into a bound shell."                  ElecCapture
+@doc "... to denote internal conversion, i.e. the transfer of nuclear excitation energy to a bound electron which is thereby ejected."    InternalConv
+@doc "... to denote one-photon pair annihilation, in which a bound electron and a positron annihilate under emission of a single photon."      PairA1P
+
+@doc "... Auger transitions, i.e. single autoionization or the emission of a single free electron into the continuum."                           Auger
+@doc "... Auger transitions but calculated for a specified plasma model."                                                                AugerInPlasma
+@doc "... Rayleigh-Compton scattering cross sections."                                                                                         Compton
+@doc "... Coulomb-excitation of target or projeticle electrons by fast, heavy ions."                                                            Coulex
+@doc "... Coulomb-ionization of target or projeticle electrons by fast, heavy ions."                                                           Coulion
+@doc "... di-electronic recombination, i.e. the dielectronic capture of a free electron and the subsequent emission of a photon."               Dierec
+@doc "... Double Auger rates."                                                                                                             DoubleAuger
+@doc "... electron-impact excitation with subsequent autoionization, i.e. an inner-shell electron is raised by electron impact to a " *
+     "level above the ionization threshold, which then autoionizes."                                                                    ImpactExcAuto
+@doc "... multi-photon excitation and decay rates, including 2-photon, etc. processes."                                                  MultiPhotonDE
+@doc "... multi-photon (single-electron) ionization."                                                                                          MultiPI
+@doc "... Photoionization processes, i.e. the emission of a single free electron into the continuum due to an external light field."             Photo
+@doc "... Photo-double ionization rates."                                                                                                  PhotoDouble
+@doc "... Photoexcitation rates."                                                                                                             PhotoExc
+@doc "... photoexcitation fluorescence rates and cross sections."                                                                        PhotoExcFluor
+@doc "... photoexcitation autoionization cross sections and collision strengths."                                                         PhotoExcAuto
+@doc "... Photoionization processes but calculated for a specified plasma model."                                                        PhotoInPlasma
+@doc "... Radiative (multipole) transitions between bound-state levels of the same charge state."                                            Radiative
+@doc "... radiative electron capture, i.e. the capture of a free electron with the simultaneous emission of a photon."                             Rec
+@doc "... electron-impact excitation cross sections and collision strengths."                                                                ImpactExc
+@doc "... Radiative Auger rates."                                                                                                               RAuger
     
 
-export  AbstractProcess, NoProcess, Auger, AugerInPlasma, Compton, Coulex, Coulion, Dierec, DoubleAuger, Eimex, ElecCapture, 
-        ImpactExcAuto, InternalConv, MultiPhotonDE, MultiPI, MultiPDI, Photo, PhotoDouble, PhotoExc, PhotoExcAuto, PhotoExcFluor, 
-        PhotoInPlasma, PhotoIonAuto, PhotoIonFluor, Radiative, RAuger, Rec, PairA1P, Coulion
+export  AbstractProcess, NoProcess, Auger, AugerInPlasma, Compton, Coulex, Coulion, Dierec, DoubleAuger, ElecCapture, 
+        ImpactExc, ImpactExcAuto, InternalConv, MultiPhotonDE, MultiPI, Photo, PhotoDouble, PhotoExc, PhotoExcAuto, PhotoExcFluor, 
+        PhotoInPlasma, Radiative, RAuger, Rec, PairA1P
 
 function Base.string(propc::NoProcess)          return( "no process" )                         end
 function Base.string(propc::Auger)              return( "Auger" )                              end
 function Base.string(propc::AugerInPlasma)      return( "Auger in plasma" )                    end
 function Base.string(propc::Compton)            return( "Rayleigh-Compton" )                   end
+function Base.string(propc::Coulex)             return( "Coulomb excitation" )                 end
+function Base.string(propc::Coulion)            return( "Coulomb ionization" )                 end
 function Base.string(propc::Dierec)             return( "Dielectronic recombination" )         end
 function Base.string(propc::DoubleAuger)        return( "Double Auger" )                       end
 function Base.string(propc::ElecCapture)        return( "Electron capture" )                   end
+function Base.string(propc::ImpactExc)          return( "Electron-impact excitation" )         end
 function Base.string(propc::ImpactExcAuto)      return( "ImpactExcAuto" )                      end
 function Base.string(propc::InternalConv)       return( "InternalConv" )                       end
 function Base.string(propc::MultiPhotonDE)      return( "multi-photon excitation & decay" )    end
+function Base.string(propc::MultiPI)            return( "multi-photon ionization" )            end
+function Base.string(propc::PairA1P)            return( "one-photon pair annihilation" )       end
 function Base.string(propc::Photo)              return( "Photo-Ionization" )                   end
 function Base.string(propc::PhotoExc)           return( "Photo-Excitation" )                   end
 function Base.string(propc::PhotoDouble)        return( "single-photon double ionization" )    end
 function Base.string(propc::PhotoExcFluor)      return( "Photo-Excitation-Fluoresence" )       end
 function Base.string(propc::PhotoExcAuto)       return( "Photo-Excitation-Autoionization" )    end
 function Base.string(propc::PhotoInPlasma)      return( "Photo in plasma" )                    end
-function Base.string(propc::PhotoIonFluor)      return( "Photo-Ionization-Fluoresence" )       end
-function Base.string(propc::PhotoIonAuto)       return( "Photo-Ionization-Autoionization" )    end
 function Base.string(propc::Radiative)          return( "Radiative" )                          end
 function Base.string(propc::RAuger)             return( "Radiative Auger" )                    end
 function Base.string(propc::Rec)                return( "Rec" )                                end
@@ -1127,8 +2409,7 @@ export AbstractPropertySettings
 
 """
 `abstract type Basics.AbstractQuantizationAxis` 
-    ... defines an abstract type to distinguish between different choices of the quantization axis in light-atom 
-        interactions.
+    ... defines an abstract type to distinguish between different choices of the quantization axis in light-atom interactions.
         
     + DefaultQuantizationAxis      ... Use the (default) z-axis for quantization of atomic levels.
     + StaticQuantizationAxis       ... Define a static quantization axis in terms of a unit vector.
@@ -1136,6 +2417,8 @@ export AbstractPropertySettings
 """
 abstract type  AbstractQuantizationAxis                 end
 struct         DefaultQuantizationAxis  <:  AbstractQuantizationAxis   end
+
+@doc "... Use the (default) z-axis for quantization of atomic levels."                                                         DefaultQuantizationAxis
 
 
 # `Base.show(io::IO, axis::AbstractQuantizationAxis)`  ... prepares a proper printout of the variable axis::AbstractQuantizationAxis.
@@ -1174,8 +2457,8 @@ end
 
 """
 `struct  Basics.HarmonicQuantizationAxis   <:  AbstractQuantizationAxis`  
-    ... to specify a time-harmonic quantization axis in terms of a unit vector for its direction and a frequency omega.
-        !!! It need to be explained how omega is related to the components of nVector; perhaps, some further
+    ... to specify a time-harmonic quantization axis in terms of a unit vector for its direction and a frequency omega. !!! It need to be
+        explained how omega is related to the components of nVector; perhaps, some further
             further specification is required to make this axis unique.
 
     + nVector  ::Basics.Cartesian3DFieldValue{Float64} ... 3D unit vector that specifies the quantization axis.
@@ -1202,36 +2485,159 @@ export AbstractQuantizationAxis, DefaultQuantizationAxis, StaticQuantizationAxis
 
 
 """
+`abstract type Basics.AbstractOrbitalSource` 
+    ... defines an abstract and three singleton types to say WHICH one-electron orbital set the multiplets of an `Atomic.Computation`
+        are built on.  It exists because an explicit second-order amplitude is valid only where its initial, intermediate (Green) and
+        final multiplets share ONE orthonormal set:  the matrix element such an amplitude needs at a junction whose two CSFs differ in
+        ONE orbital is `<r|H - E|s> = <r|h_D|s> + <r|V_ee|s> - E <r|s>`, and `ManyElectron.matrixElement_HminusE` drops the overlap
+        term on exactly that orthonormality assumption.  Separate SCF runs make the assumption false.  Measured 02-Nov-2026 on
+        `examples/example-Dj.jl`:  a Green space and an initial state from their own SCFs departed by 8.2e-02 at
+        `<2s_green|1s_initial>`, and the dropped term came to 2.05x the matrix element it would have corrected.
+
+        ONE SET IS NOT MORE ACCURATE, IT IS MORE CONSISTENT, and the distinction is worth keeping:  no single set can be optimal for
+        all three states at once, so sharing one is a deliberate COMPROMISE in the description of each of them.  What it buys is that
+        the operator JAC evaluates equals the operator the physics asks for.  It does NOT follow that a shared set must give a HIGHER
+        energy, and an earlier wording of this paragraph wrongly said so:  `SelfConsistent.performSCF` is a mean-field procedure and
+        not a level-specific variational minimisation, so neither number is a variational bound and the ordering can come out either
+        way.  Measured 02-Nov-2026 on Li-like Ne, initial [1s^2 2s, 1s^2 2p] against final [1s^2 2p], the frozen final level came out
+        1.4e-04 Ha BELOW its own separately converged SCF.  `TwoElectronOnePhoton` measures the trade as worth making -- on one set,
+        explicit second order reproduces full CI to 0.3 % -- but nothing establishes that in general, so the default stays
+        `SeparateOrbitals()` and no existing result moves.
+
+    + struct SeparateOrbitals      ... every multiplet from its own SCF.  THE DEFAULT, and what JAC has always done:  correct for a
+                                       first-order amplitude whose CSFs differ in TWO orbitals, where a one-body operator cannot
+                                       contribute at all and `V_ee` is the whole answer.
+    + struct InitialStateOrbitals  ... one SCF on the initial configurations;  every other multiplet is a CI on those frozen orbitals.
+                                       The natural choice for an absorption or decay amplitude, since the series is referenced to
+                                       `E_i`, its denominators are `E_i - E_n`, and the dropped overlap term carries `E_i`.
+    + struct FinalStateOrbitals    ... one SCF on the final configurations, with the others frozen onto it;  the choice where the FINAL
+                                       state is the measured one.
+    + struct GivenOrbitals         ... the caller supplies the set outright, and EVERY multiplet is a CI on it.  This is the one that
+                                       completes a SECOND-ORDER computation, because the Green space is built by the caller BEFORE
+                                       `perform` runs -- it lives in the process settings -- so the caller already holds the orbitals
+                                       and nothing is gained by having `perform` rediscover them.  It also lifts the restriction the
+                                       other two carry: the SCF may run over a WIDER configuration list than any multiplet's CI, which
+                                       is what a 1s^2 initial state needs when its Green space occupies 2s and 2p.  Measured
+                                       02-Nov-2026 on He-like Be: one SCF over [1s^2, 1s 2s, 1s 2p] carries a 1s^2 initial state and a
+                                       [1s, 2s, 2p] Green space with condition (b) MET, at the price of 3.3e-02 Ha (0.24 %) on the
+                                       initial-state energy against its own dedicated SCF.
+
+        A CONTINUUM orbital's generating field is a SEPARATE question and is not decided here:  it is resolved per module from the
+        relevant `AsfSettings.scField`, for which see `Continuum.resolveExchangeDefault`.
+"""
+abstract type  AbstractOrbitalSource                            end
+struct     SeparateOrbitals         <:  AbstractOrbitalSource   end
+struct     InitialStateOrbitals     <:  AbstractOrbitalSource   end
+struct     FinalStateOrbitals       <:  AbstractOrbitalSource   end
+
+##  The field is PARAMETRIC for a mechanical reason, not a conceptual one: this file is included BEFORE
+##  module-Radial.jl, so `Radial.Orbital` cannot be named as a field type here at all.  `T` is in practice
+##  the `Dict{Subshell,Orbital}` that a basis carries, and `Hamiltonian.performCIwithFrozenOrbitals` is
+##  typed on that, so anything else raises a MethodError naming the type rather than failing quietly.
+struct     GivenOrbitals{T<:AbstractDict}  <:  AbstractOrbitalSource
+    orbitals             ::T
+end
+
+
+# `Base.show(io::IO, source::Basics.GivenOrbitals)`  ... prints the orbital set by its SUBSHELLS rather than
+#   dumping every radial array, so that a Computation carrying one stays readable when it is shown.
+function Base.show(io::IO, source::Basics.GivenOrbitals)
+    print(io, "GivenOrbitals(" * string(length(source.orbitals)) * " orbitals: " *
+              join(sort(string.(collect(keys(source.orbitals)))), ", ") * ")")
+end
+
+
+export  AbstractOrbitalSource, FinalStateOrbitals, GivenOrbitals, InitialStateOrbitals, SeparateOrbitals
+
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
 `abstract type Basics.AbstractScField` 
     ... defines an abstract and a number of singleton types to distinguish between different self-consistent fields
 
-    + struct ALField          ... to represent an average-level field.        
-    + struct EOLField         ... to represent an (extended) optimized-level field.        
-    + struct DFSField         ... to represent an mean Dirac-Fock-Slater field.        
-    + struct DFSwCPField      ... to represent an mean Dirac-Fock-Slater with core-polarization field.        
-    + struct HSField          ... to represent an mean Hartree-Slater field.        
-    + struct EHField          ... to represent an mean extended-Hartree field.        
-    + struct KSField          ... to represent an mean Kohn-Sham field.        
-    + struct HartreeField     ... to represent an mean Hartree field.        
-    + struct CHField          ... to represent an mean core-Hartree field.        
-    + struct NuclearField     ... to represent a pure nuclear (potential) field.        
+    + struct ALField          ... to represent an average-level field: a bVector-native SCF built directly around B-spline expansion
+                                  coefficient vectors (no tabulated Orbital maintained during the SCF iteration at all), a kink-aware
+                                  (spline + split adaptive quadrature) two-electron Slater integral in place of the naive tensor-product
+                                  Gauss-Legendre one, and an in-matrix orthogonality projection modeled directly on DBSR_HF (Zatsarinny &
+                                  Froese Fischer, CPC 202, 287 (2016)); see SelfConsistent.solveAverageLevelField. Validated to 5+
+                                  significant figures against literature for He/Be/Ne/Ar. (This type was developed under the working name
+                                  ALFieldClaude2 during an earlier investigation; an original, buggy ALField implementation -- and before
+                                  that a first-generation kink-aware line, ALFieldClaude -- were both superseded by this one and removed.)
+    + struct EOLField         ... to represent an (extended) optimized-level field.
+    + struct DFSField         ... to represent an mean Dirac-Fock-Slater field.
+    + struct HSField          ... to represent an mean Hartree-Slater field.
+    + struct KSField          ... to represent an mean Kohn-Sham field.
+    + struct CHField          ... to represent an mean core-Hartree field.
+    + struct NuclearField     ... to represent a pure nuclear (potential) field.
+    + struct ThomasFermiField ... to represent a Thomas-Fermi screened field.  Unlike every other member of this family it is NOT
+                                  self-consistent: it needs only the nuclear charge and the number of electrons, and no density at all,
+                                  which is exactly what makes it useful as a STARTING potential; see Basics.computePotential and
+                                  ManyElectron.StartFromThomasFermi.
 """
 abstract type  AbstractScField                          end
 struct     ALField              <:  AbstractScField     end
 struct     EOLField             <:  AbstractScField     end
 struct     HSField              <:  AbstractScField     end
-struct     EHField              <:  AbstractScField     end
 struct     KSField              <:  AbstractScField     end
-struct     HartreeField         <:  AbstractScField     end
 struct     CHField              <:  AbstractScField     end 
 struct     NuclearField         <:  AbstractScField     end
+struct     ThomasFermiField     <:  AbstractScField     end
 struct     AaDFSField           <:  AbstractScField     end   
-struct     AaHSField            <:  AbstractScField     end   
+struct     AaHSField            <:  AbstractScField     end
+
+@doc "... to apply the average-atom Dirac-Fock-Slater field, i.e. the relativistic counterpart of AaHSField for the same plasma " *
+     "conditions; cf. Basics.computePotential(::AaDFSField, grid, orbitals, mu, temp)."   AaDFSField
+@doc "... to apply the average-atom Hartree-Slater field, i.e. a mean-field potential for a plasma of given chemical potential mu " *
+     "and temperature; cf. Basics.computePotential(::AaHSField, grid, orbitals, mu, temp)."   AaHSField
+
+@doc "... to represent an average-level field: a bVector-native SCF built directly around B-spline expansion coefficient vectors (no " *
+     "tabulated Orbital maintained during the SCF iteration at all), a kink-aware (spline + split adaptive quadrature) two-electron " *
+     "Slater integral in place of the naive tensor-product Gauss-Legendre one, and an in-matrix orthogonality projection modeled " *
+     "directly on DBSR_HF (Zatsarinny & Froese Fischer, CPC 202, 287 (2016)); see SelfConsistent.solveAverageLevelField. Validated " *
+     "to 5+ significant figures against literature for He/Be/Ne/Ar. (This type was developed under the working name ALFieldClaude2 " *
+     "during an earlier investigation; an original, buggy ALField implementation -- and before that a first-generation kink-aware " *
+     "line, ALFieldClaude -- were both superseded by this one and removed.)"   ALField
+@doc "... to represent an (extended) optimized-level field."                                                                                  EOLField
+@doc "... to represent an mean Hartree-Slater field."                                                                                          HSField
+@doc "... to represent a pure nuclear (potential) field."                                                                                 NuclearField
+@doc "... to represent a Thomas-Fermi screened field. Unlike every other member of this family it is NOT self-consistent: it needs " *
+     "only the nuclear charge and the number of electrons, and no density at all, which is exactly what makes it useful as a " *
+     "STARTING potential; see Basics.computePotential and ManyElectron.StartFromThomasFermi."   ThomasFermiField
 
     
 """
 `struct  Basics.DFSField        <:  AbstractScField`  
     ... defines a type to describe a mean Dirac-Fock-Slater field.
+
+        THIS IS JAC's DEFAULT FIELD AND ITS ORBITAL EIGENVALUES ARE NOT BINDING ENERGIES.  The local-exchange
+        approximation leaves every valence orbital systematically underbound.  Measured against Koopmans, i.e.
+        against the ionization potential that `PeriodicTable.ionizationPotentials_Nist2025` already carries for
+        the same ion, where the AL field is the non-local Dirac-Fock comparison on the same grid and basis:
+
+            He 1s            -eps/IP = 0.57 (DFSField)    1.02 (ALField)
+            Ne 2p                      0.56               1.07
+            Eu^3+ 4f^6                 0.73               1.00     ... an OPEN f shell, measured 19-Oct-2026
+
+        So use `Basics.ALField()` wherever an INDIVIDUAL orbital energy matters -- a binding energy, a BEB cross
+        section, a perturbation-theory denominator -- and note that the underbinding reaches an open f shell as
+        readily as a closed s one.
+
+        WHAT THE CHOICE OF FIELD DOES AND DOES NOT REACH, measured on Eu^3+ 4f^6 against the twelve known levels
+        of that configuration, is worth knowing before quoting any of it:
+
+          * a LANDE g_J IS ESSENTIALLY IMMUNE.  Over the ^7F ladder g_J sits within 0.09-0.38 % of the exact LS
+            value 3/2 and moves by at most 5e-4 relative between the two fields, while eps(4f) moves 27 %.  The
+            same was found for Ti+ 3d^2 4s a^4F.  BUT a level that is NEAR-DEGENERATE WITH A SAME-J PARTNER is
+            the exception and must be checked: ^5D_4 sits 340-610 cm^-1 from ^5G_4, and ITS g_J moves 3.5 %
+            between the fields, seventy times more than any ^7F level.
+          * FINE STRUCTURE IMPROVES.  The ^7F intervals come out 9-15 % too wide on DFS and 3-11 % on AL.
+          * A TERM SEPARATION GETS WORSE, and this is the trap.  ^5D - ^7F is 10-11 % too large on DFS and
+            14-18 % too large on AL, so DFS "agrees better" by a CANCELLATION OF ERRORS: its 4f is 3 % more
+            diffuse, which lowers the Slater integrals and imitates the reduction that correlation -- absent
+            from a single-configuration calculation -- would supply.  Do not choose DFS on that evidence.
 
     + strength           ::Float64   ... Strength factor of the DFS potential (default: strength=1.0)
 """
@@ -1239,23 +2645,626 @@ struct     DFSField             <:  AbstractScField
     strength             ::Float64 
 end
 
+
 # `Basics.DFSField()`  ... defines the default strength=1.0
 function DFSField()
     DFSField(1.0)
 end
 
-    
-"""
-`struct  Basics.DFSwCPField          <:  AbstractScField`  
-    ... defines a type to describe a mean Dirac-Fock-Slater field with core-polarization.
 
-    + corePolarization  ::CorePolarization   ... Parametrization of the core-polarization potential/contribution.
 """
-struct     DFSwCPField          <:  AbstractScField   
-    corePolarization    ::CorePolarization
+`Basics.scfProcedure(scField::Basics.AbstractScField)`
+    ... names the procedure by which SelfConsistent.performSCF determines the orbitals for this field. This
+        is the second of the two axes the AbstractScField family mixes: the first is WHAT the effective
+        potential is, this one is HOW the orbitals follow from it.
+
+        :meanFieldIteration   ... iterate a local screened potential to self-consistency
+        :averageLevel         ... the average-level variational procedure (a Fock matrix, no local potential)
+        :optimizedLevel       ... the optimized-level variational procedure, by orbital rotation
+        :hydrogenicStartOnly  ... no iteration at all; the generated basis is returned unchanged
+        :none                 ... no driver; the field is a potential only
+
+        :none is the default, so a newly added field is treated as unsupported until it says otherwise --
+        the safe direction. A value::Symbol is returned.
+"""
+function scfProcedure end
+
+scfProcedure(::AbstractScField)   = :none
+scfProcedure(::DFSField)          = :meanFieldIteration
+scfProcedure(::HSField)           = :meanFieldIteration
+scfProcedure(::ALField)           = :averageLevel
+scfProcedure(::EOLField)          = :optimizedLevel
+scfProcedure(::NuclearField)      = :hydrogenicStartOnly
+
+
+"""
+`Basics.providesScfDriver(scField::Basics.AbstractScField)`
+    ... answers whether SelfConsistent.performSCF can ITERATE this field, i.e. whether it owns a
+        self-consistent driver. Derived from Basics.scfProcedure, so the two cannot disagree.
+        A value::Bool is returned.
+"""
+function providesScfDriver end
+
+providesScfDriver(scField::AbstractScField) = scfProcedure(scField) != :none
+
+
+"""
+`abstract type Basics.AbstractScfRoute` 
+    ... defines an abstract and a number of types to distinguish HOW the orbitals of a given self-consistent field are found.
+        Basics.AbstractScField says what the orbitals are optimized FOR; this family says by which procedure they are obtained.
+        Basics.scfProcedure already names that second axis, but derives it from the field, so it could not be chosen: these types
+        make it a setting. They form a HIERARCHY by cost -- a fast route that may fail, a slow route that is dependable -- so that
+        a computation can be repeated on a more expensive route when a cheaper one does not converge; every route reports which
+        one it was and how it ended, since a recorded energy is only meaningful together with the path that produced it.
+
+    + struct AutomaticRoute    ... to take the standard route of the given field, i.e. whatever Basics.scfProcedure names; the
+                                   default, so that a field alone remains a complete specification.
+    + struct MeanFieldRoute    ... to iterate a local screened potential to self-consistency (DFS, HS, KS, CH).
+    + struct AverageLevelRoute ... to run the average-level variational procedure.
+    + struct RotationRoute     ... to obtain an optimized level by ORBITAL ROTATION, i.e. by direct minimization of the level
+                                   energy. Dependable but slow: it descends monotonically and keeps the basis orthonormal to
+                                   1e-15, and it needs hundreds to thousands of iterations to do so (measured 08-Sep-2026 on
+                                   C-like uranium: |grad| 7.6e-03 at 400 iterations and 3.3e-04 at 2000, the energy still
+                                   falling by 5.4e-04 Ha in between). This is the fallback of the hierarchy.
+    + struct FockRoute         ... to obtain an optimized level by solving the Fock equations to self-consistency, as GRASP does.
+                                   Fast where it works -- tens of iterations rather than thousands -- but it can converge onto a
+                                   degenerate stationary point when two near-degenerate CSFs compete for one correlation channel
+                                   and the correlating weight runs to zero; cf. the note at SelfConsistent.performSCF.
+    + struct NewtonRoute       ... reserved for a second-order (Newton) procedure that uses the curvature and not only the
+                                   gradient. NOT IMPLEMENTED: it raises rather than silently taking another route.
+"""
+abstract type  AbstractScfRoute                         end
+struct     AutomaticRoute       <:  AbstractScfRoute    end
+
+
+"""
+`struct  Basics.MeanFieldRoute  <:  AbstractScfRoute`  
+    ... defines a type to iterate a local screened potential to self-consistency.
+
+    + maxIterations      ::Int64     ... maximum number of iterations this route may take.
+"""
+struct     MeanFieldRoute       <:  AbstractScfRoute
+    maxIterations        ::Int64
 end
 
-export  AbstractScField, AaDFSField, AaHSField, ALField, EOLField, DFSField, DFSwCPField, HSField, NuclearField
+
+# `Basics.MeanFieldRoute()`  ... defines the default budget
+function MeanFieldRoute()
+    MeanFieldRoute(24)
+end
+
+
+"""
+`struct  Basics.AverageLevelRoute  <:  AbstractScfRoute`  
+    ... defines a type to run the average-level variational procedure.
+
+    + maxIterations      ::Int64     ... maximum number of iterations this route may take.
+"""
+struct     AverageLevelRoute    <:  AbstractScfRoute
+    maxIterations        ::Int64
+end
+
+
+# `Basics.AverageLevelRoute()`  ... defines the default budget
+function AverageLevelRoute()
+    AverageLevelRoute(24)
+end
+
+
+"""
+`struct  Basics.RotationRoute   <:  AbstractScfRoute`  
+    ... defines a type to obtain an optimized-level field by orbital rotation, i.e. by direct minimization of the level energy.
+
+    + maxIterations      ::Int64     ... maximum number of iterations this route may take.
+    + nVirtual           ::Int64     ... number of virtual directions per subshell that span the step; the search direction is
+                                         assembled inside this span, out of a b-space of nsL + nsS (183 for a C-like uranium RAS
+                                         layer), and the reported |grad| is measured in the SAME span. Measured 08-Sep-2026:
+                                         raising it from 16 to 32 lowers the energy of that case by 3.7e-04 Ha with the basis
+                                         orthonormal to 1e-10, while 96 destroys the line search outright at iteration 41.
+    + incrementTolerance ::Float64   ... WHEN TO STOP, as the fraction by which DOUBLING the effort may still move the
+                                         result;  0.0 (the default) turns the test off, and then `maxIterations` decides the
+                                         answer.  A correlation layer never truly converges, so its iteration count has
+                                         always been a cost dial rather than a criterion -- and that is why a RAS layer
+                                         increment had to be quoted together with its budget.  With a positive tolerance the
+                                         solver instead compares the descent it has achieved, D(n) = E(1) - E(n), against the
+                                         descent at HALF the iterations, D(n/2):  if doubling the effort moved the increment
+                                         by less than the tolerance, doubling it again will not either, and the run stops.
+                                         `maxIterations` is then a CEILING, not the decision.
+                                         **THE SCALE IS THE DESCENT ITSELF, which is what frees the test of units and of Z.**
+                                         No absolute tolerance can serve both a layer worth 160 mHa (Ti III 3d^2) and one
+                                         worth 0.06 mHa (Ca+ 4s with core-s singles), and both were measured on one afternoon.
+                                         It never fires before iteration 6: at a budget of 3 a reference step has been
+                                         measured to return an energy BELOW its own converged value, so an earlier test can
+                                         stop on noise.  0.05 asks for 5 %, which on the ions measured so far is reached well
+                                         inside the budgets those layers were being given.
+    + stepping           ::Symbol    ... how the search direction is chosen, one of :plain, :conjugate, :curvature (the default)
+                                         and :newton; an unrecognized symbol RAISES rather than falling back silently. The first
+                                         three are first-order and differ only in how they choose the downhill direction: :plain
+                                         steps straight downhill and zig-zags, undoing part of each previous step; :conjugate
+                                         corrects the new direction against the previous one so it stops zig-zagging; :curvature
+                                         keeps a short memory of how the slope changed over recent steps and guesses the
+                                         curvature from it. The names are Rule 21's and describe what the method does rather
+                                         than who wrote it. :newton is second-order and is described below.
+
+    ## WHEN TO ASK FOR :newton, AND WHEN IT CANNOT HELP
+
+    An optimized-level functional re-solves the CI eigenvector at every iteration, so the function minimized at
+    iteration n is NOT the one minimized at n+1: a first-order method differences the gradients of two different
+    functions, and its |grad| then oscillates instead of falling. :newton removes that by construction rather than
+    patching around it -- it solves the REDUCED Hessian system, which contains the CI relaxation exactly, by a
+    preconditioned truncated conjugate-gradient inner loop.
+
+    **It helps exactly where the target symmetry block has CI FREEDOM, and the size of the gain follows the CI
+    relaxation as a fraction of the orbital-orbital curvature.** Measured 06-Oct-2026 on a Be ladder, the same
+    layer structure, everything but the direction held fixed:
+
+        target block           relaxation   :curvature                      :newton
+        1 CSF (reference)      0            3 iterations                    3 iterations  ... NO gain
+        3 CSFs  (+2p)          4.1 %        58 iters, |grad| 6.4e-07        6 iters, |grad| 6.2e-08
+        11 CSFs (+2p3s3p3d)    4.7 %        60 iters, |grad| 1.1e-03, STOPPED  15 iters, |grad| 1.8e-04
+
+    **A SINGLE-CSF STEP CANNOT GAIN ANYTHING, by construction**: with one CSF there is no CI vector to re-solve, the
+    orbital-CI block of the Hessian is empty, and the moving target does not exist. So :newton is for the CORRELATION
+    layers of a RAS ladder, and an ordinary single-configuration SCF -- however heavy the element -- gains nothing
+    from it. Ask for it on a layer that will not settle, and leave :curvature on the reference step.
+
+    **IT IS NOT FASTER, AND SHOULD NOT BE CHOSEN FOR SPEED.** One reduced-Hessian-vector product costs four orbital
+    gradients and two CI-matrix builds, so the measured solver time is 1.4x (+2p) to 4.8x (+2p3s3p3d) that of
+    :curvature, and reaching a GIVEN |grad| costs more arithmetic, not less. What it buys is reliability: on the
+    11-CSF layer the first-order |grad| rises as often as it falls (0.0092, 0.0124, 0.0092, 0.0047, 0.0041, 0.0050,
+    0.0055, 0.0061, 0.0064, 0.0055, 0.0069) and stalls, while :newton falls monotonically from iteration 3 through
+    two orders of magnitude with a full step accepted throughout. Choose it when a layer refuses to converge, not
+    when one converges slowly.
+
+    **ONE RESTRICTION:** the reduced Hessian needs one relaxation term per target level, and two levels of a single
+    symmetry block couple through it. For a functional with more than one target level :newton therefore says so
+    once and uses the first-order step instead, rather than returning a Newton step that silently omits the coupling.
+"""
+struct     RotationRoute        <:  AbstractScfRoute
+    maxIterations        ::Int64
+    nVirtual             ::Int64
+    stepping             ::Symbol
+    incrementTolerance   ::Float64
+
+    # THE STEPPING IS VALIDATED HERE RATHER THAN AT THE SOLVER, because the solver's direction chain ends in an
+    # `else` that takes the plain preconditioned step: an unrecognized symbol would therefore run to completion and
+    # return a plausible energy obtained by a method the caller did not ask for.  Measured 06-Oct-2026 before this
+    # constructor existed: `stepping = :newtn` ran clean and silently delivered steepest descent.  Raising at
+    # CONSTRUCTION is the right place, since it names the mistake where the caller made it.
+    function RotationRoute(maxIterations::Int64, nVirtual::Int64, stepping::Symbol, incrementTolerance::Float64)
+        if  !(stepping in (:plain, :conjugate, :curvature, :newton))
+            error("Basics.RotationRoute: stepping = :$stepping is not recognized.  Use one of :plain, :conjugate, " *
+                  ":curvature (the default, a short-memory secant method) or :newton (second-order, for a " *
+                  "correlation layer that will not converge).  See the docstring for which to choose.")
+        end
+        if  incrementTolerance < 0.  ||  incrementTolerance >= 1.
+            error("Basics.RotationRoute: incrementTolerance = $incrementTolerance must lie in [0, 1).  Zero turns " *
+                  "the test off and `maxIterations` then decides the answer;  a positive value is the fraction by " *
+                  "which DOUBLING the effort may still move the layer's increment, 0.05 being a reasonable ask.")
+        end
+        new(maxIterations, nVirtual, stepping, incrementTolerance)
+    end
+end
+
+
+# `Basics.RotationRoute(maxIterations::Int64, nVirtual::Int64, stepping::Symbol)`
+#     ... the three-argument form used before 07-Oct-2026;  it leaves the increment test OFF, so `maxIterations`
+#         decides where the run stops exactly as it did then.
+function RotationRoute(maxIterations::Int64, nVirtual::Int64, stepping::Symbol)
+    RotationRoute(maxIterations, nVirtual, stepping, 0.0)
+end
+
+
+# `Basics.RotationRoute()`  ... defines the values the rotation solver has used since 27-Aug-2026
+function RotationRoute()
+    RotationRoute(24, 16, :curvature)
+end
+
+
+# `Basics.RotationRoute(maxIterations::Int64)`  ... sets the budget and keeps the standard step space and stepping
+function RotationRoute(maxIterations::Int64)
+    RotationRoute(maxIterations, 16, :curvature)
+end
+
+
+"""
+`struct  Basics.FockRoute       <:  AbstractScfRoute`  
+    ... defines a type to obtain an optimized-level field by solving the Fock equations to self-consistency.
+
+    + maxIterations         ::Int64  ... maximum number of iterations this route may take.
+    + unscaledOffDiagonal   ::Bool   ... True, if the off-diagonal (CSF-pair) contributions are kept OUT of the 1/occ scaling
+                                         of the Fock matrix. They carry weight ~ c_r c_s while the generalized occupation
+                                         carries ~ c_r^2, so dividing them by it introduces a ratio that grows without bound
+                                         as a correlating CSF's own coefficient shrinks. Measured 09-Sep-2026 on Be
+                                         1s^2 2s^2 + 1s^2 2p^2: with the scaling in place the competing CSF's weight collapses
+                                         to 1.9e-05 and the 2p_3/2 orbital diffuses to <r> = 10.08 against its partner's 2.52;
+                                         without it the weight is 0.053 and the energy is 15.8 mHa lower.
+                                         NOTE that this is NOT GRASP's inhomogeneous source term, which is still MISSING: an
+                                         off-diagonal element such as R^k(2s,2s,2p,2p) differentiates to a term proportional to
+                                         P(2s), i.e. to a SOURCE on the right-hand side, and JAC still applies it as a matrix
+                                         multiplying P(2p). That is why the converged Fock fixed point sits 8.9 mHa ABOVE the
+                                         minimum the rotation route reaches, and it is a defect of the EQUATIONS.
+"""
+struct     FockRoute            <:  AbstractScfRoute
+    maxIterations        ::Int64
+    unscaledOffDiagonal  ::Bool
+end
+
+
+# `Basics.FockRoute()`  ... defines the default budget, with the off-diagonal terms kept out of the 1/occ scaling
+function FockRoute()
+    FockRoute(40, true)
+end
+
+
+# `Basics.FockRoute(maxIterations::Int64)`  ... sets the budget and keeps the off-diagonal terms unscaled
+function FockRoute(maxIterations::Int64)
+    FockRoute(maxIterations, true)
+end
+
+
+"""
+`struct  Basics.NewtonRoute     <:  AbstractScfRoute`  
+    ... defines a type reserved for a second-order procedure. NOT IMPLEMENTED; it raises where it is used.
+
+    + maxIterations      ::Int64     ... maximum number of iterations this route would be allowed to take.
+"""
+struct     NewtonRoute          <:  AbstractScfRoute
+    maxIterations        ::Int64
+end
+
+
+# `Basics.NewtonRoute()`  ... defines the default budget
+function NewtonRoute()
+    NewtonRoute(20)
+end
+
+
+"""
+`struct  Basics.StabilizedFockRoute  <:  AbstractScfRoute`  
+    ... an EXPLORATORY route: the Fock route carrying the two stabilizing mechanisms of GRASP's rmcdhf that are
+        tractable in a B-spline code. It exists to find out what they are worth here, and is deliberately kept
+        beside Basics.FockRoute rather than replacing it.
+
+        The two mechanisms, taken from `src/appl/rmcdhf90/` rather than invented:
+        (i)  ADAPTIVE PER-ORBITAL DAMPING, after dampck.f90. The damping starts at 0.5; when successive relative
+             changes of an orbital's own energy change SIGN -- an oscillation, `ED1*ED2 < -1e-4` -- it is raised
+             as `0.1 + 0.9*damping`, and otherwise HALVED, so that a monotonically improving orbital is taken
+             almost whole. JAC's Fock solver already computes each orbital's eigenvalue and discards it, which
+             is what this needs, and is the same quantity priority item 11 is about.
+        (ii) A SPECTROSCOPIC / CORRELATION CLASSIFICATION, after orthy.f90, which orthogonalizes in the order
+             fixed, spectroscopic, correlation. An orbital counts as a correlation orbital when its generalized
+             occupation falls below `correlationCut`; those are refined LAST, so that a weakly occupied orbital
+             is projected against settled ones rather than the other way round.
+
+        STATUS, 09-Sep-2026: MEASURED AND SET ASIDE, with the maintainer's agreement. It was built to answer a
+        question and it answered it -- in the negative. DO NOT ADOPT IT, and do not make either mechanism a
+        default, without new evidence; equally, do not delete it, since the code is what makes the measurement
+        below reproducible.
+
+        WHAT WAS MEASURED, five cases against the rotation route, one code state (deficits in mHa):
+
+            case         fock    stab      note
+            Be Z=4       8.86    8.69      the only case stab wins, by 0.17
+            Be Z=10      4.36    6.65
+            Be Z=26      3.16    5.34
+            Be 2-shell  >8.95   >10.37     reference itself unconverged; stab's orbitals break, 83 % so-dev
+            C  Z=6      10.17   13.94
+
+        THE ORDERING MECHANISM IS A NO-OP IN JAC BY CONSTRUCTION, and this is the part worth remembering. JAC
+        orders subshells by (n, kappa) and the generalized occupation falls monotonically with n -- measured on
+        the two-shell Be case: 2.000, 1.820, 0.069, 0.110, 0.0015, 0.00002, 0.0003 -- so the spectroscopic
+        orbitals ALREADY come first and the correlation-last sort returns the basis order unchanged. It has
+        never altered a number in any case tried. An earlier guess that it was inert only because the kappa
+        blocks were singletons was WRONG; the reason is structural. To make it act at all, the criterion would
+        have to become GRASP's own, which sorts by SELF-CONSISTENCY AND ENERGY rather than by class.
+
+        ADAPTIVE DAMPING IS NET NEGATIVE. It is worth 13.07 mHa against the GRASP-scaled equation with no
+        stabilizer at all -- a configuration nobody would ship -- but only 0.17 mHa against the Fock route as it
+        stands, and it LOSES by 2.2 to 3.8 mHa in four cases of five. It also costs iterations (60 without
+        converging against 17 that converge, on Be Z=4) and degrades the spin-orbit symmetry of the orbitals
+        even where it improves the energy.
+
+        WHAT NOT TO CONCLUDE FROM THIS. That fixed damping is useless is NOT what was shown, and the reverse was
+        concluded once already from too blunt a test: raising a FIXED damping to 0.9 and 0.98 made the collapse
+        more complete, which is a different statement from GRASP's rule, which damps only where successive
+        relative energy changes change sign and halves it everywhere else.
+
+    + maxIterations       ::Int64     ... maximum number of iterations this route may take.
+    + adaptiveDamping     ::Bool      ... True, if the per-orbital damping follows dampck.f90 rather than the
+                                          fixed 0.5 the other Fock route uses.
+    + correlationCut      ::Float64   ... generalized occupation below which an orbital counts as a CORRELATION
+                                          orbital rather than a spectroscopic one, and is refined last.
+"""
+struct     StabilizedFockRoute  <:  AbstractScfRoute
+    maxIterations        ::Int64
+    adaptiveDamping      ::Bool
+    correlationCut       ::Float64
+end
+
+
+# `Basics.StabilizedFockRoute()`  ... both mechanisms on, with a correlation cut of half an electron
+function StabilizedFockRoute()
+    StabilizedFockRoute(40, true, 0.5)
+end
+
+
+# `Basics.StabilizedFockRoute(maxIterations::Int64)`  ... sets the budget and keeps both mechanisms
+function StabilizedFockRoute(maxIterations::Int64)
+    StabilizedFockRoute(maxIterations, true, 0.5)
+end
+
+
+"""
+`Basics.maxIterations(route::Basics.AbstractScfRoute)`
+    ... returns the iteration budget of the given route. Each solver has its own natural budget -- a mean field converges in a
+        handful of iterations where the rotation route needs thousands -- which is why the budget belongs to the route and not
+        to the settings as a whole. An AutomaticRoute carries no budget of its own and yields the shared default.
+        A value::Int64 is returned.
+"""
+function maxIterations end
+
+maxIterations(route::AbstractScfRoute)      = route.maxIterations
+maxIterations(::AutomaticRoute)             = 24
+
+
+"""
+`Basics.incrementTolerance(route::Basics.AbstractScfRoute)`
+    ... returns the fraction by which DOUBLING the effort may still move the result before the given route stops, or 0.0 for
+        every route that does not offer the test -- so a caller may ask any route without knowing which ones implement it.
+        See `Basics.RotationRoute` for what the test measures and why its scale is the descent itself. A value::Float64 is
+        returned.
+"""
+function incrementTolerance end
+
+incrementTolerance(route::AbstractScfRoute)  = 0.0
+incrementTolerance(route::RotationRoute)     = route.incrementTolerance
+
+
+"""
+`Basics.standardRoute(scField::Basics.AbstractScField, maxIterations::Int64)`
+    ... returns the route by which the given field is normally solved, carrying the given iteration budget. This is what an
+        AutomaticRoute stands for, and it is the way to name a budget without also having to know which solver a field uses --
+        which matters wherever the field is a variable rather than a literal. A route::AbstractScfRoute is returned.
+"""
+function standardRoute end
+
+function standardRoute(scField::AbstractScField, maxIterations::Int64)
+    proc = Basics.scfProcedure(scField)
+    if       proc == :meanFieldIteration    return( MeanFieldRoute(maxIterations)    )
+    elseif   proc == :averageLevel          return( AverageLevelRoute(maxIterations) )
+    elseif   proc == :optimizedLevel        return( RotationRoute(maxIterations)     )
+    else                                    return( AutomaticRoute()                 )
+    end
+end
+
+
+"""
+`abstract type  Basics.AbstractQTreatment`
+    ... defines an abstract type to say how the Q space of a RAS step is to be treated -- the configurations the
+        step GENERATES but which need not all enter the CI. The two implementations are not two algorithms but the
+        two ends of one dial, and it is the individual configuration that is routed rather than the step.
+
+    + struct Variational     ... every generated configuration enters the CI. What a RAS step has always done.
+    + struct SecondOrder     ... each configuration is ranked by the fraction of the atomic state function it
+                                 carries, and is then promoted into the CI, folded in perturbatively, or dropped.
+"""
+abstract type  AbstractQTreatment                       end
+
+
+"""
+`abstract type  Basics.AbstractStarkBroadeningMethod`
+    ... selects which closed-form relation `StarkBroadening` uses to turn a line's own structure (its
+        perturbers, or its own effective quantum numbers) into an electron-impact width/shift -- selected BY
+        WHICH CONCRETE TYPE YOU SUPPLY, never by a flag, the same discipline as `AbstractScfRoute` or
+        `AbstractEeInteraction`. More than one such method is in active, independent use in the Stark-
+        broadening literature -- not one formula with cosmetic variants -- so a type per method is the
+        honest representation; see `StarkBroadening`'s own module docstring for the primary sources behind
+        each.
+
+    + struct SimplifiedModifiedSemiempiricalMethod  ... the Dimitrijevic & Konjevic (1987) low-temperature
+                                                          simplification (SMSE): a fully closed form using
+                                                          only the line's own two levels' effective quantum
+                                                          numbers and orbital angular momenta -- no
+                                                          perturber search needed. Carries its OWN physics
+                                                          parameters, since unlike `StarkBroadening.Settings`'s
+                                                          density/temperature (properties of the PLASMA),
+                                                          these are properties of the ION itself.
+"""
+abstract type  AbstractStarkBroadeningMethod            end
+
+"""
+`struct  Basics.SimplifiedModifiedSemiempiricalMethod  <:  AbstractStarkBroadeningMethod`
+    ... see `AbstractStarkBroadeningMethod`'s own docstring. Dimitrijevic & Konjevic, Astron. Astrophys. 172,
+        345 (1987); formula as restated in Dimitrijevic & Popovic, J. Appl. Spectrosc. 68, 893 (2001), Eq. (7).
+
+    + ionizationEnergy   ::Float64   ... the ion's own ionization threshold (Hartree, the SAME zero-point as
+                                          Level.energy) -- the energy of the series limit this line's upper
+                                          AND lower level both lie below.
+    + residualCharge     ::Float64   ... Z in the formula: the ion's spectroscopic charge AFTER removing the
+                                          active electron, PLUS one (Z=1 for a neutral atom's own valence
+                                          electron, Z=3 for a twice-ionized ion's valence electron, and so
+                                          on) -- the same Z_eff convention Rule 12 already uses elsewhere.
+"""
+struct  SimplifiedModifiedSemiempiricalMethod  <:  AbstractStarkBroadeningMethod
+    ionizationEnergy     ::Float64
+    residualCharge       ::Float64
+end
+
+
+"""
+`struct  Basics.Variational  <:  Basics.AbstractQTreatment`
+    ... every configuration a RAS step generates enters the CI, which is the behaviour of every RAS step written
+        before 11-Sep-2026 and remains the default. Equivalent to `SecondOrder(0., 0.)` and kept as its own type
+        because "treat this layer exactly" is a statement about intent, not a choice of threshold.
+"""
+struct     Variational          <:  AbstractQTreatment  end
+
+
+"""
+`abstract type  Basics.AbstractQSpacePerturbation`
+    ... how the Q-space's OWN internal coupling is treated before it is folded into the CI by
+        `Hamiltonian.secondOrderBlock` -- a question separate from `Basics.AbstractQTreatment`, which
+        decides promote/fold/discard for each configuration, and from `AtomicState.
+        AbstractRasStoppingPolicy`/`AbstractRasShellPolicy` (the automatic-RAS-ladder policies), but the
+        same shape: a small, deliberately open family, meant to grow by one new struct and one dispatch
+        method, never by a change to an existing one.
+
+    + struct DiagonalCSFPerturbation       ... every Q-space CSF folded as its own, isolated intermediate
+                                                state. The default, and what JAC has always done.
+    + struct BlockDiagonalizedPerturbation ... a folded Q-space configuration's own CSFs are diagonalized
+                                                together FIRST, and the fold then uses ITS eigenstates.
+"""
+abstract type  AbstractQSpacePerturbation                end
+
+
+"""
+`struct  Basics.DiagonalCSFPerturbation  <:  Basics.AbstractQSpacePerturbation`
+    ... every Q-space CSF is folded as its own, isolated intermediate state, using its own diagonal
+        Hamiltonian element as the Epstein-Nesbet denominator -- exactly what `Hamiltonian.secondOrderBlock`
+        has always done, validated against the exact CI on Cl III (`examples/example-Ar.jl` branch a) and
+        against `tools/probe-secondOrderQ.jl`'s own measurements. This ignores whether two Q-space CSFs
+        couple to EACH OTHER; see `Basics.BlockDiagonalizedPerturbation` for the alternative that does not.
+        The default, so every existing caller of `Basics.SecondOrder` is unaffected.
+"""
+struct     DiagonalCSFPerturbation       <:  AbstractQSpacePerturbation  end
+
+
+"""
+`struct  Basics.BlockDiagonalizedPerturbation  <:  Basics.AbstractQSpacePerturbation`
+    ... for each folded Q-space configuration, its own CSFs are diagonalized together FIRST, and the fold
+        then uses that configuration's own eigenstates and eigenvalues in place of its bare CSFs' diagonal
+        elements -- capturing correlation WITHIN one Q-space configuration that
+        `Basics.DiagonalCSFPerturbation` cannot see, since that route never asks whether two Q-space CSFs
+        couple to each other at all. More expensive than the diagonal route (one small diagonalization per
+        folded configuration, rather than none), named because the maintainer's own contact with the GRASP
+        community reports this can matter.
+"""
+struct     BlockDiagonalizedPerturbation  <:  AbstractQSpacePerturbation  end
+
+
+"""
+`struct  Basics.SecondOrder  <:  Basics.AbstractQTreatment`
+    ... ranks every configuration of the step's Q space by `|c(K')|^2`, the fraction of the atomic state function
+        that configuration carries, and routes it on that number alone:
+
+            |c|^2 > promoteAbove                 into the CI, and diagonalized exactly
+            discardBelow < |c|^2 < promoteAbove  folded in through the second-order effective Hamiltonian
+            |c|^2 < discardBelow                 dropped
+
+        so that `promoteAbove = 0.` reproduces a variational step and `promoteAbove = Inf` folds the whole layer
+        in. The weight is obtained from the same quantities as the energy correction, `|c(K')|^2 = dE_PT(K')/D`
+        with `dE_PT(K') = SUM_chi' |<(K chi J)||V||(K' chi' J)>|^2 / D` and `D = <q|H|q> - E_i`, i.e. Epstein-Nesbet
+        denominators: each Q-CSF's own diagonal element against the CI eigenvalue. No configuration-average energy
+        is needed and no H0/V partitioning has to be declared.
+
+    + promoteAbove       ::Float64   ... weight above which a configuration is put INTO the CI rather than folded in.
+    + discardBelow       ::Float64   ... weight below which a configuration is dropped entirely.
+    + justifyBelow       ::Float64   ... the largest `Sum |c|^2` over the FOLDED part for which the fold-in is still
+                                         called justified. INDEPENDENT of `promoteAbove` on purpose; see below.
+    + qSpacePerturbation ::Basics.AbstractQSpacePerturbation   ... how the FOLDED part's own internal coupling is
+                                         treated; `Basics.DiagonalCSFPerturbation()` by default, reproducing every
+                                         behaviour this struct had before this field existed. See
+                                         `Basics.AbstractQSpacePerturbation`.
+
+    WHY A WEIGHT AND NOT AN ENERGY. `dE_PT` is an energy and equals `|c|^2 * D`, so at equal weight a configuration
+    further away in energy ranks HIGHER -- which is the wrong way round for a spectrum. Measured on Cl III
+    3s^2 3p^3 (11-Sep-2026): core excitations carry 97.9 % of the total `dE_PT` while their net effect on the
+    excitation energies is 0.2 %, because their contribution is nearly level-independent (-47.696 / -47.729 /
+    -47.601 mHa) and cancels to 99.8 %. The weight separates the two classes by three orders of magnitude
+    (valence-valence 3.1e-02 against core 1.7e-05) where the energy separates them by only two.
+
+    WHY SECOND ORDER MAY RANK BUT MUST NOT BE TRUSTED AS AN ENERGY WHERE THE COUPLING IS STRONG. On the same case
+    it reproduces the exact CI to 0.6-1.3 % for the core and is wrong by 3.6-11.5 % for the valence shells. An
+    effective Hamiltonian in P repairs part of that -- it must use a LEVEL-INDEPENDENT denominator, so it
+    over-binds the ground state and makes the SPECTRUM worse (worst splitting error 1021 cm^-1 against 701). This
+    is why the threshold exists: a strongly coupled configuration is promoted rather than folded, and the fold-in
+    is then applied only where it is accurate.
+
+    WHY `justifyBelow` IS A SEPARATE NUMBER, AND WHY IT HAD TO BECOME ONE. Until 13-Sep-2026 the step judged its own
+    fold-in by testing `Sum |c|^2` against `promoteAbove` -- the same number that decides what gets folded. Raising
+    the threshold therefore folded MORE and simultaneously loosened the test of whether folding was legitimate, so
+    the one setting that most needs policing, `promoteAbove = 1.0` meaning "promote nothing, fold everything", was
+    exactly the setting at which the gate could never fire. Measured on Fe VII [Ar] 3d^2 that day: the step reported
+    "a WEAK perturbation; second order is justified here" while returning a 3F term INVERTED and displaced by a
+    factor of thirty, with `Sum |c|^2 = 0.048` printed on the adjacent line and not judged.
+
+    THE DEFAULTS ARE CALIBRATED ON ONE ION and a Z-scan along an isoelectronic sequence has NOT been done. Treat
+    them as a starting point and read the `Sum |c|^2` a step reports, which is the quantity that says whether the
+    fold-in was justified at all.
+"""
+struct     SecondOrder          <:  AbstractQTreatment
+    promoteAbove         ::Float64
+    discardBelow         ::Float64
+    justifyBelow         ::Float64
+    qSpacePerturbation   ::Basics.AbstractQSpacePerturbation
+end
+
+
+# `Basics.SecondOrder()`  ... the calibrated starting point; see the caveat in the docstring above
+function SecondOrder()
+    SecondOrder(1.0e-4, 1.0e-12, 1.0e-2, DiagonalCSFPerturbation())
+end
+
+
+# `Basics.SecondOrder(promoteAbove::Float64)`  ... sets the promotion threshold and keeps the default floor
+function SecondOrder(promoteAbove::Float64)
+    SecondOrder(promoteAbove, 1.0e-12, 1.0e-2, DiagonalCSFPerturbation())
+end
+
+
+# `Basics.SecondOrder(promoteAbove::Float64, discardBelow::Float64)`  ... keeps the default justification bound,
+#   which is deliberately NOT tied to promoteAbove -- see the docstring above.
+function SecondOrder(promoteAbove::Float64, discardBelow::Float64)
+    SecondOrder(promoteAbove, discardBelow, 1.0e-2, DiagonalCSFPerturbation())
+end
+
+
+# `Basics.SecondOrder(promoteAbove::Float64, discardBelow::Float64, justifyBelow::Float64)`  ... the three-threshold
+#   form every caller before this field existed could reach directly, via Julia's own default constructor; kept as
+#   an explicit method now that a fourth field means that default no longer matches three positional arguments.
+function SecondOrder(promoteAbove::Float64, discardBelow::Float64, justifyBelow::Float64)
+    SecondOrder(promoteAbove, discardBelow, justifyBelow, DiagonalCSFPerturbation())
+end
+
+
+"""
+`Basics.providesPotential(scField::Basics.AbstractScField)`
+    ... answers whether Basics.computePotential can build a radial potential for this field. False by
+        default. Note that the two predicates are INDEPENDENT rather than complementary: DFSField and
+        HSField answer true to both, since a mean field is a potential one can also iterate, while ALField
+        and EOLField answer false here -- they are variational procedures that build a Fock matrix and name
+        no local potential at all. A value::Bool is returned.
+"""
+function providesPotential end
+
+providesPotential(::AbstractScField)  = false
+providesPotential(::DFSField)         = true
+providesPotential(::HSField)          = true
+providesPotential(::KSField)          = true
+providesPotential(::CHField)          = true
+providesPotential(::ThomasFermiField) = true
+providesPotential(::AaDFSField)       = true
+providesPotential(::AaHSField)        = true   
+
+
+"""
+`Basics.scfDriverFields()`
+    ... names the fields that SelfConsistent.performSCF can iterate, i.e. exactly those for which
+        Basics.providesScfDriver is true. Kept beside the predicates themselves so the two cannot drift
+        apart, and used by performSCF's own refusal message. An Array{String,1} is returned.
+"""
+function scfDriverFields()
+    return( ["ALField", "DFSField", "EOLField", "HSField", "NuclearField"] )
+end
+
+    
+
+export  AbstractScfRoute, AbstractScField, AaDFSField, AaHSField, ALField, AutomaticRoute, AverageLevelRoute,
+        EOLField, DFSField, FockRoute, HSField, MeanFieldRoute, NewtonRoute, NuclearField,
+        StabilizedFockRoute,
+        providesPotential, providesScfDriver, RotationRoute, scfDriverFields, scfProcedure,
+        ThomasFermiField
 
 #################################################################################################################################
 #################################################################################################################################
@@ -1264,10 +3273,10 @@ export  AbstractScField, AaDFSField, AaHSField, ALField, EOLField, DFSField, DFS
 `abstract type Basics.AbstractSelection` 
     ... defines an abstract and a number of concrete types to distinguish between level- and line-selectors
 
-    + struct LevelSelection   ... to specify a list of levels by means of their (level) indices or level symmetries.         
-    + struct LineSelection    ... to specify a list of lines by means of their (level) indices or level symmetries.      
-    + struct PathwaySelection ... to specify a list of lines by means of their (level) indices or level symmetries.      
-    + struct ShellSelection   ... to specify a list of lines by means of their (level) indices or level symmetries.      
+    + struct LevelSelection   ... to specify a list of levels by means of their (level) indices or level symmetries.
+    + struct LineSelection    ... to specify a list of lines by means of their (level) indices or level symmetries.
+    + struct PathwaySelection ... to specify a list of lines by means of their (level) indices or level symmetries.
+    + struct ShellSelection   ... to specify a list of lines by means of their (level) indices or level symmetries.
 """
 abstract type  AbstractSelection      end
 
@@ -1284,6 +3293,7 @@ struct  LevelSelection  <:  AbstractSelection
     active         ::Bool  
     indices        ::Array{Int64,1}
     symmetries     ::Array{LevelSymmetry,1}
+    configurations ::Array{Configuration,1}
 end
 
 
@@ -1291,24 +3301,37 @@ end
 `Basics.LevelSelection()`  ... constructor for an inactive LevelSelection.
 """
 function  LevelSelection()
-    LevelSelection( false, Int64[], LevelSymmetry[])    
+    LevelSelection( false, Int64[], LevelSymmetry[], Configuration[])    
 end
 
 
 """
-`Basics.LevelSelection(active::Bool; indices::Array{Int64,1}=Int64[], symmetries::Array{LevelSymmetry,1}=LevelSymmetry[])`  
-    ... constructor for specifying the details of a LevelSelection.
+`Basics.LevelSelection(active::Bool; indices::Array{Int64,1}=Int64[], symmetries::Array{LevelSymmetry,1}=LevelSymmetry[],
+                       configurations::Array{Configuration,1}=Configuration[])`  
+    ... constructor for specifying the details of a LevelSelection.  `indices` and `symmetries` are alternatives
+        and must not be combined.  `configurations` names the REFERENCE configurations and selects the levels that
+        are built mainly from them, measured by the weight the level carries on those configurations' CSFs; it is
+        the only one of the three that survives an intruder level dropping into the energy ordering, and it is
+        therefore the one to use for the target set of an EOL field.  `configurations` MAY be combined with
+        `symmetries`, which then restricts the selected reference levels to those J^P: that is the
+        one-orbital-set-per-J route for the RAS layers on top of an AL-optimized reference.
+        See SelfConsistent.selectTargetLevelsEOL.
 """
-function  LevelSelection(active::Bool; indices::Array{Int64,1}=Int64[], symmetries::Array{LevelSymmetry,1}=LevelSymmetry[])
-    if  active   LevelSelection( true, indices, symmetries)  
+function  LevelSelection(active::Bool; indices::Array{Int64,1}=Int64[], symmetries::Array{LevelSymmetry,1}=LevelSymmetry[],
+                        configurations::Array{Configuration,1}=Configuration[])
+    if  active   LevelSelection( true, indices, symmetries, configurations)  
     else         LevelSelection()
     end
 end
 
+
+# `Base.show(io::IO, selection::LevelSelection)`  ... prepares a proper printout of the variable selection::LevelSelection.
 function Base.show(io::IO, selection::LevelSelection) 
     print(io, string(selection) )
 end
 
+
+# `Base.string(selection::LevelSelection)`  ... provides a proper printout of the variable selection::LevelSelection.
 function Base.string(selection::LevelSelection) 
     if  selection.active   sa = "LevelSelection:  indices = $(selection.indices);    symmetries = $(selection.symmetries)."
     else                   sa = "Inactive LevelSelection."
@@ -1352,10 +3375,14 @@ function  LineSelection(active::Bool; indexPairs::Array{Tuple{Int64,Int64},1}=Tu
     end
 end
 
+
+# `Base.show(io::IO, selection::LineSelection)`  ... prepares a proper printout of the variable selection::LineSelection.
 function Base.show(io::IO, selection::LineSelection) 
     print(io, string(selection) )
 end
 
+
+# `Base.string(selection::LineSelection)`  ... provides a proper printout of the variable selection::LineSelection.
 function Base.string(selection::LineSelection) 
     if  selection.active   sa = "LineSelection:  indexPairs = $(selection.indexPairs);    symmetryPairs = $(selection.symmetryPairs)."
     else                   sa = "Inactive LineSelection."
@@ -1399,10 +3426,14 @@ function  PathwaySelection(active::Bool; indexTriples::Array{Tuple{Int64,Int64,I
     end
 end
 
+
+# `Base.show(io::IO, selection::PathwaySelection)`  ... prepares a proper printout of the variable selection::PathwaySelection.
 function Base.show(io::IO, selection::PathwaySelection) 
     print(io, string(selection) )
 end
 
+
+# `Base.string(selection::PathwaySelection)`  ... provides a proper printout of the variable selection::PathwaySelection.
 function Base.string(selection::PathwaySelection) 
     if  selection.active   sa = "PathwaySelection:  indexTriples = $(selection.indexTriples);    symmetryTriples = $(selection.symmetryTriples)."
     else                   sa = "Inactive PathwaySelection."
@@ -1444,10 +3475,14 @@ function  ShellSelection(active::Bool; shells::Array{Shell,1}=Shell[], lSymmetri
     end
 end
 
+
+# `Base.show(io::IO, selection::ShellSelection)`  ... prepares a proper printout of the variable selection::ShellSelection.
 function Base.show(io::IO, selection::ShellSelection) 
     print(io, string(selection) )
 end
 
+
+# `Base.string(selection::ShellSelection)`  ... provides a proper printout of the variable selection::ShellSelection.
 function Base.string(selection::ShellSelection) 
     if  selection.active   sa = "ShellSelection:  shells = $(selection.shells);    symmetries = $(selection.lSymmetries)."
     else                   sa = "Inactive LevelSelection."
@@ -1483,6 +3518,12 @@ struct     DiscretePoints                       <:  AbstractSpectrumKind     end
 struct     LorentzianIntensitiesConstantWidths  <:  AbstractSpectrumKind     end
 struct     LorentzianIntensities                <:  AbstractSpectrumKind     end
 
+@doc "... to display just intensity-bars at given x-positions."                                                                         BarIntensities
+@doc "... to display lines (for guiding the eyes) but which are only defined at discrete x-points."                                      DiscreteLines
+@doc "... to display discrete points that are defined at discrete x-points."                                                            DiscretePoints
+@doc "... to display the superposition of Lorentzians with given position and intensity but constant widths."      LorentzianIntensitiesConstantWidths
+@doc "... to display the superposition of Lorentzians with given position, intensity and individual widths."                     LorentzianIntensities
+
 export  AbstractSpectrumKind, BarIntensities, DiscreteLines, DiscretePoints, LorentzianIntensitiesConstantWidths, LorentzianIntensities
 
 #################################################################################################################################
@@ -1491,8 +3532,8 @@ export  AbstractSpectrumKind, BarIntensities, DiscreteLines, DiscretePoints, Lor
 
 """
 `abstract type Basics.AbstractWarning` 
-    ... defines an abstract and a number of singleton types for dealing with warnings that are made during a run or REPL session.
-        Cf. Defaults.warn().
+    ... defines an abstract and a number of singleton types for dealing with warnings that are made during a run or REPL session. Cf.
+        Defaults.warn().
 
     + AddWarning        ... add a Warning to a warningList.
     + PrintWarnings     ... print all warnings into a jac-warn.report file.
@@ -1503,4 +3544,236 @@ struct     AddWarning           <:  AbstractWarning     end
 struct     PrintWarnings        <:  AbstractWarning     end
 struct     ResetWarnings        <:  AbstractWarning     end
 
-export  AbstractWarning, AddWarning, PrintWarnings, ResetWarnings 
+@doc "... add a Warning to a warningList."                                                                                                  AddWarning
+@doc "... print all warnings into a jac-warn.report file."                                                                               PrintWarnings
+@doc "... reset (empty) the warningList, usually at the beginning of a new run.to distinguish between different warnings"                ResetWarnings
+
+export  AbstractWarning, AddWarning, PrintWarnings, ResetWarnings
+
+
+
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractGenerateTheme`
+    ... defines an abstract and a number of singleton types to select the generation theme for Basics.generate(), replacing the former
+        string-key dispatch.
+
+    + CondensedMultiplet                   ... condense/reduce the CSF basis of a multiplet by a single weight.
+    + ConfigurationListNRFromBasis         ... generate the NR configuration list from a given basis.
+    + ConfigurationListNRFromConfiguration ... generate an NR configuration list from a reference configuration with excitations.
+    + CsfList                              ... construct the CSF list from a single relativistic configuration.
+    + OrderedShellList                     ... generate an ordered NR shell list from a set of configurations.
+    + OrderedSubshellList                  ... generate an ordered relativistic subshell list from configurations or two bases.
+    + SlaterTypeSpectrum                   ... generate a complete single-electron STO spectrum (positive and negative states).
+    + SlaterTypeSpectrumPositive           ... generate the same but return only the positive states.
+"""
+abstract type  AbstractGenerateTheme                                              end
+struct         CondensedMultiplet              <:  AbstractGenerateTheme          end
+struct         ConfigurationListNRFromBasis    <:  AbstractGenerateTheme          end
+struct         ConfigurationListNRFromConfiguration  <:  AbstractGenerateTheme    end
+struct         CsfList                         <:  AbstractGenerateTheme          end
+struct         OrderedShellList                <:  AbstractGenerateTheme          end
+struct         OrderedSubshellList             <:  AbstractGenerateTheme          end
+struct         SlaterTypeSpectrum              <:  AbstractGenerateTheme          end
+struct         SlaterTypeSpectrumPositive      <:  AbstractGenerateTheme          end
+
+@doc "... condense/reduce the CSF basis of a multiplet by a single weight."                                                         CondensedMultiplet
+@doc "... generate the NR configuration list from a given basis."                                                         ConfigurationListNRFromBasis
+@doc "... generate an NR configuration list from a reference configuration with excitations."                     ConfigurationListNRFromConfiguration
+@doc "... construct the CSF list from a single relativistic configuration."                                                                    CsfList
+@doc "... generate an ordered NR shell list from a set of configurations."                                                            OrderedShellList
+@doc "... generate an ordered relativistic subshell list from configurations or two bases."                                        OrderedSubshellList
+@doc "... generate a complete single-electron STO spectrum (positive and negative states)."                                         SlaterTypeSpectrum
+@doc "... generate the same but return only the positive states."                                                           SlaterTypeSpectrumPositive
+
+export  AbstractGenerateTheme, CondensedMultiplet, ConfigurationListNRFromBasis, ConfigurationListNRFromConfiguration,
+        CsfList, OrderedShellList, OrderedSubshellList, SlaterTypeSpectrum, SlaterTypeSpectrumPositive
+
+
+#################################################################################################################################
+#################################################################################################################################
+
+
+"""
+`abstract type Basics.AbstractComputeTheme`
+    ... defines an abstract and a number of singleton types to select the computation theme for Basics.compute(), replacing the former
+        string-key dispatch.
+    + CImatrixWithSymmetryJP      ... compute the CI Hamiltonian matrix for a given J^P symmetry block.
+
+        THE FOUR RadialOrbital* THEMES WERE RETIRED on 13-Aug-2026: RadialOrbitalBunge1993, RadialOrbitalMcLean1981, RadialOrbitalHydrogenic
+        and RadialOrbitalThomasFermi.  None of them ever worked and none was ever called from anywhere.
+
+        Bunge1993 and McLean1981 went first: they promised start orbitals from the Roothaan-Hartree-Fock tables of Bunge et al., ADNDT 53
+        (1993) 113 and McLean & McLean, ADNDT 26 (1981) 197, but that data has NEVER been part of JAC -- they called `store()`, which only
+        ever existed as store_Williams2000, inner-shell binding energies and an entirely different table, itself removed at a20163c.  See
+        module-Radial.jl for why importing those tables was decided against.
+
+        Hydrogenic and ThomasFermi followed, because they name the wrong thing.  A start orbital is chosen per COMPUTATION, through
+        ManyElectron.AbstractStartOrbitals (StartFromHydrogenic, StartFromThomasFermi, StartFromPrevious) which AsfSettings carries and
+        SelfConsistent dispatches on -- not per subshell through a compute theme.  Thomas-Fermi accordingly arrived where it belongs, as the
+        screened potential Basics.ThomasFermiField, with the orbitals following from Bsplines.generateOrbitals, which works in any
+        potential.
+"""
+abstract type  AbstractComputeTheme                                              end
+struct         CImatrixWithSymmetryJP     <:  AbstractComputeTheme              end
+
+@doc "... compute the CI Hamiltonian matrix for a given J^P symmetry block."                                                    CImatrixWithSymmetryJP
+
+export  AbstractComputeTheme,
+        CImatrixWithSymmetryJP
+
+
+"""
+`abstract type Basics.AbstractDisplayTheme`
+    ... defines an abstract and a number of singleton types to select the display theme for Basics.display(), replacing the former
+        string-key dispatch.
+
+    + PhysicalConstants   ... display all currently defined physical constants.
+    + CurrentSettings     ... display all currently defined settings of the JAC module.
+"""
+abstract type  AbstractDisplayTheme                                end
+struct         PhysicalConstants   <:  AbstractDisplayTheme       end
+struct         CurrentSettings     <:  AbstractDisplayTheme       end
+
+@doc "... display all currently defined physical constants."                                                                         PhysicalConstants
+@doc "... display all currently defined settings of the JAC module."                                                                   CurrentSettings
+
+export  AbstractDisplayTheme, PhysicalConstants, CurrentSettings
+
+
+"""
+`abstract type Basics.AbstractPlotTheme`
+    ... defines an abstract and a number of singleton types to select the plot theme for Basics.plot(), replacing the former string-key
+        dispatch.
+
+    + RadialPotentials    ... plot one or more radial potentials.
+    + RadialOrbitalsLarge ... plot the large component of one or more radial orbitals.
+    + RadialOrbitalsSmall ... plot the small component of one or more radial orbitals.
+    + RadialOrbitalsBoth  ... plot both components of one or more radial orbitals.
+"""
+abstract type  AbstractPlotTheme                                   end
+struct         RadialPotentials    <:  AbstractPlotTheme           end
+struct         RadialOrbitalsLarge <:  AbstractPlotTheme           end
+struct         RadialOrbitalsSmall <:  AbstractPlotTheme           end
+struct         RadialOrbitalsBoth  <:  AbstractPlotTheme           end
+
+@doc "... plot one or more radial potentials."                                                                                        RadialPotentials
+@doc "... plot the large component of one or more radial orbitals."                                                                RadialOrbitalsLarge
+@doc "... plot the small component of one or more radial orbitals."                                                                RadialOrbitalsSmall
+@doc "... plot both components of one or more radial orbitals."                                                                     RadialOrbitalsBoth
+
+export  AbstractPlotTheme, RadialPotentials, RadialOrbitalsLarge, RadialOrbitalsSmall, RadialOrbitalsBoth
+
+
+"""
+`abstract type Basics.AbstractRecastTheme`
+    ... defines an abstract and a number of singleton types to select the recast theme for Basics.recast(), replacing the former string-key
+        dispatch.
+
+    + RecastRateToDecayWidth    ... recast a radiative rate (Einstein A, a.u.) to a decay width.
+    + RecastRateToEinsteinA     ... recast a radiative rate (Einstein A, a.u.) to Einstein A in selected units.
+    + RecastRateToEinsteinB     ... recast a radiative rate (Einstein A, a.u.) to Einstein B-coefficient.
+    + RecastRateToOscillatorGf  ... recast a radiative rate (Einstein A, a.u.) to oscillator strength g_f.
+    + RecastRateToOscillatorF   ... recast a radiative rate (Einstein A, a.u.) to oscillator strength f.
+    + RecastRateToLineStrengthS ... recast a radiative rate (Einstein A, a.u.) to line strength S.
+"""
+abstract type  AbstractRecastTheme                                           end
+struct         RecastRateToDecayWidth    <:  AbstractRecastTheme             end
+struct         RecastRateToEinsteinA     <:  AbstractRecastTheme             end
+struct         RecastRateToEinsteinB     <:  AbstractRecastTheme             end
+struct         RecastRateToOscillatorGf  <:  AbstractRecastTheme             end
+struct         RecastRateToOscillatorF   <:  AbstractRecastTheme             end
+struct         RecastRateToLineStrengthS <:  AbstractRecastTheme             end
+
+@doc "... recast a radiative rate (Einstein A, a.u.) to a decay width."                                                         RecastRateToDecayWidth
+@doc "... recast a radiative rate (Einstein A, a.u.) to Einstein A in selected units."                                           RecastRateToEinsteinA
+@doc "... recast a radiative rate (Einstein A, a.u.) to Einstein B-coefficient."                                                 RecastRateToEinsteinB
+@doc "... recast a radiative rate (Einstein A, a.u.) to oscillator strength g_f."                                             RecastRateToOscillatorGf
+@doc "... recast a radiative rate (Einstein A, a.u.) to oscillator strength f."                                                RecastRateToOscillatorF
+@doc "... recast a radiative rate (Einstein A, a.u.) to line strength S."                                                    RecastRateToLineStrengthS
+
+export  AbstractRecastTheme, RecastRateToDecayWidth, RecastRateToEinsteinA, RecastRateToEinsteinB,
+        RecastRateToOscillatorGf, RecastRateToOscillatorF, RecastRateToLineStrengthS
+
+
+"""
+`abstract type Basics.AbstractAnalyzeTheme`
+    ... labels the theme (kind) of a Basics.analyze() call; it is used for dispatch and to avoid string comparisons. Concrete subtypes:
+    + LevelDecompositionOfNRconfigurations ... analyze and list the NR configurations with weight > 5 %.
+    + LevelDecompositionOfCsfR             ... analyze and list (up to N) jj-coupled CSF and their weights.
+"""
+abstract type  AbstractAnalyzeTheme                                                      end
+struct         LevelDecompositionOfNRconfigurations  <:  AbstractAnalyzeTheme            end
+struct         LevelDecompositionOfCsfR              <:  AbstractAnalyzeTheme            end
+
+@doc "... analyze and list the NR configurations with weight > 5 %."                                              LevelDecompositionOfNRconfigurations
+@doc "... analyze and list (up to N) jj-coupled CSF and their weights."                                                       LevelDecompositionOfCsfR
+
+export  AbstractAnalyzeTheme, LevelDecompositionOfNRconfigurations, LevelDecompositionOfCsfR
+
+
+"""
+`abstract type Basics.AbstractDiagonalizeTheme`
+    ... labels the theme (kind) of a Basics.diagonalize() call; it is used for dispatch and to avoid string comparisons. Concrete subtypes:
+    + MatrixWithLinearAlgebra                 ... diagonalize a single symmetric matrix using LinearAlgebra.eigen().
+    + GeneralizedEigenvaluesWithLinearAlgebra ... solve a generalized eigenvalue problem using LinearAlgebra.eigen().
+"""
+abstract type  AbstractDiagonalizeTheme                                                       end
+struct         MatrixWithLinearAlgebra                 <:  AbstractDiagonalizeTheme            end
+struct         GeneralizedEigenvaluesWithLinearAlgebra <:  AbstractDiagonalizeTheme            end
+
+@doc "... diagonalize a single symmetric matrix using LinearAlgebra.eigen()."                                                  MatrixWithLinearAlgebra
+@doc "... solve a generalized eigenvalue problem using LinearAlgebra.eigen()."                                 GeneralizedEigenvaluesWithLinearAlgebra
+
+export  AbstractDiagonalizeTheme, MatrixWithLinearAlgebra, GeneralizedEigenvaluesWithLinearAlgebra
+
+
+"""
+`abstract type Basics.AbstractEstimateTheme`
+    ... labels the theme (kind) of a Semiempirical.estimate() call; it is used for dispatch and to avoid string comparisons. Concrete
+        subtypes:
+    + EstimateIonizationPotentialInnerShell ... estimate the ionization potential of an inner-shell electron.
+    + EstimateBindingEnergyWilliams2000     ... estimate binding energies from Williams et al. (2000) tabulation.
+    + EstimateBindingEnergyLarkins1977      ... estimate binding energies from Larkins (1977) tabulation.
+    + EstimateBindingEnergyXrayDataBooklet  ... estimate binding energies from X-ray Data Booklet tabulation.
+    + EstimateBindingEnergyNist2025         ... estimate successive ionization potentials from NIST (2025) database.
+"""
+abstract type  AbstractEstimateTheme                                                              end
+struct         EstimateIonizationPotentialInnerShell  <:  AbstractEstimateTheme                  end
+struct         EstimateBindingEnergyWilliams2000       <:  AbstractEstimateTheme                  end
+struct         EstimateBindingEnergyLarkins1977        <:  AbstractEstimateTheme                  end
+struct         EstimateBindingEnergyXrayDataBooklet    <:  AbstractEstimateTheme                  end
+struct         EstimateBindingEnergyNist2025           <:  AbstractEstimateTheme                  end
+
+@doc "... estimate the ionization potential of an inner-shell electron."                                         EstimateIonizationPotentialInnerShell
+@doc "... estimate binding energies from Williams et al. (2000) tabulation."                                         EstimateBindingEnergyWilliams2000
+@doc "... estimate binding energies from Larkins (1977) tabulation."                                                  EstimateBindingEnergyLarkins1977
+@doc "... estimate binding energies from X-ray Data Booklet tabulation."                                          EstimateBindingEnergyXrayDataBooklet
+@doc "... estimate successive ionization potentials from NIST (2025) database."                                          EstimateBindingEnergyNist2025
+
+export  AbstractEstimateTheme, EstimateIonizationPotentialInnerShell,
+        EstimateBindingEnergyWilliams2000, EstimateBindingEnergyLarkins1977, EstimateBindingEnergyXrayDataBooklet,
+        EstimateBindingEnergyNist2025
+
+
+"""
+`abstract type Basics.AbstractReadFileTheme`
+    ... labels the file format for a Basics.read() call; it is used for dispatch and to avoid string comparisons. Concrete subtypes:
+    + ReadCslFileGrasp92    ... read a CSF list from a Grasp92 .csl / GRASP18 .c file.
+    + ReadOrbitalFileGrasp92 ... read orbitals from a (formatted) Grasp92 .rwf file.
+    + ReadMixingFileGrasp18  ... read energies & mixing coefficients from a Grasp18 mixing file.
+"""
+abstract type  AbstractReadFileTheme                                           end
+struct         ReadCslFileGrasp92     <:  AbstractReadFileTheme                end
+struct         ReadOrbitalFileGrasp92 <:  AbstractReadFileTheme                end
+struct         ReadMixingFileGrasp18  <:  AbstractReadFileTheme                end
+
+@doc "... read a CSF list from a Grasp92 .csl / GRASP18 .c file."                                                                   ReadCslFileGrasp92
+@doc "... read orbitals from a (formatted) Grasp92 .rwf file."                                                                  ReadOrbitalFileGrasp92
+@doc "... read energies & mixing coefficients from a Grasp18 mixing file."                                                       ReadMixingFileGrasp18
+
+export  AbstractReadFileTheme, ReadCslFileGrasp92, ReadOrbitalFileGrasp92, ReadMixingFileGrasp18

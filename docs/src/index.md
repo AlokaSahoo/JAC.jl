@@ -1,7 +1,58 @@
 # Jena Atomic Calculator (JAC) for the computation of atomic representations, processes and cascades
 
-*Last update:* April, 25th, 2025
+*Last update:* August, 8th, 2026
 
+---
+
+**Principal developer:** Stephan Fritzsche —
+Helmholtz Institute Jena & GSI Helmholtz Centre for Heavy Ion Research —
+[s.fritzsche@hi-jena.gsi.de](mailto:s.fritzsche@hi-jena.gsi.de)
+
+If you use JAC in published work, please cite:
+> S. Fritzsche, *A fresh computational approach to atomic structures, processes and cascades*,
+> Comput. Phys. Commun. **240**, 1–14 (2019). DOI: [10.1016/j.cpc.2019.01.012](https://doi.org/10.1016/j.cpc.2019.01.012)
+
+---
+
+## JAC in one example
+
+The K-alpha lines of He-like iron -- level structure and radiative rates in a single call:
+
+```julia
+using JenaAtomicCalculator
+
+comp = Atomic.Computation(Atomic.Computation();
+           name            = "He-like Fe: 1s 2p -> 1s^2",
+           grid            = Radial.Grid(true),
+           nuclearModel    = Nuclear.Model(26.),
+           initialConfigs  = [Configuration("1s 2p")],
+           finalConfigs    = [Configuration("1s^2")],
+           processSettings = PhotoEmission.Settings(PhotoEmission.Settings(),
+                                 multipoles=[E1], gauges=[UseCoulomb, UseBabushkin]) )
+perform(comp)
+```
+
+which returns, among the full output,
+
+```
+   i-level-f    i--J^P--f      Energy [eV]   Multipole  Gauge        A--Einstein [1/s]        gf
+      2 --  1   1 - --> 0 +    6.675863e+03      E1     Babushkin    3.921535e+13      6.083492e-02
+      4 --  1   1 - --> 0 +    6.709489e+03      E1     Babushkin    4.785937e+14      7.350211e-01
+
+   Quality indicators:   CF Coulomb / Babushkin      B/C ratio      Verdict
+      2 --  1                 0.3369 / 0.3382          1.0114         ok
+      4 --  1                 1.0000 / 1.0000          1.0116         ok
+```
+
+These are the *y* and *w* lines of the Fe XXV K-alpha complex, one of the standard diagnostics of hot
+astrophysical and laboratory plasmas. Measured values are 6668 eV and 6700 eV, so this calculation -- a plain
+single-configuration run with no correlation layer and no QED -- sits about 9 eV (0.13 %) high on both, which
+is what those two omissions cost at Z = 26. Adding them is a matter of settings, not of a different code.
+
+The last block is printed by JAC itself: Cowan's cancellation factor per gauge and the Babushkin/Coulomb rate
+ratio, which say how far the numbers above can be trusted. Here both lines agree between gauges to about 1 %.
+
+---
 
 # What is JAC?
 
@@ -97,11 +148,11 @@ JAC toolbox but come with a rather limited implementation so far.
 # Installation
 
 The development version of JAC can installed installed directly in the interactive Julia REPL (Read-Eval-Print-Loop)
-Press `]` to enter the Julia package mode and type `add https://github.com/OpenJAC/JAC.jl` to install JAC.
+Press `]` to enter the Julia package mode and type `add https://github.com/OpenJAC/JenaAtomicCalculator.jl` to install JAC.
 
 ```
 julia> ]
-(@v1.10) pkg> add https://github.com/OpenJAC/JAC.jl
+(@v1.10) pkg> add https://github.com/OpenJAC/JenaAtomicCalculator.jl
 ```
 
 # Development
@@ -112,29 +163,29 @@ requirement. JAC comes with an MIT 'Expat' [License](@ref jac-license).
 For development purpose, user can install JAC from GitHub to their **desired direcory** using `git clone` in the 
 terminal. This will download a copy of JAC from the development branch of GitHub repository.
 ```
-git clone https://github.com/OpenJAC/JAC.jl.git
+git clone https://github.com/OpenJAC/JenaAtomicCalculator.jl.git
 ```
 
-Next `cd` to the `JAC.jl` directory and start a new Julia session
+Next `cd` to the `JenaAtomicCalculator.jl` directory and start a new Julia session
 
 ```
-shell> cd JAC.jl
+shell> cd JenaAtomicCalculator.jl
 shell> julia
 ```
 
-Then activate the `JAC.jl` environment and install the dependancy packages of `JAC.jl`
+Then activate the `JenaAtomicCalculator.jl` environment and install the dependancy packages of `JenaAtomicCalculator.jl`
 ```
 julia> ]                   # Change to the Julia package mode
 (@v1.10) pkg> activate .
-(JAC) pkg> instantiate     # Installs the dependancy packages of JAC
-(JAC) pkg> resolve         # Required **Only if** there is a cinflict in the dependancies
-(JAC) pkg> develop .       # Adds the current directory path to Julia local Registry
+(JenaAtomicCalculator) pkg> instantiate     # Installs the dependancy packages of JAC
+(JenaAtomicCalculator) pkg> resolve         # Required **Only if** there is a cinflict in the dependancies
+(JenaAtomicCalculator) pkg> develop .       # Adds the current directory path to Julia local Registry
 ```
 
 # User Guide and Manual
 
 A detailed 
-[User Guide, Compendium & Theoretical Background to JAC](https://github.com/AlokaSahoo/JAC.jl/blob/master/docs/UserGuide-Jac.pdf)  
+[User Guide, Compendium & Theoretical Background to JAC](https://github.com/OpenJAC/JenaAtomicCalculator.jl/blob/master/docs/UserGuide-Jac.pdf)  
 is available that describes the **use and underlying atomic theory** of the JAC code.
 
 

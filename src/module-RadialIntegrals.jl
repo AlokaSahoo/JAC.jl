@@ -6,9 +6,19 @@
 """
 module  RadialIntegrals
 
-using  GSL, QuadGK
-using  ..AngularMomentum, ..Basics, ..BsplinesN, ..Defaults,  ..Radial, ..Math, ..ManyElectron, ..Nuclear
+using  Dierckx, FastGaussQuadrature, GSL, QuadGK
+using  ..AngularMomentum, ..Basics, ..Bsplines, ..Defaults,  ..Radial, ..Math, ..ManyElectron, ..Nuclear
 
+#   Fitting coefficients A(Z,n,l=0) = a0 + a1*Z + a2*Z^2 + a3*Z^3 + a4*Z^4  for the electric self-energy
+#   form-factor prefactor of s-orbitals (kappa = -1), separately for n = 1..5(and above), and for Z >= 20
+#   and Z < 20; cf. Kozioł, "Rci-Q", arXiv:2512.01515, Table I. Columns 1-5 are Z>=20; columns 6-10 are Z<20.
+#                   ---------------------- Z >= 20 ----------------------    --------------------- Z < 20 ---------------------
+#                     a0            a1            a2            a3            a4              a0            a1            a2            a3            a4
+const  rciQ_Ael0 = [  7.72308e-1   -2.40991e-4    3.48842e-5   -2.83516e-7    3.16093e-10      8.72587e-1   -1.44109e-2   -1.48436e-3    3.37161e-4   -1.34952e-5  ;   # n=1
+                      8.07899e-1    1.29047e-3    3.94430e-5   -1.64904e-7   -1.97988e-9       8.91352e-1   -1.26732e-2   -1.29823e-3    3.24461e-4   -1.32155e-5  ;   # n=2
+                      8.08505e-1    2.07848e-3    3.83122e-5   -1.64870e-7   -2.26659e-9       8.81396e-1    3.14301e-2   -1.29689e-2    1.71096e-3   -5.74309e-5  ;   # n=3
+                      8.08957e-1    2.52039e-3    3.03563e-5   -5.24535e-8   -2.92995e-9       8.83234e-1    3.17102e-2   -1.49614e-2    1.71022e-3   -5.74210e-5  ;   # n=4
+                      8.15199e-1    2.19164e-3    4.33051e-5   -2.04857e-7   -2.39770e-9       8.84127e-1    3.18795e-2   -1.49649e-2    1.71050e-3   -5.74349e-5  ]   # n>=5
 
 """
 `RadialIntegrals.GrantIab(a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid, potential::Radial.Potential)`  
@@ -24,38 +34,15 @@ function GrantIab(a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid, poten
     kappa = a.subshell.kappa;                   Zr = potential.Zr
     mtp   = min(size(a.P, 1), size(b.P, 1));    wc = Defaults.getDefaults("speed of light: c")
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f1(i::Int64)   dPb(j) = Math.derivative(b.P, j)
-                                dQb(j) = Math.derivative(b.Q, j)
-                                return( a.Q[i] * dPb(i) - a.P[i] * dQb(i) )                          end
-        function f2(i::Int64)   return( (a.Q[i] * b.P[i] + a.P[i] * b.Q[i]) / grid.r[i] )            end
-        function f3(i::Int64)   return( a.Q[i] * b.Q[i] )                                            end
-        function f4(i::Int64)   return( -Zr[i] * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) / grid.r[i] )   end
-
-        I1 = Math.integrateFit(f1, min(size(a.P, 1), size(b.P, 1)), grid) / grid.h
-        I2 = Math.integrateFitTransform(f2, min(size(a.P, 1), size(b.P, 1)), grid)
-        I3 = Math.integrateFitTransform(f3, min(size(a.P, 1), size(b.P, 1)), grid)
-        I4 = Math.integrateFitTransform(f4, min(size(a.P, 1), size(b.P, 1)), grid)
-
-        return( Defaults.INVERSE_FINE_STRUCTURE_CONSTANT * I1 + Defaults.INVERSE_FINE_STRUCTURE_CONSTANT * kappa * I2 -
-                2 * Defaults.INVERSE_FINE_STRUCTURE_CONSTANT^2 * I3 + I4 )
-                
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wa = wa + grid.wr[i] * (  wc * a.Q[i] * (b.Pprime[i] + kappa/grid.r[i] * b.P[i])  
-                                    - wc * a.P[i] * (b.Qprime[i] - kappa/grid.r[i] * b.Q[i]) 
-                                    - 2wc^2 * a.Q[i] * b.Q[i]
-                                    - Zr[i] * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) / grid.r[i]  ) 
-        end
-        return( wa )
-    else
-        error("stop a")
+    wa = 0.
+    for  i = 2:mtp   
+        wa = wa + grid.wr[i] * (  wc * a.Q[i] * (b.Pprime[i] + kappa/grid.r[i] * b.P[i])  
+                                - wc * a.P[i] * (b.Qprime[i] - kappa/grid.r[i] * b.Q[i]) 
+                                - 2wc^2 * a.Q[i] * b.Q[i]
+                                - Zr[i] * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) / grid.r[i]  ) 
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.GrantIabDamped(tau::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid, potential::Radial.Potential)`  
@@ -71,23 +58,15 @@ function GrantIabDamped(tau::Float64, a::Radial.Orbital, b::Radial.Orbital, grid
     kappa = a.subshell.kappa;                   Zr = potential.Zr
     mtp   = min(size(a.P, 1), size(b.P, 1));    wc = Defaults.getDefaults("speed of light: c")
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wa = wa + grid.wr[i] * (  wc * a.Q[i] * (b.Pprime[i] + kappa/grid.r[i] * b.P[i])  
-                                    - wc * a.P[i] * (b.Qprime[i] - kappa/grid.r[i] * b.Q[i]) 
-                                    - 2wc^2 * a.Q[i] * b.Q[i]
-                                    - Zr[i] * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) / grid.r[i]  ) * exp(-tau * grid.r[i])
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 2:mtp   
+        wa = wa + grid.wr[i] * (  wc * a.Q[i] * (b.Pprime[i] + kappa/grid.r[i] * b.P[i])  
+                                - wc * a.P[i] * (b.Qprime[i] - kappa/grid.r[i] * b.Q[i]) 
+                                - 2wc^2 * a.Q[i] * b.Q[i]
+                                - Zr[i] * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) / grid.r[i]  ) * exp(-tau * grid.r[i])
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.GrantILminus(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`  
@@ -97,19 +76,10 @@ end
 function GrantILminus(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.Q[i] - a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) )       end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i] - a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i] - a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.GrantILplus(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`  
@@ -119,19 +89,10 @@ end
 function GrantILplus(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) )       end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.GrantIL0(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`  
@@ -141,19 +102,10 @@ end
 function GrantIL0(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) )       end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.GrantJL(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`  
@@ -163,39 +115,9 @@ end
 function GrantJL(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) )       end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
-end
-
-
-"""
-`RadialIntegrals.GrantJL_cp(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid, cp::CorePolarization)`  
-    ... computes Grant's (radial) integral for two relativistic orbitals:  
-        J_L (q; a,b) = int_0^\\infty dr   [ P_a P_b + Q_a Q_b ] * r * [1 - coreAlpha / (r^2 + coreRadius^2)^3/2 ].
-"""
-function GrantJL_cp(L::Int64, q::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid, cp::CorePolarization)
-    mtp = min(size(a.P, 1), size(b.P, 1))
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * grid.wr[i] * grid.r[i] * 
-                                    (1.0 - cp.coreAlpha / (grid.r[i]^2 + cp.coreRadius^2)^(3/2) )   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wa = wa + (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * GSL.sf_bessel_jl(L, q * grid.r[i]) * grid.wr[i]   end
+    return( wa )
 end
 
 
@@ -206,20 +128,12 @@ end
 function isotope_boson(a::Orbital, b::Orbital, potential::Array{Float64,1}, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1), size(potential, 1));   
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wa = wa + (a.P[i] * b.P[i]  +  a.Q[i] * b.Q[i]) * potential[i] * grid.wr[i]
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 2:mtp   
+        wa = wa + (a.P[i] * b.P[i]  +  a.Q[i] * b.Q[i]) * potential[i] * grid.wr[i]
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.isotope_field(a::Orbital, b::Orbital, deltaPotential::Array{Float64,1}, grid::Radial.Grid)`  
@@ -228,47 +142,31 @@ end
 function isotope_field(a::Orbital, b::Orbital, deltaPotential::Array{Float64,1}, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1), size(deltaPotential, 1));   
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wa = wa - (a.P[i] * b.P[i]  +  a.Q[i] * b.Q[i]) * deltaPotential[i] / grid.r[i] * grid.wr[i]
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 2:mtp   
+        wa = wa - (a.P[i] * b.P[i]  +  a.Q[i] * b.Q[i]) * deltaPotential[i] / grid.r[i] * grid.wr[i]
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.isotope_nms(a::Orbital, b::Orbital, Z::Float64, grid::Radial.Grid)`  
     ... computes the normal mass shift radial integral int_o^infty ... A value::Float64 is returned.
 """
 function isotope_nms(a::Orbital, b::Orbital, Z::Float64, grid::Radial.Grid)
-    mtp = min(size(a.P, 1), size(b.P, 1));   lb = Basics.subshell_l(b.subshell);    jb2   = Basics.subshell_2j(b.subshell)
+    mtp = min(size(a.P, 1), size(b.P, 1));   lb = Basics.subshell_l(b.subshell);    kb = b.subshell.kappa
     alphaZ = Defaults.getDefaults("alpha") * Z
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wb = (a.Pprime[i] * b.Pprime[i]  +  a.Qprime[i] * b.Qprime[i])  + 
-                    (lb*(lb+1) * a.P[i] * b.P[i]  +  (jb2-1)*jb2 * a.Q[i] * b.Q[i]) / (grid.r[i]^2)
-            wc = - 2 * alphaZ * (a.Q[i] * b.Pprime[i]  +  b.Q[i] * a.Pprime[i]) / grid.r[i]
-            wd = - alphaZ * (b.subshell.kappa - 1) * (a.Q[i] * b.P[i]  +  b.Q[i] * a.P[i]) / (grid.r[i]^2)
-            wa = wa + (wb + wc + wd) * grid.wr[i]   
-        end
-        return( wa / 2. )
-    else
-        error("stop b")
-    end
-end
 
+    wa = 0.
+    for  i = 2:mtp
+        wb = (a.Pprime[i] * b.Pprime[i]  +  a.Qprime[i] * b.Qprime[i])  +
+                (lb*(lb+1) * a.P[i] * b.P[i]  +  kb*(kb-1) * a.Q[i] * b.Q[i]) / (grid.r[i]^2)
+        wc = - 2 * alphaZ * (a.Q[i] * b.Pprime[i]  +  b.Q[i] * a.Pprime[i]) / grid.r[i]
+        wd = - alphaZ * (b.subshell.kappa - 1) * (a.Q[i] * b.P[i]  +  b.Q[i] * a.P[i]) / (grid.r[i]^2)
+        wa = wa + (wb + wc + wd) * grid.wr[i]   
+    end
+    return( wa / 2. )
+end
 
 """
 `RadialIntegrals.isotope_smsB(a::Orbital, c::Orbital, Z::Float64, grid::Radial.Grid)`  
@@ -278,24 +176,15 @@ function isotope_smsB(a::Orbital, c::Orbital, Z::Float64, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(c.P, 1));   alphaZ = Defaults.getDefaults("alpha") * Z
     kapa = a.subshell.kappa;   mkapa = -kapa;    kapc = c.subshell.kappa;   mkapc = -kapc 
     
-    ##x @show AngularMomentum.sigma_reduced_me_ma(mkapa, kapc), AngularMomentum.sigma_reduced_me_mb(kapa,  mkapc)
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wb = (- a.Q[i] * c.P[i] * AngularMomentum.sigma_reduced_me_ma(mkapa, kapc)  +
-                    c.Q[i] * a.P[i] * AngularMomentum.sigma_reduced_me_mb(kapa,  mkapc)  )
-            wa = wa - alphaZ / grid.r[i] * wb * grid.wr[i]   
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 2:mtp   
+        wb = (- a.Q[i] * c.P[i] * AngularMomentum.sigma_reduced_me_ma(mkapa, kapc)  +
+                c.Q[i] * a.P[i] * AngularMomentum.sigma_reduced_me_mb(kapa,  mkapc)  )
+        wa = wa - alphaZ / grid.r[i] * wb * grid.wr[i]   
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.isotope_smsC(a::Orbital, c::Orbital, Z::Float64, grid::Radial.Grid)`  
@@ -304,63 +193,15 @@ end
 function isotope_smsC(a::Orbital, c::Orbital, Z::Float64, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(c.P, 1));   alphaZ = Defaults.getDefaults("alpha") * Z
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wa = wa - alphaZ / grid.r[i] * (a.Q[i] * c.P[i] - c.Q[i] * a.P[i]) * grid.wr[i]   
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 2:mtp   
+        wa = wa - alphaZ / grid.r[i] * (a.Q[i] * c.P[i] - c.Q[i] * a.P[i]) * grid.wr[i]   
     end
+    return( wa )
 end
 
-
 """
-`RadialIntegrals.nondiagonalD(pm::Int64, kappa::Int64, bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, grid::Radial.Grid)`  
-    ... computes the (radial and non-diagonal) D_kappa^+/- integral two the bsplines, all defined on grid
-        <bspline1| +/- d/dr + kappa/r | bspline2>. -- pm = +1/-1 provides the phase for taking the derivative.
-"""
-function nondiagonalD(pm::Int64, kappa::Int64, bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, grid::Radial.Grid) 
-    if  bspline1.upper <= bspline2.lower  ||  bspline2.upper <= bspline1.lower    return( 0. )   end
-    mtp = min( bspline1.upper, bspline2.upper)
-    n0  = max( bspline1.lower, bspline2.lower)
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f1(i::Int64)
-            wa = pm * bspline1.bs[i] * bspline2.bp[i]
-            return( wa )                            
-        end
-        function f2(i :: Int64)
-            if  i == 1  wa = bspline1.bs[i] * kappa * bspline2.bs[i] / (0.3 * grid.r[2]) 
-            else        wa = bspline1.bs[i] * kappa * bspline2.bs[i] / grid.r[i]   end
-            return( wa )
-        end
-
-        I1 = Math.integrateTransform(f1, n0, mtp, grid)
-        I2 = Math.integrateTransform(f2, n0, mtp, grid)
-        return( I1+I2 )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = n0:mtp  
-            wa = wa + pm * bspline1.bs[i] * bspline2.bp[i] * grid.wr[i] 
-            if  i == 1  wa = wa + bspline1.bs[i] * kappa * bspline2.bs[i] / (0.3 * grid.r[2]) * grid.wr[i] 
-            else        wa = wa + bspline1.bs[i] * kappa * bspline2.bs[i] / grid.r[i] * grid.wr[i]   end
-        end
-        return( wa )
-    else
-        error("stop a")
-    end
-end
-
-
-"""
-`RadialIntegrals.overlap()`
+`RadialIntegrals.overlap(orbital1::Radial.Orbital, orbital2::Radial.Orbital, grid::Radial.Grid)`
 
 + (orbital1::Radial.Orbital, orbital2::Radial.Orbital, grid::Radial.Grid)`  
     ... computes the (radial) overlap integral <orbital_a|orbital_b>  for two relativistic orbitals of the same 
@@ -369,53 +210,13 @@ end
 function overlap(orbital1::Radial.Orbital, orbital2::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(orbital1.P, 1), size(orbital2.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f(i :: Int64)
-            return( orbital1.P[i] * orbital2.P[i] + orbital1.Q[i] * orbital2.Q[i] )
-        end
-
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 1:grid.NoPoints 
-            if i > mtp   break   end
-            wa = wa + ( orbital1.P[i] * orbital2.P[i] + orbital1.Q[i] * orbital2.Q[i] ) * grid.wr[i]   
-        end
-        return( wa )
-    else
-        error("stop a")
+    wa = 0.
+    for  i = 1:grid.NoPoints 
+        if i > mtp   break   end
+        wa = wa + ( orbital1.P[i] * orbital2.P[i] + orbital1.Q[i] * orbital2.Q[i] ) * grid.wr[i]   
     end
+    return( wa )
 end
-
-
-"""
-+ (bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, grid::Radial.Grid)`  
-    ... computes the (radial) overlap integral <bspline1|bsplines>  for two bpslines as defined on grid.
-"""
-function overlap(bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, grid::Radial.Grid)
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        if  bspline1.upper <= bspline2.lower  ||  bspline2.upper <= bspline1.lower    return( 0. )   end
-        mtp = min( bspline1.upper, bspline2.upper)
-        n0  = max( bspline1.lower, bspline2.lower)
-
-        function f(i :: Int64)
-            return( bspline1.bs[i] * bspline2.bs[i] )
-        end
-
-        return( Math.integrateTransform(f, n0, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 1:grid.NoPoints   wa = wa + bspline1.bs[i] * bspline2.bs[i] * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
-end
-
 
 """
 + (p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radial.Grid)`  
@@ -425,44 +226,12 @@ function overlap(p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radia
     
     mtp = min( length(p1List), length(p2List))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f(i :: Int64)
-            return( p1List[i] * p2List[i] )
-        end
-
-        return( Math.integrateTransform(f, 1, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 1:grid.NoPoints 
-            if i > mtp   break   end
-            wa = wa + p1List[i] * p2List[i] * grid.wr[i]   
-        end
-        return( wa )
-    else
-        error("stop b")
+    wa = 0.
+    for  i = 1:grid.NoPoints 
+        if i > mtp   break   end
+        wa = wa + p1List[i] * p2List[i] * grid.wr[i]   
     end
-end
-
-
-function overlap_old2022(p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radial.Grid)
-    
-    mtp = min( length(p1List), length(p2List))
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f(i :: Int64)
-            return( p1List[i] * p2List[i] )
-        end
-
-        return( Math.integrateTransform(f, 1, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        error("stop a")
-    else
-        error("stop b")
-    end
+    return( wa )
 end
 
 
@@ -473,16 +242,10 @@ end
 """
 function qedDampedOverlap(lambda::Float64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wb = Base.MathConstants.e^(- grid.r[i]/lambda);     wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wb = Base.MathConstants.e^(- grid.r[i]/lambda);     wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]   end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.qedLowFrequency(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, grid::Radial.Grid, qgrid::Radial.GridGL)` 
@@ -490,21 +253,15 @@ end
         A value::Float64 is returned.
 """
 function qedLowFrequency(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, grid::Radial.Grid, qgrid::Radial.GridGL)
-    alpha = Defaults.getDefaults("alpha");    BZ = 0.074 + 0.035 * nm.Z * alpha
+    alpha = Defaults.getDefaults("alpha");    BZ = 0.074 + 0.35 * nm.Z * alpha
     mtp = min(size(a.P, 1), size(b.P, 1))
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 1:mtp   wb = Base.MathConstants.e^(-nm.Z * grid.r[i]) ;     wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]   end
-        wa = -BZ * nm.Z^4 * alpha^3 * wa
-        else
-        error("stop a")
-    end
-    
+    wa = 0.
+    for  i = 1:mtp   wb = Base.MathConstants.e^(-nm.Z * grid.r[i]) ;     wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]   end
+    wa = -BZ * nm.Z^4 * alpha^3 * wa
+
     println("QED single-electron strength <$(a.subshell)| h^(SE, low-frequency) | $(b.subshell)> = $wa ")
     return( wa )
 end
-
 
 """
 `RadialIntegrals.qedUehling(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model,
@@ -525,27 +282,20 @@ function qedUehling(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, gri
     end
     
     mtp = min(size(a.P, 1), size(b.P, 1))
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wb = 0.;
-            for  ip = 2:mtp 
-                rho_rp
-                wb  = wb + tIntegral(grid.r[i],grid.r[ip]) * (4pi) * grid.r[ip] * rho_rp * grid.wr[ip]  
-            end
-            wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]  
-            ## x@show wa
+    wa = 0.
+    for  i = 2:mtp   
+        wb = 0.;
+        for  ip = 2:mtp 
+            rho_rp
+            wb  = wb + tIntegral(grid.r[i],grid.r[ip]) * (4pi) * grid.r[ip] * rho_rp * grid.wr[ip]  
         end
-        wa = - 2. * Defaults.getDefaults("alpha")^2 / (3pi) * wa
-    else
-        error("stop a")
+        wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]  
     end
+    wa = - 2. * Defaults.getDefaults("alpha")^2 / (3pi) * wa
     
     println("QED single-electron strength <$(a.subshell)| h^(Uehling) | $(b.subshell)> = $wa ")
     return( wa )
 end
-
 
 """
 `RadialIntegrals.qedUehlingSimple(a::Radial.Orbital, b::Radial.Orbital, pot::Radial.Potential,
@@ -565,18 +315,13 @@ function qedUehlingSimple(a::Radial.Orbital, b::Radial.Orbital, pot::Radial.Pote
     end
 
     mtp = min(size(a.P, 1), size(b.P, 1))
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            wb = tIntegral(grid.r[i]) 
-            wc = (-pot.Zr[i] / grid.r[i])
-            wa = wa + (a.P[i]*wb*wc*b.P[i] + a.Q[i]*wb*wc*b.Q[i]) * grid.wr[i]   
-        end
-        wa = 2. * Defaults.getDefaults("alpha") / (3pi) * wa
-    else
-        error("stop a")
+    wa = 0.
+    for  i = 2:mtp   
+        wb = tIntegral(grid.r[i]) 
+        wc = (-pot.Zr[i] / grid.r[i])
+        wa = wa + (a.P[i]*wb*wc*b.P[i] + a.Q[i]*wb*wc*b.Q[i]) * grid.wr[i]   
     end
+    wa = 2. * Defaults.getDefaults("alpha") / (3pi) * wa
     
     println("QED single-electron strength <$(a.subshell)| h^(simplified Uehling) | $(b.subshell)> = $wa ")
     return( wa )
@@ -584,53 +329,149 @@ end
 
 
 """
-`RadialIntegrals.rkDiagonal()`   ... computes the (radial and diagonal) integral of r^k for two radial orbital functions.
+`RadialIntegrals.qedElectricFormFactor(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model,
+                                        grid::Radial.Grid, qgrid::Radial.GridGL)`
+    ... computes the (radial) integral for the high-frequency electric self-energy form-factor contribution
+        (point-like nucleus) for the radial orbitals a, b on the given grid; cf. Flambaum & Ginges,
+        PRA 72, 052115 (2005), eq. (10), with the coefficient A(Z,r) taken from Kozioł's Rci-Q re-fit
+        (arXiv:2512.01515, Table I) for s-orbitals (kappa=-1), where FG's original generic fit is known
+        (per Rci-Q's own text) to be poorly suited for inner shells; p/d/f orbitals still use FG's original
+        generic fit -- a documented, narrower scope, mirroring Petersburg's own n<=4/kappa-restricted note.
+        A value::Float64 is returned.
+"""
+function qedElectricFormFactor(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, grid::Radial.Grid, qgrid::Radial.GridGL)
+    # Define the internal t-integration that is specific to the electric self-energy form factor; cf. PRA 72, 052115 (2005); eq. (10)
+    function tIntegral(r::Float64, alpha::Float64)
+        wx = 0.;
+        for  i = 1:qgrid.nt   t = qgrid.t[i];
+            wx = wx + 1.0/sqrt(t^2 - 1.) * ( (1. - 1.0/(2.0*t^2)) * (log(t^2 - 1.) + 4.0*log(1.0/(nm.Z*alpha) + 0.5)) - 1.5 + 1.0/t^2 ) *
+                        Base.MathConstants.e^(-2.0*t*r/alpha) * qgrid.wt[i]
+        end
+        return( wx )
+    end
+
+    alpha = Defaults.getDefaults("alpha");    x = (nm.Z - 80.) * alpha
+    if  a.subshell.kappa == -1
+        nn  = min(a.subshell.n, 5);   col = nm.Z >= 20.   ?   (1:5)   :   (6:10)
+        a0, a1c, a2c, a3c, a4c = rciQ_Ael0[nn, col]
+        A0Z = a0 + a1c*nm.Z + a2c*nm.Z^2 + a3c*nm.Z^3 + a4c*nm.Z^4
+    else
+        A0Z = 1.071 - 1.976*x^2 - 2.128*x^3 + 0.169*x^4
+    end
+    mtp = min(size(a.P, 1), size(b.P, 1))
+    wa = 0.
+    for  i = 2:mtp
+        r  = grid.r[i]
+        # NOTE: the small-distance cutoff denominator uses alpha^3 (Rci-Q's stated exponent), not FG's
+        # own alpha^2 -- with alpha^2 the damping increasingly (and spuriously) suppresses this term at
+        # the Z ~ 70-90 range where the self-energy integral's dominant r ~ alpha; alpha^3 keeps the
+        # damping negligible there, matching the term's expected fast growth with Z.
+        AZ = A0Z * r / (r + 0.07*nm.Z^2*alpha^3)
+        # NOTE: FG's eq. (10) reads  Phi_f(r) = -A(Z,r)(alpha/pi) Phi(r) integral(),  with Phi(r) = -Z/r
+        # (the same convention as Phi(r) in qedUehlingSimple's wc); the two minus signs cancel, giving
+        # a net POSITIVE prefactor on (Z/r) -- this is the dominant, positive self-energy contribution.
+        wb = AZ * alpha/pi * (nm.Z/r) * tIntegral(r, alpha)
+        wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]
+    end
+
+    println("QED single-electron strength <$(a.subshell)| h^(SE, electric form factor) | $(b.subshell)> = $wa ")
+    return( wa )
+end
+
+
+"""
+`RadialIntegrals.qedMagneticFormFactor(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model,
+                                        grid::Radial.Grid, qgrid::Radial.GridGL)`
+    ... computes the (radial) integral for the magnetic self-energy form-factor contribution (point-like
+        nucleus) for the radial orbitals a, b on the given grid; cf. Flambaum & Ginges, PRA 72, 052115 (2005),
+        eq. (7). Unlike the electric-type QED terms, the magnetic form factor couples the large and small
+        radial components (a P-Q cross term) rather than P*P + Q*Q. A value::Float64 is returned.
+"""
+function qedMagneticFormFactor(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, grid::Radial.Grid, qgrid::Radial.GridGL)
+    # Define the internal t-integration that is specific to the magnetic self-energy form factor; cf. PRA 72, 052115 (2005); eq. (7)
+    function tIntegrals(r::Float64, alpha::Float64)
+        wi1 = 0.;   wi2 = 0.;
+        for  i = 1:qgrid.nt   t = qgrid.t[i];
+            we  = Base.MathConstants.e^(-2.0*t*r/alpha) * qgrid.wt[i]
+            wi1 = wi1 + we / (t    * sqrt(t^2 - 1.))
+            wi2 = wi2 + we / (t^2  * sqrt(t^2 - 1.))
+        end
+        return( wi1, wi2 )
+    end
+
+    alpha = Defaults.getDefaults("alpha")
+    mtp = min(size(a.P, 1), size(b.P, 1))
+    wa = 0.
+    for  i = 2:mtp
+        r        = grid.r[i]
+        wi1, wi2 = tIntegrals(r, alpha)
+        wb       = alpha^2 * nm.Z / (4pi * r^2) * ( wi2 + (2*r/alpha)*wi1 - 1. )
+        wa       = wa + (a.P[i]*wb*b.Q[i] + a.Q[i]*wb*b.P[i]) * grid.wr[i]
+    end
+
+    println("QED single-electron strength <$(a.subshell)| h^(SE, magnetic form factor) | $(b.subshell)> = $wa ")
+    return( wa )
+end
+
+
+"""
+`RadialIntegrals.qedWichmannKrollSimple(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model,
+                                        pot::Radial.Potential, grid::Radial.Grid, qgrid::Radial.GridGL)`
+    ... computes the (radial) integral for the simplified Wichmann-Kroll vacuum-polarization contribution
+        for the radial orbitals a, b on the given grid; cf. Flambaum & Ginges, PRA 72, 052115 (2005), eq. (12).
+        A closed-form (non-t-integrated) correction; qgrid is accepted only for interface consistency with
+        the other local QED terms and is not used. A value::Float64 is returned.
+"""
+function qedWichmannKrollSimple(a::Radial.Orbital, b::Radial.Orbital, nm::Nuclear.Model, pot::Radial.Potential,
+                                grid::Radial.Grid, qgrid::Radial.GridGL)
+    alpha = Defaults.getDefaults("alpha");    rc = alpha
+    mtp = min(size(a.P, 1), size(b.P, 1))
+    wa = 0.
+    for  i = 2:mtp
+        r  = grid.r[i]
+        wc = (-pot.Zr[i] / r)
+        wb = - (2*alpha)/(3pi) * wc * 0.092*nm.Z^2*alpha^2 / (1. + (1.62*r/rc)^4)
+        wa = wa + (a.P[i]*wb*b.P[i] + a.Q[i]*wb*b.Q[i]) * grid.wr[i]
+    end
+
+    println("QED single-electron strength <$(a.subshell)| h^(Wichmann-Kroll) | $(b.subshell)> = $wa ")
+    return( wa )
+end
+
+
+"""
+`RadialIntegrals.rkDiagonal(k::Int64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`   ... computes the (radial and diagonal) integral of r^k for two radial orbital functions.
 
 + (k::Int64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)`  
     ... computes this integral for two relativistic orbitals:   < r^k >_ab = int_0^\\infty  dr  [P_a P_b + Q_a Q_b]  r^k
 """
 function rkDiagonal(k::Int64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * (grid.r[i]^k) )    end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        if  k > -3   m0 = 2   else   m0 = 6   end    # Don't allow too small r-values
-        for  i = m0:mtp   wa = wa + (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * (grid.r[i]^k) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+
+    wa = 0.
+    # Don't allow too small r-values -- graduated with how negative k is, since r^k for very negative k
+    # blows up catastrophically at the innermost grid points, amplifying any tiny residual imprecision
+    # in the tabulated P/Q there (see project_zeeman_hfs_bugs.md, 30-Jul-2026, for the kappa<=-3 case
+    # this matters most for; k<=-4 is not fully resolved even at m0=18 for kappa<=-3 orbitals -- a known,
+    # documented residual, not chased further this session).
+    if      k > -3   m0 = 2
+    elseif  k == -3  m0 = 10
+    else             m0 = 18   end
+    for  i = m0:mtp   wa = wa + (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * (grid.r[i]^k) * grid.wr[i]   end
+    return( wa )
 end
 
-
 """
-+ (k::Int64, p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radial.Grid)`  
++ (k::Int64, p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radial.Grid)`
     ... computes this integral for two non-relativistic orbitals:   < r^k >_ab = int_0^\\infty  dr  [P_a P_b]  r^k
 """
 function rkDiagonal(k::Int64, p1List::Array{Float64,1}, p2List::Array{Float64,1}, grid::Radial.Grid)
     mtp = min( length(p1List), length(p2List))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f(i :: Int64)
-            return( p1List[i] * p2List[i] * (grid.r[i]^k) )
-        end
-
-        return( Math.integrateTransform(f, 2, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + p1List[i] * p2List[i] * (grid.r[i]^k) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+    wa = 0.
+    for  i = 2:mtp   wa = wa + p1List[i] * p2List[i] * (grid.r[i]^k) * grid.wr[i]   end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.rkNonDiagonal(k::Int64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)` 
@@ -639,23 +480,26 @@ end
 """
 function rkNonDiagonal(k::Int64, a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     mtp = min(size(a.P, 1), size(b.P, 1))
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * (grid.r[i]^k) )    end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   wa = wa + (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * (grid.r[i]^k) * grid.wr[i]   end
-        return( wa )
-    else
-        error("stop a")
-    end
+
+    wa = 0.
+    # Don't allow too small r-values -- graduated with how negative k is (this function previously had
+    # no such guard at all, unlike rkDiagonal). k<=-4 (the Hfs M3/octupole case) remains only partially
+    # resolved even at this conservative m0: kappa<=-3 orbitals (e.g. d5/2, f7/2, ...) retain a genuine,
+    # slowly-decaying near-origin residual traced (30-Jul-2026) to the exact l+1+kappa=0 cancellation of
+    # Q(r)'s leading power for kappa=-(l+1) -- ruled out as a tabulation artifact (an equivalent bVector-
+    # space bilinear-form evaluation shows the identical residual) and as an SCF-convergence artifact
+    # (tightening accuracyScf by 6 orders of magnitude did not change it); most likely an intrinsic
+    # precision limitation of the single-diagonalization step for this delicate, cancellation-exposed
+    # quantity. A documented, NOT-fully-resolved follow-up item -- see project_zeeman_hfs_bugs.md.
+    if      k > -3   m0 = 2
+    elseif  k == -3  m0 = 10
+    else             m0 = 70   end
+    for  i = m0:mtp   wa = wa + (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * (grid.r[i]^k) * grid.wr[i]   end
+    return( wa )
 end
 
-
 """
-`RadialIntegrals.SlaterRkComponent_2dim(k::Int64, Ba::Array{Float64,1}, Bb::Array{Float64,1}, 
+`RadialIntegrals.SlaterRkComponent(k::Int64, Ba::Array{Float64,1}, Bb::Array{Float64,1}, 
                                                   Bc::Array{Float64,1}, Bd::Array{Float64,1}, grid::Radial.Grid)`  
     ... computes one component of the (relativistic) Slater integral
 
@@ -665,34 +509,26 @@ end
         of rank k for the four components Ba, Bb, ... above , and over the given grid by using an explicit 2-dimensional integration 
         scheme; a value::Float64 is returned.
 """
-function SlaterRkComponent_2dim(k::Int64, Ba::Array{Float64,1}, Bb::Array{Float64,1}, Bc::Array{Float64,1}, Bd::Array{Float64,1}, grid::Radial.Grid)
+function SlaterRkComponent(k::Int64, Ba::Array{Float64,1}, Bb::Array{Float64,1}, Bc::Array{Float64,1}, Bd::Array{Float64,1}, grid::Radial.Grid)
     function ul(r :: Float64, s :: Float64) :: Float64
         if     r <= s    return( r^k/s^(k+1) )
         elseif r > s     return( s^k/r^(k+1) )
         end
     end
 
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(Ba, 1), size(Bc, 1));    mtp_bd = min(size(Bb, 1), size(Bd, 1))
-        wac = zeros(mtp_ac);   wbd = zeros(mtp_bd)
-        for  r = 2:mtp_ac   wac[r] = (Ba[r] * Bc[r]) * grid.wr[r]  end
-        for  s = 2:mtp_bd   wbd[s] = (Bb[s] * Bd[s]) * grid.wr[s]  end
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   wa = wa + wac[r] * ul(grid.r[r], grid.r[s]) * wbd[s]   end
-        end
-        return( wa )
-    else
-        error("stop b")
+    mtp_ac = min(size(Ba, 1), size(Bc, 1));    mtp_bd = min(size(Bb, 1), size(Bd, 1))
+    wac = zeros(mtp_ac);   wbd = zeros(mtp_bd)
+    for  r = 2:mtp_ac   wac[r] = (Ba[r] * Bc[r]) * grid.wr[r]  end
+    for  s = 2:mtp_bd   wbd[s] = (Bb[s] * Bd[s]) * grid.wr[s]  end
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd   wa = wa + wac[r] * ul(grid.r[r], grid.r[s]) * wbd[s]   end
     end
+    return( wa )
 end
 
-
 """
-`RadialIntegrals.SlaterRk_2dim(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
+`RadialIntegrals.SlaterRk(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
     ... computes the (relativistic) Slater integral
 
     R^k (abcd) = int_0^infty dr int_0^infty ds (P_a P_c + Q_a Q_c) r_<^k / r_>^(k+1) (P_b P_d + Q_b Q_d)
@@ -700,45 +536,528 @@ end
     of rank k for the four orbitals a, b, c, d, and over the given grid by using an explicit 2-dimensional integration scheme; a 
     value::Float64 is returned.
 """
-function SlaterRk_2dim(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
-    function ul(r :: Float64, s :: Float64) :: Float64
-        if     r <= s    return( r^k/s^(k+1) )
-        elseif r > s     return( s^k/r^(k+1) )
+function SlaterRk(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
+    mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
+    wac = zeros(mtp_ac);   wbd = zeros(mtp_bd)
+    for  r = 2:mtp_ac   wac[r] = (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * grid.wr[r]  end
+    for  s = 2:mtp_bd   wbd[s] = (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[s]  end
+    ## The two powers r^k and r^(k+1) depend only on the grid point, not on the pair (r,s), yet the
+    ## closure ul() above recomputed both inside the N^2 loop -- N ~ 1000, so ~10^6 calls to ^ per
+    ## Slater integral where 2N suffice.  Hoisting them costs O(N) and leaves the arithmetic of each
+    ## term untouched: the same two numbers are formed and the same division is taken, so the result is
+    ## BITWISE identical and no approved reference can move.  Measured 4.7x / 6.5x / 9.4x on three real
+    ## cases; SlaterRk and its ul() closure were ~16 % of an Auger rate computation.
+    ## ul() itself was kept at the time because the MeshGrasp branch above still called it; that branch is
+    ## gone (12-Aug-2026) and the closure with it, since nothing in this function called it any more.
+    mtp = max(mtp_ac, mtp_bd)
+    rPk = zeros(mtp);   rPk1 = zeros(mtp)
+    for  i = 2:mtp      rPk[i] = grid.r[i]^k;    rPk1[i] = grid.r[i]^(k+1)    end
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd
+            uls = grid.r[r] <= grid.r[s]  ?  rPk[r] / rPk1[s]  :  rPk[s] / rPk1[r]
+            wa  = wa + wac[r] * uls * wbd[s]
         end
     end
+    return( wa )
+end
 
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function fs(r :: Int64, s :: Int64) :: Float64
-            return( ul(grid.r[r], grid.r[s]) * ( b.P[s] * d.P[s] + b.Q[s] * d.Q[s] ) )
-        end
 
-        function f(r :: Int64) :: Float64
-        function ff(i :: Int64) :: Float64    return( fs(r, i) )    end
-        return( (a.P[r] * c.P[r] + a.Q[r] * c.Q[r] ) * Math.integrateFitTransform(ff, min(size(b.P, 1), size(d.P, 1)), grid) )
-        end
+## Fixed Gauss-Legendre nodes for the per-cell quadratures of the screened-potential sweeps.  Built once.
+## 8 points integrate a polynomial of degree 15 exactly, which comfortably covers a cubic spline times
+## s^k over ONE grid cell -- the sweeps never integrate across a cell boundary, so there is nothing for
+## adaptivity to discover and QuadGK's 15-point Gauss-Kronrod rule (plus its subdivision logic and its
+## error estimate) is simply paid for nothing.
+const GBL_GaussLegendreCell = FastGaussQuadrature.gausslegendre(8)
 
-        return Math.integrateFitTransform(f, min(size(a.P, 1), size(c.P, 1)), grid)
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
-        wac = zeros(mtp_ac);   wbd = zeros(mtp_bd)
-        for  r = 2:mtp_ac   wac[r] = (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * grid.wr[r]  end
-        for  s = 2:mtp_bd   wbd[s] = (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[s]  end
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   wa = wa + wac[r] * ul(grid.r[r], grid.r[s]) * wbd[s]   end
-        end
-        ##x @show a.subshell, c.subshell, b.subshell, d.subshell, k, wa
-        return( wa )
-    else
-        error("stop a")
-    end
+
+"""
+`RadialIntegrals.cellIntegral(f, a::Float64, b::Float64)`  
+    ... integrates f over the single interval [a,b] with a fixed 8-point Gauss-Legendre rule; a Float64 is
+        returned.  Used only by the screened-potential sweeps, where each interval is one grid cell and the
+        integrand is smooth on it.
+"""
+function cellIntegral(f, a::Float64, b::Float64)
+    (xg, wg) = GBL_GaussLegendreCell
+    half = 0.5*(b - a);    mid = 0.5*(b + a);    acc = 0.
+    for  j = 1:length(xg)     acc = acc + wg[j] * f( half*xg[j] + mid )     end
+    return( half * acc )
+end
+
+
+# Counters for priority item 47; see the note inside buildScreenedPotential.  Kept off by a Ref rather than by
+# an ENV lookup, so the hot path pays a dereference and not a Dict probe.
+const GBL_COUNT_SCREENEDPOT   = Ref(false)
+const GBL_SCREENEDPOT_CALLS   = Ref(0)
+const GBL_SCREENEDPOT_RANKED  = Set{Tuple{Int64,Subshell,Subshell}}()
+const GBL_SCREENEDPOT_PAIRS   = Dict{Tuple{Subshell,Subshell},Int64}()
+
+
+"""
+`RadialIntegrals.countScreenedPotentials(onOff::Bool)`
+    ... switches the item-47 counters on or off and clears them; nothing is returned.  While on, every call to
+        `buildScreenedPotential` records its (k, b, d) and its (b, d), so that the REDUNDANCY ACROSS RANKS can be
+        read off afterwards with `RadialIntegrals.reportScreenedPotentials()`.
+"""
+function countScreenedPotentials(onOff::Bool)
+    GBL_COUNT_SCREENEDPOT[] = onOff;    GBL_SCREENEDPOT_CALLS[] = 0
+    empty!(GBL_SCREENEDPOT_RANKED);     empty!(GBL_SCREENEDPOT_PAIRS)
+    return( nothing )
 end
 
 
 """
-`RadialIntegrals.SlaterRk_2dim_WO(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
+`RadialIntegrals.reportScreenedPotentials()`
+    ... returns `(calls, rankedKeys, pairKeys)` for the calls to `buildScreenedPotential` seen since
+        `countScreenedPotentials(true)`.  `pairKeys` is what a spline shared across multipole ranks would cost,
+        `rankedKeys` what it costs today, and their ratio is the saving available.
+"""
+function reportScreenedPotentials()
+    # A COPY, because `countScreenedPotentials` empties the live Dict and a caller that switched the
+    # counters off before reading would otherwise be handed an empty table.
+    return( (GBL_SCREENEDPOT_CALLS[], length(GBL_SCREENEDPOT_RANKED), copy(GBL_SCREENEDPOT_PAIRS)) )
+end
+
+
+"""
+`RadialIntegrals.buildScreenedPotential(k::Int64, b::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid;
+                                              rtol::Float64=1.0e-9, mtpOut::Union{Nothing,Int64}=nothing)`
+    ... computes the "screened potential"
+
+        V_k(r) = (1/r^(k+1)) int_0^r ds s^k rho_bd(s)  +  r^k int_r^r_max ds s^{-(k+1)} rho_bd(s),
+        rho_bd(s) = P_b(s)P_d(s) + Q_b(s)Q_d(s),
+
+        i.e. the r-dependent potential felt (via the Coulomb interaction of rank k) from the fixed orbital pair
+        (b,d), evaluated at every tabulated grid point r = grid.r[i]. This is the auxiliary quantity underlying
+        the two-electron Slater integral R^k(abcd) = int dr rho_ac(r) V_k(r); since V_k depends only on (b,d),
+        not on whatever it is later contracted against, it only needs to be built ONCE per orbital pair and can
+        then be reused cheaply (via the existing, already-tabulated grid quadrature, since V_k(r) is itself
+        smooth/kink-free once built correctly) for every downstream contraction -- e.g. RadialIntegrals.
+        SlaterRkKinkAware below, or a B-spline matrix element as needed for SCF orbital optimization.
+
+        The kink that the original r_</r_>^(k+1) kernel has at r=s is handled explicitly here: for each outer
+        point r WITHIN the source density's own extent, the integral over s is split into [0,r] and [r,r_max]
+        -- each smooth on its own -- rather than integrated across the kink with a single quadrature rule as
+        SlaterRk does. For r BEYOND the source's own extent (rho_bd is by construction zero there), V_k(r)
+        reduces to a single r-independent constant divided by r^(k+1) -- the standard multipole falloff of a
+        localized source -- computed once and reused for every such r, no adaptive quadrature needed there.
+        Getting this "beyond the source" branch right matters: it is NOT optional truncation. When V_k feeds a
+        B-spline MATRIX element (rather than a pre-truncated orbital-orbital integral), the matrix's row/column
+        B-splines span the FULL basis and can extend well past a compact orbital pair (b,d)'s own reach (e.g. a
+        2p orbital screening a 1s row built from B-splines spanning the whole grid) -- silently ending V_k's
+        array at the source's own extent, as an earlier version of this function did, drops that entire tail
+        contribution and was traced to a real, non-negligible bug: Ne's 1s orbital came out MEASURABLY too
+        deeply bound (eigenvalue off by roughly a fifth from the experimental K-shell value) because its Fock
+        matrix was silently missing part of its direct screening from the 2p shell.
+        rho_bd(s) is represented as a cubic spline (Dierckx.Spline1D) over the tabulated grid values, and each
+        piece is evaluated by a FIXED eight-point Gauss-Legendre rule per cell (RadialIntegrals.cellIntegral,
+        GBL_GaussLegendreCell) -- not, as this paragraph said until 05-Sep-2026, by adaptive Gauss-Kronrod:
+        the adaptive form was replaced when the sweep was introduced, since one grid cell is smooth and needs
+        no subdivision, and the description was not updated with it.
+        BOTH integrals are accumulated by a SINGLE SWEEP over the grid rather than integrated afresh at every
+        point: the inner moment grows with r and the outer moment shrinks with r, so each differs from its
+        neighbour by exactly one grid cell. An earlier version ran two full-range adaptive quadratures at each
+        of the ~1500 grid points, integrating the same material O(N) times over; profiling of both the SCF and
+        the CI paths (09-Aug-2026) put ~94% of a configuration-interaction matrix build inside this one loop.
+        The forward/backward sweeps are the standard construction (Hartree's Y_k, GRASP's YZK). Note that it is
+        the SPLIT AT THE KINK that is essential, not its repetition -- the split is retained exactly; only the
+        redundant re-integration is gone. Per-cell quadrature also keeps the same rtol while converging more
+        reliably, since one grid cell is smooth and needs no subdivision.
+        mtpOut lets the caller request the FULL range actually needed (e.g. grid.NoPoints for a
+        B-spline matrix element); left unspecified, it defaults to min(size(b.P,1),size(d.P,1)) as before, which
+        remains correct wherever V_k is only ever contracted against something ALSO naturally truncated to that
+        same orbital-pair extent (e.g. SlaterRkKinkAware).
+        A Vk::Vector{Float64}, of length mtpOut (or min(size(b.P,1),size(d.P,1)) if mtpOut is not given), is
+        returned.
+"""
+function buildScreenedPotential(k::Int64, b::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid;
+                                      rtol::Float64=1.0e-9, mtpOut::Union{Nothing,Int64}=nothing)
+    # INSTRUMENTATION FOR PRIORITY ITEM 47, off by default and costing one Ref dereference when off.
+    # The spline below is a function of (b,d) ALONE -- never of the rank k, and nor are the quadrature nodes --
+    # yet every cache above this function keys on k as well, so the same spline is rebuilt and re-evaluated once
+    # per rank.  These counters measure the redundancy that would remove, which is the one number item 47 needs.
+    if  GBL_COUNT_SCREENEDPOT[]
+        GBL_SCREENEDPOT_CALLS[] = GBL_SCREENEDPOT_CALLS[] + 1
+        push!(GBL_SCREENEDPOT_RANKED, (k, b.subshell, d.subshell))
+        kp = (b.subshell, d.subshell)
+        GBL_SCREENEDPOT_PAIRS[kp] = get(GBL_SCREENEDPOT_PAIRS, kp, 0) + 1
+    end
+    mtp_bd  = min(size(b.P, 1), size(d.P, 1))
+    mtpOutx = isnothing(mtpOut) ? mtp_bd : mtpOut
+    Vk      = zeros(mtpOutx)
+    if  mtp_bd < 2    return( Vk )    end
+
+    rbd    = grid.r[1:mtp_bd]
+    rhoBd  = [b.P[i]*d.P[i] + b.Q[i]*d.Q[i]  for i = 1:mtp_bd]
+    splBd  = Dierckx.Spline1D(rbd, rhoBd)
+    r0     = grid.r[1]                     # smallest tabulated grid point, > 0; mirrors the grid's own convention
+    rmaxBd = rbd[end]
+
+    # Last output index still strictly INSIDE the source's own extent; beyond it the multipole-tail
+    # branch applies and no quadrature is needed at all.
+    iLast = 1
+    for  i = 2:mtpOutx     if  grid.r[i] < rmaxBd    iLast = i    else    break    end    end
+
+    # BOTH MOMENTS OF A CELL ARE TAKEN IN ONE PASS -- 05-Sep-2026.  The two sweeps below evaluate the SAME
+    # spline at the SAME eight Gauss-Legendre nodes of the same cell, once multiplied by s^k and once by
+    # s^-(k+1), and rho_bd(s) is by far the expensive half: a fresh profile of a four-layer C-like U RAS put
+    # 26.9 % of the whole run in Dierckx spline EVALUATION, called from here.  Asking for the density once per
+    # cell instead of twice halves that.  Nothing else changes: the nodes, the weights, the products and the
+    # order in which they are accumulated are exactly cellIntegral's, so every moment is BITWISE what it was.
+    function cellMoments(a::Float64, b::Float64)
+        (xg, wg) = RadialIntegrals.GBL_GaussLegendreCell
+        half = 0.5*(b - a);    mid = 0.5*(b + a);    accP = 0.;    accM = 0.
+        for  j = 1:length(xg)
+            sj   = half*xg[j] + mid
+            rh   = splBd(sj)
+            accP = accP + wg[j] * (sj^k * rh)
+            accM = accM + wg[j] * (sj^(-(k+1)) * rh)
+        end
+        return( half*accP, half*accM )
+    end
+    # cell i is [r_(i-1), r_i]; the tail piece is [r_iLast, rmaxBd] and is empty when they coincide
+    momP = zeros(iLast+1);    momM = zeros(iLast+1)
+    for  i = 2:iLast
+        (pp, mm) = cellMoments(grid.r[i-1], grid.r[i])
+        momP[i]  = pp;    momM[i] = mm
+    end
+    (tailP, tailM) = iLast >= 2 ? cellMoments(grid.r[iLast], rmaxBd) : (0., 0.)
+
+    # FORWARD sweep:  inner[i] = int_{r0}^{r_i} ds s^k rho_bd(s), accumulated ONE GRID CELL AT A TIME.
+    inner = zeros(mtpOutx);    acc = 0.
+    for  i = 2:iLast
+        acc      = acc + momP[i]
+        inner[i] = acc
+    end
+    # the remaining cell out to rmaxBd completes the full inner moment, so that fullInner is by
+    # construction the end value of the same sweep rather than a separately integrated quantity
+    fullInner = grid.r[iLast] < rmaxBd ?  acc + tailP  :  acc
+
+    # BACKWARD sweep:  outer[i] = int_{r_i}^{rmaxBd} ds s^{-(k+1)} rho_bd(s), likewise cell by cell.
+    # Accumulating from the far end inwards also adds the small contributions first, which is the
+    # numerically favourable order.
+    outer = zeros(mtpOutx)
+    if  iLast >= 2
+        acc = tailM
+        outer[iLast] = acc
+        for  i = iLast-1:-1:2
+            acc      = acc + momM[i+1]
+            outer[i] = acc
+        end
+    end
+
+    for  i = 2:mtpOutx
+        r = grid.r[i]
+        if  r >= rmaxBd    Vk[i] = fullInner / r^(k+1)
+        else               Vk[i] = inner[i] / r^(k+1) + r^k * outer[i]
+        end
+    end
+    return( Vk )
+end
+
+
+"""
+`RadialIntegrals.SlaterRkKinkAware(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital,
+                                     grid::Radial.Grid; rtol::Float64=1.0e-9)`
+    ... computes the same (relativistic) Slater integral as SlaterRk,
+
+    R^k (abcd) = int_0^infty dr int_0^infty ds (P_a P_c + Q_a Q_c) r_<^k / r_>^(k+1) (P_b P_d + Q_b Q_d)
+
+    but via the kink-aware screened potential RadialIntegrals.buildScreenedPotential(k,b,d,grid) instead of
+    the naive tensor-product Gauss-Legendre double sum SlaterRk uses (which is exact for smooth polynomials
+    within a break-point cell, but not for a function with a first-derivative discontinuity running through the
+    middle of one, as r_</r_>^(k+1) has at r=s). Since V_k(r) is smooth once built, the outer integral over r can
+    safely reuse the existing grid quadrature weights -- no further adaptive treatment is needed there.
+    A value::Float64 is returned.
+"""
+function SlaterRkKinkAware(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital,
+                             grid::Radial.Grid; rtol::Float64=1.0e-9)
+    ## mtpOut MUST be passed (fixed 13-Aug-2026).  Without it buildScreenedPotential tabulates V_k only
+    ## out to the (b,d) SOURCE's own extent, and the outer integral over r was then cut at
+    ## min(mtp_ac, length(Vk)) -- dropping the whole r > r_max(bd) tail, where V_k(r) is not zero but falls off
+    ## as the multipole const/r^(k+1).  That is the exact trap the docstring of buildScreenedPotential
+    ## warns about, and this was its one caller that walked into it.
+    ##
+    ## IT WAS INVISIBLE FOR AS LONG AS THIS FUNCTION SERVED ONLY THE SCF, where (a,c) and (b,d) are both bound
+    ## and of comparable extent, so the truncation removed almost nothing.  It surfaced the moment the
+    ## function was put on the Auger path, where (a,c) may contain a CONTINUUM orbital reaching the box
+    ## boundary while (b,d) are bound and short: the approved AutoIonization reference then moved by 100% and
+    ## the stepwise-decay cascade by 150%, which is what a dropped tail looks like -- not what a 2e-4
+    ## quadrature refinement looks like.
+    mtp_ac = min(size(a.P, 1), size(c.P, 1))
+    Vk     = buildScreenedPotential(k, b, d, grid; rtol=rtol, mtpOut=mtp_ac)
+
+    wa = 0.
+    for  r = 2:mtp_ac   wa = wa + (a.P[r]*c.P[r] + a.Q[r]*c.Q[r]) * grid.wr[r] * Vk[r]   end
+    return( wa )
+end
+
+
+"""
+`RadialIntegrals.SlaterRkKinkAware(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital,
+        d::Radial.Orbital, grid::Radial.Grid, vkCache::Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}};
+        rtol::Float64=1.0e-9)`
+    ... as the method without a cache, but memoising the screened potential V_k, which is the expensive part and
+        depends on only TWO of the four orbitals. A value::Float64 is returned.
+
+        WHY THIS PAYS, measured 03-Sep-2026.  The integral is  int P_a(r) V_k[b,d](r) P_c(r) dr, and the inner
+        sum over r is a handful of multiplications while `buildScreenedPotential` costs ~1.4 ms -- an adaptive
+        quadrature and a spline through the (b,d) density.  In the level-optimised field the same (k,b,d) triple
+        recurs across different (a,c) pairs: measured on a three-layer beryllium RAS, 358 coefficients carry only
+        180 distinct triples, a redundancy of 1.99x at the correlating layer.  The caller's own cache over the
+        FULL coefficient quintuple cannot catch this -- it was measured to miss 100 % of the time, every
+        coefficient carrying a unique (k,a,b,c,d) -- because the reuse lives one level down.
+
+        THE KEY CARRIES mtpOut, WHICH IS NOT REDUNDANT EVEN THOUGH IT IS CONSTANT IN THE SCF.  V_k is tabulated
+        only out to the extent of (a,c), so a potential built for a short (a,c) pair must not be handed to a
+        longer one -- exactly the dropped-tail trap that `buildScreenedPotential`'s own docstring warns about and
+        that moved an approved AutoIonization reference by 100 % on 13-Aug-2026.  Every bound orbital of a
+        B-spline basis reaches the box boundary, so in the SCF the extent is the same for every pair and the
+        cache hits regardless (measured: truncated and full builds cost the same to 1 %); on the Auger path,
+        where (a,c) may hold a continuum orbital and (b,d) be short, the key is what keeps this correct.
+
+        THE CACHE IS OWNED BY THE CALLER AND MUST NOT OUTLIVE THE ORBITALS IT WAS BUILT FROM.  It is keyed on
+        SUBSHELL LABELS, so a cache carried across an SCF iteration would hand back a potential computed for an
+        earlier orbital shape.  A caller inside an iteration creates a fresh one per evaluation; only a caller
+        that knows its orbitals are frozen may keep one longer.
+"""
+function SlaterRkKinkAware(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital,
+                             grid::Radial.Grid,
+                             vkCache::Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}};
+                             rtol::Float64=1.0e-9)
+    mtp_ac = min(size(a.P, 1), size(c.P, 1))
+    Vk     = get!(vkCache, (k, b.subshell, d.subshell, mtp_ac)) do
+                 buildScreenedPotential(k, b, d, grid; rtol=rtol, mtpOut=mtp_ac)
+             end
+
+    wa = 0.
+    for  r = 2:mtp_ac   wa = wa + (a.P[r]*c.P[r] + a.Q[r]*c.Q[r]) * grid.wr[r] * Vk[r]   end
+
+    return( wa )
+end
+
+
+"""
+`RadialIntegrals.buildScreenedPotentialPair(k::Int64, Ba::Vector{Float64}, orbComp::Vector{Float64},
+                                                  grid::Radial.Grid; rtol::Float64=1.0e-9,
+                                                  mtpOut::Union{Nothing,Int64}=nothing)`
+    ... computes the same kind of "screened potential"
+
+        V_k(r) = (1/r^(k+1)) int_0^r ds s^k rho(s)  +  r^k int_r^r_max ds s^{-(k+1)} rho(s),
+        rho(s) = Ba(s) * orbComp(s),
+
+        as RadialIntegrals.buildScreenedPotential, but for a DENSITY BUILT FROM A SINGLE B-SPLINE (Ba,
+        a zero-padded array with support limited to that spline's own knot interval) times a single component
+        (P or Q) of a fixed orbital, rather than a full P_bP_d+Q_bQ_d orbital-pair density. This is the
+        building block for the "exchange"-signature InteractionStrength.XL_CoulombKinkAware, where -- unlike the
+        "direct" signature -- BOTH B-spline indices sit on opposite sides of the two-electron kernel, so no
+        single screened potential can be shared across the whole (nsL+nsS) x (nsL+nsS) matrix. Instead, one such
+        potential is built per ROW (per "a" B-spline), using only that spline's own compact support to define
+        rho, and then reused cheaply against every column ("d" B-spline) of that row.
+        V_k(r) is evaluated out to the full extent of orbComp by default (not just Ba's own narrow support),
+        since even a spatially localized source density still produces a potential everywhere via its
+        1/r^(k+1) tail; for r beyond Ba's support this tail integral is a single r-independent constant,
+        computed once and then just divided by r^(k+1) at each point -- so only the (typically few) grid points
+        inside Ba's own support incur the cost of an adaptive quadrature split at the kink.
+        Within that support the two moments are accumulated by a forward and a backward SWEEP over the grid
+        cells, for the same reason as in buildScreenedPotential: consecutive points differ by one cell,
+        so re-integrating the whole sub-range at each point repeats work. fullInner and fullOuter are the end
+        values of those same sweeps, so they cannot drift away from the pointwise values.
+        The optional mtpOut lets the caller request a LONGER output range explicitly -- needed, for instance, by
+        RadialIntegrals.buildScreenedPotentialCache, where BOTH Ba and orbComp are themselves compact B-splines
+        (not a broad orbital), so size(orbComp,1) alone would be far too short for how the result is used later.
+        A Vk::Vector{Float64}, of length mtpOut (or size(orbComp,1) if mtpOut is not given), is returned.
+"""
+function buildScreenedPotentialPair(k::Int64, Ba::Vector{Float64}, orbComp::Vector{Float64}, grid::Radial.Grid;
+                                          rtol::Float64=1.0e-9, mtpOut::Union{Nothing,Int64}=nothing)
+    mtpSrc = min(size(Ba, 1), size(orbComp, 1))
+    mtpOutx = isnothing(mtpOut) ? size(orbComp, 1) : mtpOut
+    Vk     = zeros(mtpOutx)
+    if  mtpSrc < 2    return( Vk )    end
+
+    # Restrict to the density's ACTUAL nonzero support. Ba and orbComp are zero-padded from index 1, so for a
+    # "late" B-spline pair the true overlap can start far later than index 1 (e.g. a padded array of length 392
+    # with a true support of only ~20 points) -- running adaptive quadrature over that leading, identically-zero
+    # stretch as well as the true support wastes most of the work for exactly the pairs buildScreenedPotentialCache
+    # calls this with most often.
+    startIdx = 0
+    for  i = 1:mtpSrc   if  Ba[i]*orbComp[i] != 0.    startIdx = i;   break   end   end
+    if  startIdx == 0    return( Vk )    end   # density identically zero -> potential is zero everywhere
+    if  mtpSrc - startIdx < 1    return( Vk )    end   # overlap region is a single point -> measure zero, no contribution
+
+    rSrc    = grid.r[startIdx:mtpSrc]
+    rho     = [Ba[i]*orbComp[i] for i = startIdx:mtpSrc]
+    splOrd  = min(3, length(rSrc)-1)
+    splBa   = Dierckx.Spline1D(rSrc, rho; k=splOrd)
+    rStart  = grid.r[startIdx]
+    rmaxSrc = rSrc[end]
+
+    # The output indices that fall strictly INSIDE the source's support, rStart < r < rmaxSrc; only these
+    # need quadrature, the two outer branches are O(1) each.
+    iFirst = startIdx + 1
+    iLast  = iFirst - 1
+    for  i = iFirst:mtpOutx     if  grid.r[i] < rmaxSrc    iLast = i    else    break    end    end
+
+    # FORWARD sweep:  inner[i] = int_{rStart}^{r_i} ds s^k rho(s), one grid cell at a time.
+    inner = zeros(mtpOutx);    acc = 0.
+    for  i = iFirst:iLast
+        acc      = acc + RadialIntegrals.cellIntegral(s -> s^k * splBa(s), grid.r[i-1], grid.r[i])
+        inner[i] = acc
+    end
+    fullInner = (iLast >= iFirst  &&  grid.r[iLast] < rmaxSrc) ?
+                acc + RadialIntegrals.cellIntegral(s -> s^k * splBa(s), grid.r[iLast], rmaxSrc)  :
+                QuadGK.quadgk(s -> s^k * splBa(s), rStart, rmaxSrc, rtol=rtol)[1]
+
+    # BACKWARD sweep:  outer[i] = int_{r_i}^{rmaxSrc} ds s^{-(k+1)} rho(s).  fullOuter is then the same
+    # sweep carried the last step down to rStart, so the two agree by construction.
+    outer = zeros(mtpOutx);    fullOuter = 0.
+    if  iLast >= iFirst
+        acc = RadialIntegrals.cellIntegral(s -> s^(-(k+1)) * splBa(s), grid.r[iLast], rmaxSrc)
+        outer[iLast] = acc
+        for  i = iLast-1:-1:iFirst
+            acc      = acc + RadialIntegrals.cellIntegral(s -> s^(-(k+1)) * splBa(s), grid.r[i], grid.r[i+1])
+            outer[i] = acc
+        end
+        fullOuter = acc + RadialIntegrals.cellIntegral(s -> s^(-(k+1)) * splBa(s), rStart, grid.r[iFirst])
+    else
+        fullOuter = QuadGK.quadgk(s -> s^(-(k+1)) * splBa(s), rStart, rmaxSrc, rtol=rtol)[1]
+    end
+
+    for  i = 2:mtpOutx
+        r = grid.r[i]
+        if       r >= rmaxSrc    Vk[i] = fullInner / r^(k+1)
+        elseif   r <= rStart     Vk[i] = r^k * fullOuter
+        else                     Vk[i] = inner[i] / r^(k+1) + r^k * outer[i]
+        end
+    end
+    return( Vk )
+end
+
+
+"""
+`struct  RadialIntegrals.ScreenedPotentialCache`
+    ... holds a precomputed cache of kink-aware "screened potentials" Phi_(i,i')(s), one for every overlapping
+        pair of B-splines (i,i') from a GIVEN B-spline basis (e.g. primitives.bsplinesL or primitives.bsplinesS),
+        for one fixed multipole rank k. THIS IS NOT ITSELF A PHYSICAL SLATER/RADIAL INTEGRAL -- it is an
+        auxiliary, basis-only tensor (it does not reference any orbital at all) from which many different direct
+        and exchange two-electron radial integrals can afterwards be obtained CHEAPLY, by a simple grid-quadrature
+        dot product against whatever B-spline or orbital density is actually needed (see
+        RadialIntegrals.buildScreenedPotentialCache for how it is built, and
+        SelfConsistent.computeTwoElectronV and SelfConsistent.computeFockMatrix for how it gets used -- these
+        are reached from solveAverageLevelField, solveOptimizedLevelField and solveAverageAtomField, each of
+        which builds the LL, LS and SS caches once per rank and then reuses them for the whole SCF run).
+        Until 13-Aug-2026 this sentence pointed instead at "`computeDirectExchangeVTensor`, once
+        written", a function that was never written; the real consumers had meanwhile been in place and
+        unnamed. Building this cache is
+        the expensive, kink-aware step -- it uses the SAME split-quadrature technique as
+        buildScreenedPotentialPair, just applied ONCE per (basis-only) B-spline pair rather than once per
+        SCF call; using it afterwards, many times over, for many different orbital pairs and many SCF iterations,
+        is cheap. This follows the "moment array" idea underlying Zatsarinny \\& Froese Fischer, Comput. Phys.
+        Commun. 202, 287-303 (2016), their Eq. (16) -- though here the array is stored in this partially-
+        contracted Phi_(i,i')(s) form, rather than as the full four-index R^k(ij;i'j') array of that paper, to
+        avoid the O((N*band)^2) memory cost of also precomputing every (j,j') combination up front.
+
+        i and i' need NOT come from the same B-spline basis: a two-electron exchange-type integral needs the
+        LL and SS ("same-basis") combinations for its diagonal blocks, but ALSO an LS ("cross-basis") combination
+        for its off-diagonal blocks, since the large- and small-component B-spline bases share the same
+        underlying grid (just different spline orders) and therefore genuinely overlap with EACH OTHER too, not
+        only within themselves. See RadialIntegrals.buildScreenedPotentialCache for how the same-basis and
+        cross-basis cases are told apart and handled.
+    + k        ::Int64                                    ... the multipole rank this cache was built for
+    + sameBasis::Bool                                     ... true if this cache was built from two identical
+                                                              B-spline lists (i.e. a same-basis/"LL" or "SS"
+                                                              cache); false for a cross-basis/"LS" cache. Kept
+                                                              here so a cache cannot be silently misused for the
+                                                              wrong kind of contraction.
+    + band     ::Int64                                    ... the largest observed |i-i'| among overlapping
+                                                              B-spline pairs (a property of the spline order,
+                                                              kept here only as a diagnostic)
+    + Phi      ::Dict{Tuple{Int64,Int64}, Vector{Float64}}  ... Phi[(i,i')] = the screened potential sourced from
+                                                              the density B1_i(r)*B2_i'(r) (B1,B2 the two bases
+                                                              this cache was built from, possibly identical),
+                                                              tabulated on the standard grid; only present
+                                                              (nonzero) for OVERLAPPING (i,i') pairs. i indexes
+                                                              the FIRST basis, i' the SECOND.
+"""
+struct ScreenedPotentialCache
+    k         ::Int64
+    sameBasis ::Bool
+    band      ::Int64
+    Phi       ::Dict{Tuple{Int64,Int64}, Vector{Float64}}
+end
+
+
+"""
+`RadialIntegrals.buildScreenedPotentialCache(k::Int64, bsplines1::Array{<:Any,1}, bsplines2::Array{<:Any,1},
+                                              grid::Radial.Grid; rtol::Float64=1.0e-9)`
+    ... builds a RadialIntegrals.ScreenedPotentialCache for multipole rank k from TWO lists of B-splines --
+        typically primitives.bsplinesL and/or primitives.bsplinesS. For every pair (i,i'), i from bsplines1 and
+        i' from bsplines2, whose supports overlap, the kink-aware screened potential
+
+            Phi_(i,i')(s) = int_0^infty dr  B1_i(r) B2_i'(r) * r_<^k / r_>^(k+1)
+
+        is built ONCE, via RadialIntegrals.buildScreenedPotentialPair applied to the (compact-support)
+        density B1_i*B2_i', and cached. AGAIN: THIS IS NOT ITSELF A PHYSICAL SLATER INTEGRAL -- it is the
+        reusable, basis-only building block from which any two-electron direct or exchange radial integral for
+        this rank k can later be obtained cheaply, without repeating the expensive kink-aware quadrature on
+        every SCF call. Because B-splines only overlap with a small number of neighbors, the returned cache is
+        sparse (banded) in (i,i'), not a dense N x N object.
+
+        Whether bsplines1 and bsplines2 are the SAME list matters and is recognized explicitly (by object
+        identity, ===), not left for the caller to track:
+        - SAME list (e.g. both primitives.bsplinesL, or both primitives.bsplinesS): Phi_(i,i') is then
+          symmetric, Phi_(i,i')=Phi_(i',i), so only the i<=i' triangle is computed and mirrored into storage.
+          This is the common "LL" or "SS" case.
+        - DIFFERENT lists (e.g. primitives.bsplinesL and primitives.bsplinesS): no symmetry can be assumed -- an
+          index i from bsplines1 and an index i' from bsplines2 are not interchangeable, since the two bases can
+          have different spline orders (and therefore different [lower,upper] support ranges) even though they
+          live on the same grid. The full, non-mirrored set of overlapping pairs is computed instead, and
+          overlap is tested explicitly via each B-spline's own [lower,upper] range rather than assuming any
+          shared ordering convention between the two lists. This is the "LS" (equivalently "SL", with the two
+          lists swapped) case, needed for the off-diagonal blocks of an exchange-signature Fock matrix.
+        A RadialIntegrals.ScreenedPotentialCache is returned, with its sameBasis field set accordingly.
+"""
+function buildScreenedPotentialCache(k::Int64, bsplines1::Array{<:Any,1}, bsplines2::Array{<:Any,1},
+                                      grid::Radial.Grid; rtol::Float64=1.0e-9)
+    sameBasis = (bsplines1 === bsplines2)
+    n1  = length(bsplines1);   n2 = length(bsplines2)
+    Phi = Dict{Tuple{Int64,Int64}, Vector{Float64}}()
+
+    for  i = 1:n1
+        Bi = bsplines1[i]
+        Pi = zeros(Bi.upper);   addi = 1 - Bi.lower
+        for  m = Bi.lower:Bi.upper   Pi[m] = Pi[m] + Bi.bs[m+addi]   end
+
+        ipRange = sameBasis ? (i:n1) : (1:n2)
+        for  ip in ipRange
+            Bip = sameBasis ? bsplines1[ip] : bsplines2[ip]
+            # Explicit overlap test on the two B-splines' own [lower,upper] ranges -- safe regardless of whether
+            # the two lists share an ordering/indexing convention, which they need not (different spline orders
+            # on the same grid).
+            if  Bi.upper < Bip.lower  ||  Bip.upper < Bi.lower    continue   end
+
+            Pip = zeros(Bip.upper);   addip = 1 - Bip.lower
+            for  m = Bip.lower:Bip.upper   Pip[m] = Pip[m] + Bip.bs[m+addip]   end
+
+            # mtpOut is forced to the full grid extent here: unlike the exchange-integral use of
+            # buildScreenedPotentialPair (where the SECOND argument is a broad orbital, "far enough" on
+            # its own), BOTH Pi and Pip are themselves compact B-splines, so leaving mtpOut at its default
+            # (size(Pip,1)) would silently truncate Phi_(i,i') long before it is needed by later contractions.
+            V = buildScreenedPotentialPair(k, Pi, Pip, grid; rtol=rtol, mtpOut=grid.NoPoints)
+            Phi[(i,ip)] = V
+            if  sameBasis && ip != i   Phi[(ip,i)] = V   end   # Phi is symmetric in (i,i') only for a same-basis cache
+        end
+    end
+
+    band = 0
+    for  (i,ip)  in  keys(Phi)   band = max(band, abs(i-ip))   end
+
+    return( ScreenedPotentialCache(k, sameBasis, band, Phi) )
+end
+
+
+"""
+`RadialIntegrals.SlaterRkReference(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`
     ... computes the (relativistic) Slater integral
 
         R^k (abcd) = int_0^infty dr int_0^infty ds (P_a P_c + Q_a Q_c) r_<^k / r_>^(k+1) (P_b P_d + Q_b Q_d)
@@ -746,7 +1065,7 @@ end
         of rank k for the four orbitals a, b, c, d, and over the given grid by using an explicit 2-dimensional integration scheme
         but without optimization (WO); a value::Float64 is returned.
 """
-function SlaterRk_2dim_WO(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
+function SlaterRkReference(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
     function ul(r :: Float64, s :: Float64) :: Float64
         if     r <= s    return( r^k/s^(k+1) )
         elseif r > s     return( s^k/r^(k+1) )
@@ -754,35 +1073,18 @@ function SlaterRk_2dim_WO(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Rad
     end
 
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function fs(r :: Int64, s :: Int64) :: Float64
-            return( ul(grid.r[r], grid.r[s]) * ( b.P[s] * d.P[s] + b.Q[s] * d.Q[s] ) )
-        end
-
-        function f(r :: Int64) :: Float64
-        function ff(i :: Int64) :: Float64    return( fs(r, i) )    end
-        return( (a.P[r] * c.P[r] + a.Q[r] * c.Q[r] ) * Math.integrateFitTransform(ff, min(size(b.P, 1), size(d.P, 1)), grid) )
-        end
-
-        return Math.integrateFitTransform(f, min(size(a.P, 1), size(c.P, 1)), grid)
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
-                                            (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]   end
-        end
-        ## println("Test: SlaterRk_2dim(); wa = $wa")
-        return( wa )
-    else
-        error("stop a")
+    mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
+                                        (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]   end
     end
+    ## println("Test: SlaterRk(); wa = $wa")
+    return( wa )
 end
 
-
 """
-`RadialIntegrals.SlaterRk_2dim_Damped(tau::Float64, k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
+`RadialIntegrals.SlaterRkDamped(tau::Float64, k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
     ... computes the (relativistic) Slater integral
 
         R^k (abcd) = int_0^infty dr int_0^infty ds (P_a P_c + Q_a Q_c) r_<^k / r_>^(k+1) (P_b P_d + Q_b Q_d) * exp(-tau * r - tau*s)
@@ -790,7 +1092,7 @@ end
         of rank k for the four orbitals a, b, c, d, and over the given grid by using an explicit 2-dimensional integration scheme; a 
         value::Float64 is returned.
 """
-function SlaterRk_2dim_Damped(tau::Float64, k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
+function SlaterRkDamped(tau::Float64, k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
     function ul(r :: Float64, s :: Float64) :: Float64
         if     r <= s    return( r^k/s^(k+1) )
         elseif r > s     return( s^k/r^(k+1) )
@@ -798,90 +1100,20 @@ function SlaterRk_2dim_Damped(tau::Float64, k::Int64, a::Radial.Orbital, b::Radi
     end
 
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
-                                            (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]  *
-                                            exp(- tau * grid.r[r] - tau * grid.r[s] )                         end
-        end
-        ## println("Test: SlaterRk_2dim(); wa = $wa")
-        return( wa )
-    else
-        error("stop b")
+    mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
+                                        (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]  *
+                                        exp(- tau * grid.r[r] - tau * grid.r[s] )                         end
     end
+    ## println("Test: SlaterRk(); wa = $wa")
+    return( wa )
 end
 
 
 """
-`RadialIntegrals.SlaterRk_new(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, grid::Radial.Grid)`  
-    ... computes the (relativistic) Slater integral
-
-        R^k (abcd) = int_0^infty dr int_0^infty ds (P_a P_c + Q_a Q_c) r_<^k / r_>^(k+1) (P_b P_d + Q_b Q_d)
-
-        of rank k for the four orbitals a, b, c, d, and over the given grid by using a factorized integration scheme; a 
-        value::Float64 is returned.
-"""
-function SlaterRk_new(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)
-    function ul(r :: Float64, s :: Float64) :: Float64
-        if     r <= s    return( r^k/s^(k+1) )
-        elseif r > s     return( s^k/r^(k+1) )
-        end
-    end
-    
-    function rLowUp()  
-        rtuple = Tuple{Int64,Int64}[]
-        for  n = 2:grid.orderGL:100000000
-            if   n > grid.NoPoints   break   end
-            push!( rtuple, (n, n+grid.orderGL-1))
-        end
-        return( rtuple )
-    end
-            
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1));  rtuple = rLowUp()
-        wa = 0.
-        for  (rlow, rup)  in  rtuple
-            for  (slow, sup)  in  rtuple
-                war = 0.;    was = 0.
-                if  sup < rlow
-                    for  r = rlow:rup   if r > mtp_ac   break   end
-                        war = war + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) / grid.r[r]^(k+1) * grid.wr[r]    end
-                    for  s = slow:sup   if s > mtp_bd   break   end
-                        was = was + (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.r[s]^k     * grid.wr[s]    end
-                    wa = wa + war * was
-                elseif  rup < slow
-                    for  r = rlow:rup   if r > mtp_ac   break   end   
-                        war = war + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * grid.r[r]^k     * grid.wr[r]    end
-                    for  s = slow:sup   if s > mtp_bd   break   end   
-                        was = was + (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) / grid.r[s]^(k+1) * grid.wr[s]    end
-                    wa = wa + war * was
-                elseif  rlow == slow  &&  rup == sup
-                    for  r = rlow:rup       if r > mtp_ac   break   end   
-                        for  s = slow:sup   if s > mtp_bd   break   end   
-                            wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
-                                        (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]       end
-                    end
-                else  error("stop b")
-                end
-            end
-        end
-        return( wa )
-    else
-        error("stop a")
-    end
-end
-
-
-"""
-`RadialIntegrals.SlaterRk_DebyeHueckel_2dim(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, 
+`RadialIntegrals.SlaterRkDebyeHueckel(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Orbital, 
                                             grid::Radial.Grid, lambda::Float64)`  
     ... computes the (relativistic) Slater-Debye-Hueckel integral
 
@@ -890,7 +1122,7 @@ end
         of rank k for the four orbitals a, b, c, d, and over the given grid by using an explicit 2-dimensional integration 
         scheme; a value::Float64 is returned.
 """
-function SlaterRk_DebyeHueckel_2dim(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, 
+function SlaterRkDebyeHueckel(k::Int64, a::Radial.Orbital, b::Radial.Orbital, c::Radial.Orbital, d::Radial.Orbital, 
                                     grid::Radial.Grid, lambda::Float64)
                 
     function ul_DH(L::Int64, s::Float64, r::Float64) 
@@ -914,31 +1146,14 @@ function SlaterRk_DebyeHueckel_2dim(k::Int64, a::Radial.Orbital, b::Radial.Orbit
     end
 
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function fs(r :: Int64, s :: Int64) :: Float64
-            return( ul(grid.r[r], grid.r[s]) * ( b.P[s] * d.P[s] + b.Q[s] * d.Q[s] ) )
-        end
-
-        function f(r :: Int64) :: Float64
-        function ff(i :: Int64) :: Float64    return( fs(r, i) )    end
-        return( (a.P[r] * c.P[r] + a.Q[r] * c.Q[r] ) * Math.integrateFitTransform(ff, min(size(b.P, 1), size(d.P, 1)), grid) )
-        end
-
-        return Math.integrateFitTransform(f, min(size(a.P, 1), size(c.P, 1)), grid)
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
-                                            (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]   end
-        end
-        return( wa )
-    else
-        error("stop a")
+    mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd   wa = wa + (a.P[r] * c.P[r] + a.Q[r] * c.Q[r]) * ul(grid.r[r], grid.r[s]) * 
+                                        (b.P[s] * d.P[s] + b.Q[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]   end
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.Vinti(a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)` 
@@ -952,56 +1167,15 @@ end
 """
 function  Vinti(a::Radial.Orbital, b::Radial.Orbital, grid::Radial.Grid)
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        error("stop a")
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ab = min(size(a.P, 1), size(b.P, 1));    kapa = a.subshell.kappa;     kapb = b.subshell.kappa
-        wa = 0.
-        for  r = 2:mtp_ab
-            wc = a.P[r] * b.Pprime[r] - a.P[r] * kapa * (kapa+1) * b.P[r] / (2grid.r[r])  + a.P[r] * kapb * (kapb+1) * b.P[r] / (2grid.r[r])
-            wd = a.Q[r] * b.Qprime[r] + a.Q[r] * kapa * (-kapa+1)* b.Q[r] / (2grid.r[r]) - a.Q[r] * kapb * (-kapb+1) * b.Q[r] / (2grid.r[r])                            
-            wa = wa +  (wc + wd) * grid.wr[r]
-        end
-        return( wa )
-    else
-        error("stop a")
+    mtp_ab = min(size(a.P, 1), size(b.P, 1));    kapa = a.subshell.kappa;     kapb = b.subshell.kappa
+    wa = 0.
+    for  r = 2:mtp_ab
+        wc = a.P[r] * b.Pprime[r] - a.P[r] * kapa * (kapa+1) * b.P[r] / (2grid.r[r])  + a.P[r] * kapb * (kapb+1) * b.P[r] / (2grid.r[r])
+        wd = a.Q[r] * b.Qprime[r] + a.Q[r] * kapa * (-kapa+1)* b.Q[r] / (2grid.r[r]) - a.Q[r] * kapb * (-kapb+1) * b.Q[r] / (2grid.r[r])                            
+        wa = wa +  (wc + wd) * grid.wr[r]
     end
+    return( wa )
 end
-
-
-"""
-`RadialIntegrals.Vlocal(bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, potential::Radial.Potential, grid::Radial.Grid)`  
-    ... computes the (radial) integral for the local potential and for two bpslines, all defined on grid 
-        <bspline1| potential.Zr | bspline2>. -- Here, potential. V must provide the effective charge zz(r) = - V * r.
-"""
-function Vlocal(bspline1::BsplinesN.Bspline, bspline2::BsplinesN.Bspline, potential::Radial.Potential, grid::Radial.Grid)
-    ## if  bspline1.upper <= bspline2.lower  ||  bspline2.upper <= bspline1.lower    return( 0. )   end
-    mtp = min( bspline1.upper, bspline2.upper)
-    n0  = max( bspline1.lower, bspline2.lower)
-    
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-
-        function f(i :: Int64)
-            if  i == 1  wa = - bspline1.bs[i] * potential.Zr[i] * bspline2.bs[i] / (0.3 * grid.r[2]) 
-            else        wa = - bspline1.bs[i] * potential.Zr[i] * bspline2.bs[i] / grid.r[i]   end
-            return( wa )
-        end
-
-        return( Math.integrateTransform(f, n0, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = n0:mtp  
-            if  i == 1  wa = wa - bspline1.bs[i] * potential.Zr[i] * bspline2.bs[i] / (0.3 * grid.r[2]) * grid.wr[i] 
-            else        wa = wa - bspline1.bs[i] * potential.Zr[i] * bspline2.bs[i] / grid.r[i] * grid.wr[i]   end
-        end
-        return( wa )
-    else
-        error("stop a")
-    end
-end
-
 
 """
 `RadialIntegrals.V0(wa::Array{Float64,1}, mtp::Int64, grid::Radial.Grid)` 
@@ -1009,23 +1183,14 @@ end
 """
 function V0(wa::Array{Float64,1}, mtp::Int64, grid::Radial.Grid)
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    return( wa[i] )     end
-        return( Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wb = 0.
-        for  i = 1:mtp   wb = wb + wa[i] * grid.wr[i]   end
-        return( wb )
-    else
-        error("stop a")
-    end
+    wb = 0.
+    for  i = 1:mtp   wb = wb + wa[i] * grid.wr[i]   end
+    return( wb )
 end
 
-
 """
-`RadialIntegrals.W5_Integral(mu::Int64, nu::Int64, orbitala::Radial.Orbital, orbitalc::Radial.Orbital,  
-                                                    orbitalb::Radial.Orbital, orbitald::Radial.Orbital, grid::Radial.Grid)`  
+`RadialIntegrals.W5_Integral(mu::Int64, nu::Int64, a::Radial.Orbital, b::Radial.Orbital,  
+                                                    c::Radial.Orbital, d::Radial.Orbital, grid::Radial.Grid)`  
     ... computes the (radial) integral for four relativistic orbitals: 
                             
         W_5 [ac|bd] = int_0^infty dr   int_0^r ds   [Pa Qc]_{r}  * ( s^nu / r^(nu+1) ) * [Pb Qd]_{s}
@@ -1038,37 +1203,18 @@ function W5_Integral(mu::Int64, nu::Int64, a::Radial.Orbital, b::Radial.Orbital,
     !(mu == 5)   &&   error("mu = 5 required.")
     mtp = min(size(b.P, 1), size(d.P, 1))
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function fs(s :: Int64) :: Float64
-            return( grid.r[s]^nu * ( b.P[s] * d.Q[s] ) )
-        end
-
-        function f(r :: Int64) :: Float64
-        function ff(i :: Int64) :: Float64  return( Math.integrateFitTransform(fs, i, grid) )  end
-            if  r > mtp   return( 0. )
-            else          return(  a.P[r] * c.Q[r] * ff(r) / grid.r[r]^(nu+1) )
+    mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
+    wa = 0.
+    for  r = 2:mtp_ac
+        for  s = 2:mtp_bd   
+            if     s > r  continue  
+            elseif s ==r  wa = wa + (a.P[r] * c.Q[r]) * (grid.r[s]^nu) / (grid.r[r]^(nu+1)) * (b.P[s] * d.Q[s]) * grid.wr[r] * grid.wr[s] / 2.0   
+            else          wa = wa + (a.P[r] * c.Q[r]) * (grid.r[s]^nu) / (grid.r[r]^(nu+1)) * (b.P[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]
             end
         end
-
-        return Math.integrateFitTransform(f, min(size(a.P, 1), size(c.P, 1)), grid)
-    elseif  grid.meshType == Radial.MeshGL()
-        mtp_ac = min(size(a.P, 1), size(c.P, 1));    mtp_bd = min(size(b.P, 1), size(d.P, 1))
-        wa = 0.
-        for  r = 2:mtp_ac
-            for  s = 2:mtp_bd   
-                if     s > r  continue  
-                elseif s ==r  wa = wa + (a.P[r] * c.Q[r]) * (grid.r[s]^nu) / (grid.r[r]^(nu+1)) * (b.P[s] * d.Q[s]) * grid.wr[r] * grid.wr[s] / 2.0   
-                else          wa = wa + (a.P[r] * c.Q[r]) * (grid.r[s]^nu) / (grid.r[r]^(nu+1)) * (b.P[s] * d.Q[s]) * grid.wr[r] * grid.wr[s]
-                end
-            end
-        end
-        return( wa )
-    else
-        error("stop a")
     end
+    return( wa )
 end
-
 
 """
 `RadialIntegrals.Yk_ab(k::Int64, r::Float64, rho_ab::Array{Float64,1}, mtp::Int64, grid::Radial.Grid)`  
@@ -1082,20 +1228,12 @@ end
 """
 function Yk_ab(k::Int64, r::Float64, rho_ab::Array{Float64,1}, mtp::Int64, grid::Radial.Grid)
     
-    # Distinguish the radial integration for different grid definitions
-    if  grid.meshType == Radial.MeshGrasp()
-        function f(i :: Int64)    rl = min(r, grid.r[i]);   rg = max(r, grid.r[i]);   return( rho_ab[i] * rl^k / rg^(k+1) )     end
-        return( r * Math.integrateFitTransform(f, mtp, grid) )
-    elseif  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  i = 2:mtp   
-            rl = min(r, grid.r[i]);   rg = max(r, grid.r[i])
-            wa = wa + rho_ab[i] * rl^k / rg^(k+1) * grid.wr[i]
-        end
-        return( r * wa )
-    else
-        error("stop a")
+    wa = 0.
+    for  i = 2:mtp   
+        rl = min(r, grid.r[i]);   rg = max(r, grid.r[i])
+        wa = wa + rho_ab[i] * rl^k / rg^(k+1) * grid.wr[i]
     end
+    return( r * wa )
 end
 
 end # module

@@ -1,14 +1,14 @@
 
 
 """
-`Empirical.bindingEnergy(Z::Int64, sh::Shell; data::PeriodicTable.AbstractEnergyData=Williams2000() )`  
+`Empirical.bindingEnergy(Z::Int64, sh::Shell; data::PeriodicTable.AbstractEnergyData=XrayDataBooklet() )`  
     ... to estimate the binding) energy of the given shell for a neutral atom; these binding energies 
         are taken from semi-empirical tabulations due to data by different data sets.
         An energy::Float64 > 0. is returned. 
         ...... Perhaps, introduce an optional argument scaleLast::Bool to scale values, if no explicit binding
                energies are available.
 """
-function  bindingEnergy(Z::Int64, sh::Shell; data::PeriodicTable.AbstractEnergyData=Williams2000() )
+function  bindingEnergy(Z::Int64, sh::Shell; data::PeriodicTable.AbstractEnergyData=XrayDataBooklet() )
     if         typeof(data)== PeriodicTable.Williams2000
         wa = PeriodicTable.bindingEnergies_Williams2000(Z)    
     elseif     typeof(data)== PeriodicTable.Larkins1977
@@ -26,26 +26,26 @@ function  bindingEnergy(Z::Int64, sh::Shell; data::PeriodicTable.AbstractEnergyD
     shellIndex[Shell("5s")] = 17;    shellIndex[Shell("5p")] = 19;    shellIndex[Shell("5d")] = 21
     shellIndex[Shell("6s")] = 22;    shellIndex[Shell("6p")] = 24
     
-    # If no useful value is found, issue a warning and return 2.0 eV; this can be readily improved
-    if  sh in [Shell("5g"), Shell("6d"), Shell("6f"), Shell("6g")]  wb = 2.0;  @warn("Not defined shell $sh in data set $data");   return( 0. )   end
+    # If no useful value is found, raise an error; callers such as Empirical.scaledBindingEnergy catch it and
+    # apply a Slater-screened hydrogenic estimate instead. The former behavior -- a silent sentinel of 2.0 eV --
+    # poisoned every Rydberg shell (e.g. H 2s: 2.0 eV instead of the exact 3.4 eV).
+    if  sh in [Shell("5g"), Shell("6d"), Shell("6f"), Shell("6g")]   error("Not defined shell $sh in data set $data")   end
 
-    wb = wa[ shellIndex[sh] ];       
-    if      wb == -1.   wb = 2.0;  @warn("No useful binding energy found for shell $sh in data set $data")   
-    elseif  sh in [Shell("5g"), Shell("6d"), Shell("6f"), Shell("6g")]  wb = 2.0;  @warn("Not defined shell $sh in data set $data")   
-    end
+    wb = wa[ shellIndex[sh] ]
+    if  wb == -1.   error("No useful binding energy found for shell $sh in data set $data")   end
     wc = Defaults.convertUnits("energy: from eV to atomic", wb)
-    
+
     return( wc )
 end
 
 
 """
-`Empirical.bindingEnergy(Z::Int64, subsh::Subshell; data::PeriodicTable.AbstractEnergyData=Williams2000() )`  
+`Empirical.bindingEnergy(Z::Int64, subsh::Subshell; data::PeriodicTable.AbstractEnergyData=XrayDataBooklet() )`  
     ... to estimate the binding) energy of the given subshell for a neutral atom; these binding energies 
         are taken from semi-empirical tabulations due to data by different data sets.
         An energy::Float64 > 0. is returned.
 """
-function  bindingEnergy(Z::Int64, subsh::Subshell; data::PeriodicTable.AbstractEnergyData=Williams2000() )
+function  bindingEnergy(Z::Int64, subsh::Subshell; data::PeriodicTable.AbstractEnergyData=XrayDataBooklet() )
     if         typeof(data)== PeriodicTable.Williams2000
         wa = PeriodicTable.bindingEnergies_Williams2000(Z)    
     elseif     typeof(data)== PeriodicTable.Larkins1977
@@ -81,20 +81,22 @@ end
   
 
 """
-`Empirical.bindingEnergy(Z::Int64, sh::Shell, conf::Configuration; 
-                         data::PeriodicTable.AbstractEnergyData=Williams2000())`  
-    ... to evaluate the binding) energy of a shell electron if part of the given configuration. 
-        This procedure assumes that each missing electron (compared with the neutral system) adds 0.3 / n Hartree
-        to the binding energy, where n is the principal quantum number of the shell. It also requires that
-        shell is occupied in the given configuration. An energy::Float64 is returned.
+`Empirical.bindingEnergy(Z::Int64, subsh::Subshell, conf::Configuration;
+                         data::PeriodicTable.AbstractEnergyData=XrayDataBooklet())`
+    ... to evaluate the binding energy of a subshell electron if part of the given configuration.
+        The tabulated binding energies refer to the neutral atom; this procedure assumes that each missing
+        electron (compared with the neutral system) adds 0.3 / n Hartree to the binding energy, where n is
+        the principal quantum number of the subshell. It also requires that the shell associated with subsh
+        is occupied in the given configuration. An energy::Float64 is returned.
 """
-function  bindingEnergy(Z::Int64, subsh::Subshell, conf::Configuration; 
-                        data::PeriodicTable.AbstractEnergyData=Williams2000())
+function  bindingEnergy(Z::Int64, subsh::Subshell, conf::Configuration;
+                        data::PeriodicTable.AbstractEnergyData=XrayDataBooklet())
+    sh = Shell(subsh.n, Basics.subshell_l(subsh))
     if !(sh in keys(conf.shells))   error("Shell $sh not part of $conf")   end
-    wc = Empirical.bindingEnergy(Z, sh, data=data)
+    wc = Empirical.bindingEnergy(Z, subsh, data=data)
     nm = Z - conf.NoElectrons
-    if  nm  >  0   wc = wc + 0.3 / sh.n   end
-    
+    if  nm  >  0   wc = wc + nm * 0.3 / subsh.n   end
+
     return( wc )
 end
 
@@ -109,7 +111,7 @@ function ionizationPotential(Z::Int64, conf::Configuration)
         error("Ionization potential for non-standard filling required; conf = $conf")
     end
 
-    wa = PeriodicTable.ionizationPotentials_Nist2025(Z);  @show wa
+    wa = PeriodicTable.ionizationPotentials_Nist2025(Z)
     wi = Z - conf.NoElectrons
     wb = wa[ wi + 1 ]
     wc = Defaults.convertUnits("energy: from eV to atomic", wb)
@@ -119,15 +121,16 @@ end
 
 
 """
-`Empirical.meanCharge(Z::Int64, subshell::Subshell, conf::Configuration)`  
+`Empirical.meanCharge(Z::Int64, subshell::Subshell, conf::Configuration)`
     ... to estimate the mean charge  Z as seen by an electron in subshell for an ion with the given configuation.
-        An charge::Float64 is returned.
+        This charge is obtained by inverting the hydrogenic relation bE = Z^(eff)^2 / (2 n^2) for the binding
+        energy bE > 0. of the given subshell, i.e. Z^(eff) = n sqrt(2 bE). A charge::Float64 is returned.
 """
 function meanCharge(Z::Int64, subshell::Subshell, conf::Configuration)
-    we = Empirical.bindingEnergy(Z, subshell, conf)
-    Z  = sqrt( -2 * subshell.n^2 * we)
-    
-    return( Z )
+    we   = Empirical.bindingEnergy(Z, subshell, conf)
+    Zeff = sqrt( 2 * subshell.n^2 * we )
+
+    return( Zeff )
 end
 
 
@@ -141,8 +144,7 @@ end
         
         Note: This is an estimate of the total energy which need not to be so accurate.
 """
-function  totalEnergy(Z::Int64, conf::Configuration; data::PeriodicTable.AbstractEnergyData = PeriodicTable.Williams2000() )
-    ##x @show Z, conf, data
+function  totalEnergy(Z::Int64, conf::Configuration; data::PeriodicTable.AbstractEnergyData = PeriodicTable.XrayDataBooklet() )
     if         typeof(data) == PeriodicTable.Nist2025
         wa = PeriodicTable.ionizationPotentials_Nist2025(Z) 
         # Use the ionization potentials to make a realistic estimate of the total energy ... and return the value

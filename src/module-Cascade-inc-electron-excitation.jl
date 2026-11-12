@@ -2,61 +2,90 @@
 # Functions and methods for scheme::Cascade.ElectronExcitationSchem computations
 
 """
-`Cascade.perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation)`  
-    ... to set-up and perform an electron-excitation cascade computation that accounts for the direct and resonant part. 
-        Apart from the direct electron-impact excitation of the atom, it enables one to treat the (resonant) dielectronic
-        capture with subsequent electron emission (re-autoionization) in the cascade. Typical electron-excitation
-        properties are energy-dependent collision strengths, impact-excitation cross sections, effective collision strengths,
-        and several others.
+`Cascade.perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true,
+                 outputDirectory::String="")`
+    ... sets up and performs an electron-excitation cascade computation. The scheme covers two channels and selects them by
+        its own processes list: Basics.ImpactExc() requests the DIRECT electron-impact excitation, and Basics.ImpactExcAuto()
+        the RESONANT part, i.e. dielectronic capture followed by re-autoionization. Typical properties are energy-dependent
+        collision strengths, impact-excitation cross sections and effective collision strengths. A results::Dict{String,Any}
+        is returned if output=true, and nothing otherwise; with outputToFile=true the same dictionary is written to a .jld
+        file for use in a subsequent cascade simulation.
 
-`Cascade.perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation; output=true, outputToFile::Bool=true)`   
-    ... to perform the same but to return the complete output in a dictionary that is written to disk and can be used in 
-        subsequent cascade simulation. The particular output depends on the specifications of the cascade.
+        The direct channel hands the scheme's own configuration -- shells, l-values, free-electron grid and energy shift -- to a
+        Cascade.ImpactExcitationScheme, and raises if the shell lists are empty rather than failing further in.
+
+        BOTH CHANNELS RUN since 16-Aug-2026. The resonant one delegates to Cascade.perform(::DielectronicCaptureScheme) and collects
+        AutoIonization.Line's, a capture being the time reverse of an Auger transition. Until that date this function could not run at all:
+        it read scheme.calcDirect, scheme.calcResonant and scheme.multipoles, none of which are fields of
+        Cascade.ElectronExcitationScheme, so it raised on the first line that touched the scheme.
 """
-function perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)
+function perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true, outputDirectory::String="")
     if  output    results = Dict{String, Any}()    else    results = nothing    end
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
+    # The two channels are selected by the scheme's own processes list; there are no calcDirect/calcResonant fields.
+    calcDirect   = Basics.ImpactExc()      in  scheme.processes
+    calcResonant = Basics.ImpactExcAuto()  in  scheme.processes
+    if  !calcDirect  &&  !calcResonant
+        error("Cascade.perform(::ElectronExcitationScheme): the scheme requests neither channel.  Put " *
+              "Basics.ImpactExc() into its processes for the direct electron-impact excitation, and/or " *
+              "Basics.ImpactExcAuto() for the resonant (dielectronic capture with re-autoionization) part; " *
+              "the scheme currently carries $(scheme.processes).")
+    end
     #
     # Perform the two cascade computations for the electron-impact and dielectronic-capture with re-autoionzation separately, 
     # even if this requires to run the computation of the initial multiplet twice.
-    if  scheme.calcDirect
+    if  calcDirect
         println("\n> Direct impact-excitation part of the electron-excitation cascade computations")
         println(  "  =============================================================================  \n")
-        ieScheme = Cascade.ImpactExcitationScheme(scheme.multipoles)
+        # The direct channel IS an impact excitation, so the scheme hands its configuration straight over.
+        if  isempty(scheme.fromShells)  ||  isempty(scheme.toShells)
+            error("Cascade.perform(::ElectronExcitationScheme): the direct channel needs both fromShells and " *
+                  "toShells; the scheme carries fromShells = $(scheme.fromShells) and toShells = " *
+                  "$(scheme.toShells).  Without them the impact-excitation cascade has nothing to excite " *
+                  "between and fails further in with an unrelated message.")
+        end
+        ieScheme = Cascade.ImpactExcitationScheme(scheme.fromShells, scheme.toShells, scheme.electronEnergies,
+                                                  scheme.lValues, scheme.NoFreeElectronEnergies,
+                                                  scheme.maxFreeElectronEnergy, scheme.electronEnergyShift)
         ieComp   = Cascade.Computation(comp, scheme=ieScheme)
         ieOut    = Cascade.perform(ieScheme, ieComp; output=true, outputToFile=false)
     end
     #
     #
-    if  scheme.calcResonant
+    if  calcResonant
         println("\n> Resonant dielectronic capture part of the electron-excitation cascade computations")
         println(  "  ==================================================================================  \n")
-        dcScheme = Cascade.DielectronicCaptureScheme(scheme.multipoles)
+        # The capture lines are AutoIonization.Line's: a dielectronic capture is computed as the time reverse
+        # of an Auger transition, so there is no separate DielectronicCapture module and none is needed.
+        dcScheme = Cascade.DielectronicCaptureScheme(scheme.maxExcitationEnergy, scheme.electronEnergyShift,
+                                                     scheme.NoExcitations, scheme.excitationFromShells,
+                                                     scheme.excitationToShells, scheme.intoShells)
         dcComp   = Cascade.Computation(comp, scheme=dcScheme)
         dcOut    = Cascade.perform(dcScheme, dcComp; output=true, outputToFile=false)
     end
     #
     # Collect the output from the computations above if required
     data = Cascade.Data[]
-    if output   &&   scheme.calcDirect 
+    if output   &&   calcDirect 
         results = Base.merge( results, Dict("name"                          => comp.name) ) 
         results = Base.merge( results, Dict("cascade scheme"                => comp.scheme) ) 
-        results = Base.merge( results, Dict("initial multiplets:"           => ieOut["initial multiplets:"]) )    
-        results = Base.merge( results, Dict("impact-excited multiplets:"    => ieOut["generated multiplets:"]) )    
-        results = Base.merge( results, Dict("impact-excitation lines:"      => ieOut["impact-excitation lines:"]) )
-        push!(data, Cascade.Data{ImpactExcitation.Line}(ieOut["impact-excitation lines:"]) )
+        results = Base.merge( results, Dict("initial multiplets:"           => ieOut[ResultKeys.InitialMultiplets]) )    
+        results = Base.merge( results, Dict("impact-excited multiplets:"    => ieOut[ResultKeys.GeneratedMultiplets]) )    
+        results = Base.merge( results, Dict("impact-excitation lines:"      => ieOut[ImpactExcitation.Settings]) )
+        push!(data, Cascade.Data{ImpactExcitation.Line}(ieOut[ImpactExcitation.Settings]) )
         results = Base.merge( results, Dict("cascade data:"                 => data ) )
     end
     #
-    if output   &&   scheme.calcResonant 
-        results = Base.merge( results, Dict("name"                          => comp.name) ) 
-        results = Base.merge( results, Dict("cascade scheme"                => comp.scheme) ) 
-        results = Base.merge( results, Dict("initial multiplets:"           => dcOut["initial multiplets:"]) )    
-        results = Base.merge( results, Dict("dielectronic multiplets:"      => dcOut["generated multiplets:"]) )    
-        results = Base.merge( results, Dict("dielectronic-capture lines:"   => dcOut["dielectronic-capture lines:"]) )
-        push!(data, Cascade.Data{DielectronicCapture.Line}(dcOut["dielectronic-capture lines:"]) )
+    if output   &&   calcResonant
+        results = Base.merge( results, Dict("name"                          => comp.name) )
+        results = Base.merge( results, Dict("cascade scheme"                => comp.scheme) )
+        results = Base.merge( results, Dict("initial multiplets:"           => dcOut[ResultKeys.InitialMultiplets]) )
+        results = Base.merge( results, Dict("dielectronic multiplets:"      => dcOut[ResultKeys.GeneratedMultiplets]) )
+        results = Base.merge( results, Dict("dielectronic-capture lines:"   => dcOut[ResultKeys.DielectronicCaptureLines]) )
+        push!(data, Cascade.Data{AutoIonization.Line}(dcOut[ResultKeys.DielectronicCaptureLines]) )
         results = Base.merge( results, Dict("cascade data:"                 => data ) )
     end
+
     #
     #  Write out the result to file to later continue with simulations on the cascade data
     if  outputToFile
@@ -65,8 +94,8 @@ function perform(scheme::ElectronExcitationScheme, comp::Cascade.Computation; ou
                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file.")
         if  printSummary   println(iostream, "\n* Write all results to disk; use:\n   JLD2.save(''$filename'', results) \n   using JLD2 " *
                                                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file." )      end      
-        JLD2.@save filename results
+        Cascade.writeDataFile(filename, results)
     end
     
-    return( results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end

@@ -15,7 +15,11 @@ include("module-Basics-inc-first.jl")
 include("module-Basics-inc-abstract.jl")
 include("module-Basics-inc-second.jl")
 
-export  add, analyze, compute, diagonalize, estimate, generate, interpolate, integrate, modify, perform, provide, tabulate       
+export  add, analyze, compute, diagonalize, generate, integrate, perform, recast, run,
+        tabulate       
+
+export  checkConfigurations,  displayConfiguration,  displayConfigurations,  extractConfiguration,  extractConfigurations,  
+        extractFromConfiguration,  extractFromConfigurations,  generateConfigurations
         
 # Functions/methods that are later added to the module Basics
 function add                                                    end
@@ -23,19 +27,19 @@ function addZerosToCsfR                                         end
 function analyze                                                end
 function analyzeConvergence                                     end
 function analyzeGrid                                            end
+function checkConfigurations                                    end
 function compute                                                end
 function computeDensity                                         end
+function densityAtNucleus                                       end
 function computeDiracEnergy                                     end
 function computeMeanSubshellOccupation                          end
 function computeMultipletForGreenApproach                       end
 function computePotential                                       end
-function computeScfCoefficients                                 end
 function determineEnergySharings                                end
 function determineHoleShells                                    end
 function determineMeanEnergy                                    end
 function determineNearestPoints                                 end
 function determineNonorthogonalShellOverlap                     end
-function determineParity                                        end
 function determinePolarizationLambda                            end
 function determinePolarizationVector                            end
 function determineSelectedLines                                 end
@@ -43,47 +47,35 @@ function determineSelectedPathways                              end
 function diagonalize                                            end
 function diracDelta                                             end
 function display                                                end
+function displayConfigurationThemes                             end
+function displayConfiguration                                   end
+function displayConfigurations                                  end
 function displayLevels                                          end
 function displayMeanEnergies                                    end
-function displayMeshes                                          end
-function displayOpenShells                                      end
 function displayOrbitalOverlap                                  end
 function displayOrbitalProperties                               end
-function excludeConfigurations                                  end
-function excludeDoubles                                         end
 function expandOrbital                                          end
-function extractLeadingConfiguration                            end
-function extractLeadingConfigurationR                           end
+function extractConfiguration                                   end
+function extractConfigurations                                  end
+function extractFromConfiguration                               end
+function extractFromConfigurations                              end
 function extractMeanEnergy                                      end
 function extractMeanOccupation                                  end
-function extractMultiplicity                                    end
-function extractNoOpenShells                                    end
 function extractNonrelativisticShellList                        end
-function extractNonrelativisticConfigurations                   end
-function extractNonrelativisticConfigurationFromCsfR            end
-function extractOpenShells                                      end
-function extractOpenSubshells                                   end
-function extractOpenShellQNfromCsfNR                            end
 function extractOpenShellQNfromCsfR                             end
-function extractRelativisticConfigurations                      end
 function extractRelativisticConfigurationFromCsfR               end
 function extractRelativisticSubshellList                        end
 function extractRydbergSubshellList                             end
 function extractShellList                                       end
-function extractShellOccupationDifference                       end
 function extractShellOccupationFromCsfR                         end
 function extractSubshellList                                    end
 function extractValenceShell                                    end
 function FermiDirac                                             end
+function fixEigenvectorPhase!                                   end
 function generate                                               end
 function generateBasis                                          end
-function generateConfigurationRs                                end
 function generateConfigurations                                 end
 function generateConfigurationsForExcitationScheme              end
-function generateConfigurationsWithAdditionalElectron           end
-function generateConfigurationsWithAdditionalElectrons          end
-function generateConfigurationsWithElectronCapture              end
-function generateConfigurationsWithElectronLoss                 end
 function generateCsfRs                                          end
 function generateFieldCoordinates                               end
 function generateLevelWithExtraElectron                         end
@@ -93,19 +85,19 @@ function generateLevelWithExtraTwoElectrons                     end
 function generateLevelWithSymmetryReducedBasis                  end
 function generateMeshCoordinates                                end
 function generateOrbitalsForBasis                               end
-function generateOrbitalsForPotential                           end
+function printRasStepDiagnostic                                 end
 function generateOrbitalSuperposition                           end
 function generateShellList                                      end
 function generateSubshellList                                   end
 function generateSpectrumLorentzian                             end
-function generateSpectrumGaussian                               end
 function hasSubshell                                            end
+"""
+`Basics.integrate()`
+    ... generic function for the numerical integration of a (radial) function on a grid; see the methods of
+        Basics.integrate for the integration rules that are available.
+"""
 function integrate                                              end
-function integrateOnGridNewtonCotes                             end
-function integrateOnGridSimpsonRule                             end
-function integrateOnGridTrapezRule                              end
 function interpolateOnGridGrasp92                               end
-function interpolateOnGridTrapezRule                            end
 function isSimilar                                              end
 function isSymmetric                                            end
 function isStandardSubshellList                                 end
@@ -113,10 +105,9 @@ function isViolated                                             end
 function isZero                                                 end
 function lastPoint                                              end
 function merge                                                  end
-function modifyLevelEnergies                                    end
 function modifyLevelMixing                                      end
 function perform                                                end
-function performSCF                                             end
+function typedKeyFor                                            end
 function performCI                                              end
 function plot                                                   end
 function read                                                   end
@@ -126,16 +117,17 @@ function readOrbitalFileGrasp92                                 end
 function readMixFileRelci                                       end
 function readMixingFileGrasp18                                  end
 function recast                                                 end
+function recommendedGrid                                        end
+function run                                                    end
 function selectLevel                                            end
 function selectLevelPair                                        end
 function selectLevelTriple                                      end
 function selectSymmetry                                         end
 function shiftTotalEnergies                                     end
+function slaterScreening                                        end
 function sortByEnergy                                           end
 function subshellStateString                                    end
 function tabulate                                               end
 function tabulateKappaSymmetryEnergiesDirac                     end
-function tools                                                  end
-function yesno                                                  end
 
 end  ## module

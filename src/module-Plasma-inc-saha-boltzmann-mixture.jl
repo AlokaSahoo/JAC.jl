@@ -103,24 +103,6 @@ end
 
 
 """
-`Plasma.computeDominantIsotopeEnergy(isoClass::IsotopeClass)`  
-    ... computes the (dominant) energy of all ions of the given isotope class, i.e. an energy at which
-        ionic levels contributes most to the overall mixture; this (dominant) energy is utilized to make 
-        the computation more stable; an energy::Float64 is returned.   ... Not used in the present code.
-"""
-function computeDominantIsotopeEnergy(isoClass::IsotopeClass)
-    energy = 0.;   nDensity = 0.
-    for  ionClass  in  isoClass.ionClasses
-        for  level  in  ionClass.ionLevels
-            if  level.nDensity > nDensity    nDensity = level.nDensity;    energy = level.energy    end
-        end
-    end
-    
-    return ( energy )
-end
-
-
-"""
 `Plasma.computeElectronChemicalPotential(temp::Float64, ne::Float64)`  
     ... computes the electron chemical potential for the given electron (number) density; a chemMu::Float64 is returned.
 """
@@ -152,18 +134,6 @@ end
 
 
 """
-`Plasma.computeIonicLevelChemicalPotential(temp::Float64, ionLevel::IonicLevel, Lambda::Float64)`  
-    ... computes the ionic-level chemical potential for the given level (number) density; 
-        a chemMu::Float64 is returned.   ... Not used in the present code.
-"""
-function computeIonicLevelChemicalPotential(temp::Float64, ionLevel::IonicLevel, Lambda::Float64)
-    chemMu = - temp * log( ionLevel.g / (ionLevel.nDensity * Lambda^3) ) + ionLevel.energy
-    
-    return ( chemMu )
-end
-
-
-"""
 `Plasma.computeIsotopicPartitionFunction(temp::Float64, isoClass::IsotopeClass, chemMuE::Float64, dominantEnergy::Float64)`  
     ... computes the (unnormalized) partition function of the given isotopic class in terms of a summation 
         over all charge states and ionic levels of these class. A pf::Float64 is returned.
@@ -172,18 +142,55 @@ function computeIsotopicPartitionFunction(temp::Float64, isoClass::IsotopeClass,
     beta = 1 / temp;    pf = 0.
     for  ionClass in isoClass.ionClasses
         for level in ionClass.ionLevels
-            pf = pf + level.g * exp( -beta * (chemMuE * ionClass.q + level.energy - dominantEnergy) ) 
+            pf = pf + level.g * exp( -beta * (chemMuE * ionClass.q + level.energy - dominantEnergy) )
         end
     end
-        
+
     return ( pf )
 end
 
-#==  20.7.24
+
+"""
+`Plasma.computeIsotopicPartitionFunctionBound(temp::Float64, isoClass::IsotopeClass, chemMuE::Float64,
+                                                dominantEnergy::Float64, groundE::Dict{Int64,Float64},
+                                                deltaIp::Dict{Int64,Float64}, qMax::Int64)`
+    ... the IPD-aware sibling of `Plasma.computeIsotopicPartitionFunction`, needed once an ionization-
+        potential-depression model removes levels from the ensemble (item 97): sums over only the levels
+        that pass the SAME bound/unbound test `Plasma.solveSahaBoltzmannEquilibrium` applies before computing
+        each level's own number density --
+        `level.energy == 0. || ionClass.q == qMax || level.energy + deltaIp[ionClass.q] < groundE[ionClass.q+1]`.
+        A level the IPD model removes must also be removed from the normalizing sum every surviving level's
+        population is divided by, or the population it carried is destroyed rather than transferred to the
+        next charge state -- the half of item 97 that flipping `deltaIp`'s sign alone does not fix. A
+        pf::Float64 is returned.
+"""
+function computeIsotopicPartitionFunctionBound(temp::Float64, isoClass::IsotopeClass, chemMuE::Float64,
+                                                 dominantEnergy::Float64, groundE::Dict{Int64,Float64},
+                                                 deltaIp::Dict{Int64,Float64}, qMax::Int64)
+    beta = 1 / temp;    pf = 0.
+    for  ionClass in isoClass.ionClasses
+        for  level in ionClass.ionLevels
+            isBound = level.energy == 0.                                       ||
+                      ionClass.q    == qMax                                    ||
+                      level.energy + deltaIp[ionClass.q] < groundE[ionClass.q+1]
+            isBound   &&   ( pf = pf + level.g * exp( -beta * (chemMuE * ionClass.q + level.energy - dominantEnergy) ) )
+        end
+    end
+
+    return ( pf )
+end
+
+#==  DISABLED 20.7.24, kept as the record of an approach: an isotope-resolved number density for the
+##   Saha-Boltzmann mixture.  Superseded in practice by the ion-class treatment used below; retained
+##   because the isotopic route may be wanted again.  Labelled 13-Aug-2026.
 """
 `Plasma.computeIsotopicNumberDensity(temp::Float64, isoClass::IsotopeClass)`  
     ... computes the (number) density n (Z,A) of a given isotope class at temperature T;
         an nDensity::Float64 is returned.   ... Not used in the present code.
+
+        NO CALLER IN `src/`, and the docstring already said 'not used in the present code' without saying who WOULD use
+        it: a user assembling an isotopic mixture by hand, who needs the number density of one isotope class at a given
+        temperature before handing it to the Saha-Boltzmann machinery. The mixture drivers take densities as input.
 """
 function computeIsotopicNumberDensity(temp::Float64, isoClass::IsotopeClass)
     nDensity = 0.
@@ -284,13 +291,10 @@ function determineIonicClasses(scheme::Plasma.SahaBoltzmannScheme, temp::Float64
         subshells  = Basics.extractRelativisticSubshellList([groundConf])
         nMax = 0;    for  subsh in subshells    if  subsh.n  > nMax  nMax = subsh.n                                          end   end
         kMax = 0;    for  subsh in subshells    if  subsh.n == nMax  &&  abs(subsh.kappa) > abs(kMax)   kMax = subsh.kappa   end   end
-        ##x @show  groundConf, nMax, kMax
-        bindingEn  = Semiempirical.estimate("binding energy", nZ, Subshell(nMax,kMax), useLarkins=true )
+        bindingEn  = Semiempirical.estimate(EstimateBindingEnergyLarkins1977(), nZ, Subshell(nMax,kMax))
         if  abs(bindingEn - temp)  <  deltaIp   deltaIp = abs(bindingEn - temp);   closestNe = ne   end
     end
     
-    ##x neMin = round(Int, closestNe - scheme.NoChargeStates/2 + 0.6);   if  neMin < 0   neMin = 0   end
-    ##x @show  deltaIp, closestNe, neMin
     neMin = max(0, nZ-scheme.qRange.stop);   neMax = nZ-scheme.qRange.start
     for  ne = neMin:neMax
         if  ne > nZ   continue    end
@@ -328,7 +332,6 @@ function determineInitialIonDensitiesPropterties(scheme::Plasma.SahaBoltzmannSch
     
     # Compute factor to re-normalize the partition function
     nDensityTotal = Plasma.computeIonLevelNumberDensityTotal(isoClass)
-    ##x @show isotopicDensity, isotopicDensity / nDensityTotal
     pfIsoClass    = Plasma.computeIsotopicPartitionFunction(temp, isoClass, chemMuE, dominantEnergy) 
     pfIsoClass    = pfIsoClass * isotopicDensity / nDensityTotal
     
@@ -352,22 +355,7 @@ end
 
 
 """
-`Plasma.determineIonNumberDensity(rho::Float64, mixture::Array{IsotopicFraction,1})`  
-    ... determines the ion number density for a given matter density [g/cm^3] and mixture of isotopic fractions.
-        It re-normalizes the isotopic fractions and performs the conversion by taking the mass of ^12C as the basis.
-        A ion number density ni [ions/a_o^3] is returned.
-"""
-function determineIonNumberDensity(rho::Float64, mixture::Array{IsotopicFraction,1})
-    xTotal = 0.;   Axtotal = 0.
-    for  isoFraction in mixture    xTotal = xTotal + isoFraction.x;    Axtotal = Axtotal + isoFraction.A * isoFraction.x   end 
-    factor = (0.529_177_210_67e-8)^3 * 12 / 1.66054e-24
-    ni     = rho * factor * xTotal / Axtotal
-    return( ni )
-end
-
-
-"""
-`Plasma.determineIpShifts(pm::Basics.AbstractPlasmaModel, temp::Float64, ni::Float64, isotopeClass::IsotopeClass)`  
+`Plasma.determineIpShifts(pm::Basics.AbstractPlasmaModel, temp::Float64, ni::Float64, isoClass::IsotopeClass)`  
     ... determines the ground-state energie as well as the shifts Delta I_p (q --> q+1) for all charge states q = 0 ... qmax 
         of the ions defined by isotopeClass. The procedure assumes that the plasma model pm brings in the current plasma
         parameters. In some models, the ion number density ni is required as well.
@@ -376,8 +364,6 @@ end
 """
 function determineIpShifts(pm::Basics.AbstractPlasmaModel, temp::Float64, ni::Float64, isoClass::IsotopeClass)
     groundE = Dict{Int64,Float64}();     deltaIp = Dict{Int64,Float64}()
-    ##x qMax   = 0;   for  ionClass  in  isotopeClass.ionClasses   qMax   = max(qMax, ionClass.q)   end
-    ##x for  q = 0:qMax   groundE[q] = 0.;   deltaIp[q] = 0.   end 
     
     # Determine the ground-state energies of the different charge states
     for ionClass  in  isoClass.ionClasses   groundE[ionClass.q] = ionClass.groundEnergy   end
@@ -388,21 +374,65 @@ function determineIpShifts(pm::Basics.AbstractPlasmaModel, temp::Float64, ni::Fl
     elseif  typeof(pm) == Basics.WithoutAutoionizationModel
         for ionClass  in  isoClass.ionClasses   deltaIp[ionClass.q] = 0.       end
     elseif  typeof(pm) == Basics.DebyeHueckelModel
-        for ionClass  in  isoClass.ionClasses   
-            deltaIp[ionClass.q] = - (ionClass.q + 1)^2 / pm.debyeLength    
+        # Debye-Hueckel IPD, linear in the ionic charge:  Delta I(q) = +(q+1) / lambda_D   [Hartree, a_o units]
+        # POSITIVE, per item 97: a depression RAISES a bound level's energy towards the continuum, and the
+        # consuming test at solveSahaBoltzmannEquilibrium (energy + deltaIp < groundE[q+1]) needs deltaIp
+        # positive for a larger depression to make that test HARDER to pass, i.e. to actually unbind a level.
+        for ionClass  in  isoClass.ionClasses
+            deltaIp[ionClass.q] = (ionClass.q + 1) / pm.debyeLength
         end
-    elseif  typeof(pm) == Basics.IonSphereModel 
+    elseif  typeof(pm) == Basics.IonSphereModel
         for ionClass  in  isoClass.ionClasses
             R = ( 3 * ionClass.q / (4pi * pm.electronDensity) )^(1/3)
-            deltaIp[ionClass.q] = - 3/2 * ionClass.q / R
+            deltaIp[ionClass.q] = 3/2 * ionClass.q / R
         end
     elseif  typeof(pm) == Basics.StewartPyattModel
+        # Stewart & Pyatt (1966), Astrophys. J. 144, 1203:
+        #   Delta I(q) = +[3(q+1)/(2 R0)] * { [1+(lambda_D/R0)^3]^(2/3) - (lambda_D/R0)^2 },   R0 = (3/(4 pi ni))^(1/3)
+        # R0 is the (charge-independent) ion-sphere radius from the total ion density ni; pm.lambda is the Debye
+        # length lambda_D determined together with the DebyeHueckelModel screening density in updateIpdPlasmaModel.
+        # POSITIVE, per item 97 -- see the DebyeHueckelModel comment above for why.
         for ionClass  in  isoClass.ionClasses
-            R  = ( 3 * ionClass.q / (4pi * pm.electronDensity) )^(1/3)
-            wa = ( (R / pm.lambda)^3 + 1. )^(2/3)
-            wb = - 1 / (2temp) / (pm.electronDensity / ni + 1.) 
-            deltaIp[ionClass.q] = wb * (wa - 1.) 
+            R0    = ( 3 / (4pi * ni) )^(1/3)
+            ratio = pm.lambda / R0
+            deltaIp[ionClass.q] = 3 * (ionClass.q + 1) / (2*R0) * ( (1. + ratio^3)^(2/3) - ratio^2 )
         end
+    elseif  typeof(pm) == Basics.EckerKroellModel
+        # Ecker & Kroell (1963), Phys. Fluids 6, 62.  Their Eqs. (56)/(57) are multi-component; reduced to one ion
+        # species the bracket [(q+1)^2 - q^2 + 1] collapses to 2(q+1), leaving
+        #   Delta I(q) = +(q+1) / lambda_D        for  n <= n_cr       ... Eq. (56), and identical to DebyeHueckelModel
+        #   Delta I(q) = +cEK (q+1) / r_0         for  n >  n_cr       ... Eq. (57)
+        # POSITIVE, per item 97 -- see the DebyeHueckelModel comment above for why.
+        # The switch is their critical density, Eq. (47).  ABOVE it the screening length is r_0, the mean separation of
+        # ALL free particles (their Eq. 23 counts electrons AND ions), and NOT the ion-sphere radius R0 that
+        # Stewart-Pyatt uses -- which is the whole of why this model predicts a markedly larger depression at high
+        # density.  Note r_0 = R0 / (1+Zbar)^(1/3), the form in which the secondary literature usually writes it.
+        nFree = pm.electronDensity + ni
+        r0    = ( 3 / (4pi * nFree) )^(1/3)
+        # The paper's e_(beta max) is the LARGEST IONIC CHARGE PRESENT, not the atomic number;  qMax is taken over this
+        # isotopic class, the same idiom the caller uses.  For a mixture of elements the paper's own quantity is the
+        # maximum over the WHOLE plasma, so a multi-element run switches branches at a slightly too high density here.
+        qMax  = 0;   for ionClass  in  isoClass.ionClasses   qMax = max(qMax, ionClass.q)   end
+        # qMax = 0 is a gas of neutrals: no charged component, no critical density, and the Debye branch is the one.
+        if  qMax == 0   ncr = Inf   else   ncr = 3 / (4pi) * (temp / qMax^2)^3   end
+        #
+        if  nFree <= ncr
+            for ionClass  in  isoClass.ionClasses   deltaIp[ionClass.q] = (ionClass.q + 1) / pm.lambda            end
+            sbranch = "weak-coupling (Debye-Hueckel) branch, Eq. (56)"
+        else
+            for ionClass  in  isoClass.ionClasses   deltaIp[ionClass.q] = pm.cEK * (ionClass.q + 1) / r0          end
+            sbranch = "strong-coupling (all-free-particle) branch, Eq. (57)"
+        end
+        # cEK is PRINTED with its meaning, not left as a bare number: 1.0 and the paper's own 1.73 differ by 73 % in
+        # the shift, so a user must see which one produced their result without reading the source.
+        if      pm.cEK == 1.0    scek = "1.0, the value that reproduces the LCLS measurement (Ecker & Kroell's own is 1.73)"
+        elseif  pm.cEK == 1.73   scek = "1.73, Ecker & Kroell's own value (the modern literature uses 1.0)"
+        else                     scek = "$(pm.cEK), neither the modern 1.0 nor the paper's 1.73 -- the caller's own choice"
+        end
+        qLo = minimum(ionClass.q for ionClass in isoClass.ionClasses)
+        println(">> Ecker-Kroell IPD:  cEK = $scek;")
+        println("     n = $nFree, n_cr = $ncr  (qMax = $qMax)  ->  $sbranch;")
+        println("     Delta I = $(deltaIp[qLo]) .. $(deltaIp[qMax]) Hartree for q = $qLo .. $qMax.")
     else
         error("Undefined plasma model.")
     end
@@ -696,9 +726,7 @@ function  perform(scheme::Plasma.SahaBoltzmannScheme, computation::Plasma.Comput
     for  isoClass  in  isoClasses
         newIsoClass = Plasma.readEvaluateIonLevelData(scheme, isoClass, computation.grid)
         newIsoClass = Plasma.restrictIonLevelData(scheme, newIsoClass) 
-        ##x @show "Lambda_e", sqrt(2pi) / sqrt(computation.settings.temperature)
         newIsoClass = Plasma.determineInitialIonDensitiesPropterties(scheme, computation.settings.temperature, totalIonDensity, newIsoClass)
-        ##x @show newIsoClass
         push!(newIsoClasses, newIsoClass)  
     end
 
@@ -709,11 +737,27 @@ function  perform(scheme::Plasma.SahaBoltzmannScheme, computation::Plasma.Comput
     if  scheme.printIonLevels     Plasma.displaySahaBoltzmannEquilibrium(stdout, newIsoClasses, scheme.plasmaModel)   end 
     Plasma.displayThermodynamicProperties(stdout, computation.settings.temperature, totalIonDensity, newIsoClasses)   
     
+    # Return the COMPUTED thermodynamics and not only the inputs echoed above.  Until 23-Oct-2026 this dictionary
+    # carried the temperature, the density and the mixture -- all of them things the caller had just passed in --
+    # so a script could run a Saha-Boltzmann equilibrium through perform but could not read a single result of it
+    # without parsing the printed table.  The six entries below are the same quantities
+    # Plasma.displayThermodynamicProperties prints, obtained from the same functions and the same converged
+    # isotopic classes, so the table and the dictionary cannot disagree.
+    if  output
+        ne = Plasma.computeElectronNumberDensity(computation.settings.temperature, newIsoClasses)
+        results["electron density"]  = ne
+        results["mean charge state"] = ne / totalIonDensity
+        results["pressure"]          = Plasma.pressure(computation.settings.temperature, totalIonDensity, newIsoClasses)
+        results["internal energy"]   = Plasma.internalEnergyDensity(computation.settings.temperature, totalIonDensity, newIsoClasses)
+        results["free energy"]       = Plasma.freeEnergyDensity(computation.settings.temperature, totalIonDensity, newIsoClasses)
+        results["isotope classes"]   = newIsoClasses
+    end
+    
     println("\n> Saha-Boltzmann LTE computation complete ...")
     
     Defaults.warn(PrintWarnings())
     Defaults.warn(ResetWarnings())
-    return( results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end
 
 
@@ -765,7 +809,6 @@ function solveSahaBoltzmannEquilibrium(temp::Float64, isoClasses::Array{IsotopeC
         else                   ne = Plasma.computeElectronNumberDensity(temp, oldIsoClasses)
         end
         chemMuE       = Plasma.computeElectronChemicalPotential(temp, ne) 
-        ##x @show ne, chemMuE, chemMuE/temp
         
         # Update plasma model for ionization-potential depression (IPD)
         npm = Plasma.updateIpdPlasmaModel(opm, temp, ne, oldIsoClasses)
@@ -776,16 +819,14 @@ function solveSahaBoltzmannEquilibrium(temp::Float64, isoClasses::Array{IsotopeC
             # Extract the ground energies and Delta I_p for the given plasma model
             groundE, deltaIp = Plasma.determineIpShifts(npm, temp, ionDensity, isoClass)
             qMax = 0;    for ionClass  in  isoClass.ionClasses   qMax = max(qMax, ionClass.q)   end
-            ##x @show groundE
-            ##x @show deltaIp, isoClass.isotopicFraction, qMax
             
             dominantEnergy = -4*temp  ## Plasma.computeDominantIsotopeEnergy(isoClass)  -32.3703
                 
-            # Compute factor to re-normalize the partition function
-            ##x nDensityTotal = Plasma.computeIonLevelNumberDensityTotal(isoClass)
-            ##xnormFactor    = isoClass.isotopicDensity / nDensityTotal
-            pfIsoClass    = Plasma.computeIsotopicPartitionFunction(temp, isoClass, chemMuE, dominantEnergy) 
-            ##x @show isoClass.isotopicDensity, pfIsoClass
+            # Compute factor to re-normalize the partition function -- RESTRICTED to levels that remain BOUND
+            # under this IPD plasma model (item 97): a level the cut below removes must not go on being
+            # counted in the sum every surviving level's probability is divided by.
+            pfIsoClass    = Plasma.computeIsotopicPartitionFunctionBound(temp, isoClass, chemMuE, dominantEnergy,
+                                                                          groundE, deltaIp, qMax)
 
             newIonClasses  = Plasma.IonicClass[]
             for  ionClass  in  isoClass.ionClasses
@@ -794,7 +835,6 @@ function solveSahaBoltzmannEquilibrium(temp::Float64, isoClasses::Array{IsotopeC
                 for  ionLevel  in  ionClass.ionLevels
                     if   ionLevel.energy < groundEnergy     groundEnergy = ionLevel.energy     end
                     # Assign a non-zero level density only if the level is bound under the given IPD plasma model
-                    ##x @show ionClass.q, ionLevel.energy
                     if  ionLevel.energy == 0.                                          ||
                         ionClass.q      == qMax                                        ||
                         ionLevel.energy + deltaIp[ionClass.q] < groundE[ionClass.q+1]
@@ -810,9 +850,6 @@ function solveSahaBoltzmannEquilibrium(temp::Float64, isoClasses::Array{IsotopeC
                                               isoClass.isotopicFraction, newIonClasses)
             push!(newIsoClasses, newIsoClass)
                 
-            ##x # Check the re-normalize the partition function
-            ##x nDensityTotal = Plasma.computeIonLevelNumberDensityTotal(newIsoClass)
-            ##x @show newIsoClass.isotopicDensity, nDensityTotal
             
             
         end
@@ -917,21 +954,20 @@ function generateIonLevelData(scheme::Plasma.SahaBoltzmannScheme, isoClass::Isot
     repBasis     = Representation(name, nm, grid, repConfigs, MeanFieldBasis(mfSettings) )
     repOutput    = generate(repBasis, output=true)
     
-    orbitals = repOutput["mean-field basis"].orbitals
-    ##x for (k,v) in orbitals @show k   end
+    orbitals = repOutput[ResultKeys.MeanFieldBasis].orbitals
     
     
     # Extract levels from output
     repMultiplet = Multiplet()
     for  conf in allConfigs
-        mp           = Basics.performCI([conf], orbitals, nm, grid, AsfSettings(), printout=false)
+        mp           = Hamiltonian.performCIwithFrozenOrbitals([conf], orbitals, nm, grid, AsfSettings(); printout=false)
         repMultiplet = Multiplet("append", append!(repMultiplet.levels, mp.levels) )
     end
     Basics.displayLevels(stdout, [repMultiplet], N=100)
     
     for  level in repMultiplet.levels
         # Determine the uppermost shell of the given level
-        confs          = Basics.extractNonrelativisticConfigurations(level.basis)
+        confs          = Basics.extractConfigurations(Basics.FromBasis(), level.basis)
         shellList      = Basics.extractNonrelativisticShellList(confs)
         uppermostShell = Shell(0,0)
         for  shell in shellList     if  shell > uppermostShell    uppermostShell = shell    end     end
@@ -968,13 +1004,15 @@ end
 """
 function readEvaluateIonLevelData(filename::String, isoClass::IsotopeClass, NoExcitations::Int64, upperShellNo::Int64)
     found = false;  chargeStates = Int64[];   newIonClasses = Plasma.IonicClass[]
+    # No ion-level data file yet -- let the caller fall back to generating fresh data, as documented
+    if  !isfile(filename)
+        println(">>> No ion-level data file $filename found; new data will be generated." )
+        return( missing )
+    end
     # Open the file and try to read in the directory
     data    = JLD2.load(filename)
     isoData = data["isoData"]
 
-    @show trunc(isoData["Z"], digits=3), trunc(isoClass.isotopicFraction.Z, digits=3) 
-    @show trunc(isoData["A"], digits=3), trunc(isoClass.isotopicFraction.A, digits=3)
-    @show trunc(isoData["Z"], digits=3)  ==  trunc(isoClass.isotopicFraction.Z, digits=3)   &&
         trunc(isoData["A"], digits=3)  ==  trunc(isoClass.isotopicFraction.A, digits=3)   &&
         isoData["NoExcitations"]       >=  NoExcitations                                  &&                      
         isoData["upperShellNo"]        >=  upperShellNo
@@ -1051,7 +1089,6 @@ function readEvaluateIonLevelData(scheme::Plasma.SahaBoltzmannScheme, isoClass::
             if  length(ionClass.ionLevels) == 0    incomplete = true    end
         end
     end
-    ##x @show newIsoClass
     #
     if incomplete
         newIonClasses = Plasma.IonicClass[] 
@@ -1079,57 +1116,6 @@ function readEvaluateIonLevelData(scheme::Plasma.SahaBoltzmannScheme, isoClass::
     end
     
     return ( newIsoClass )
-end
-
-
-"""
-`Plasma.readUpdateIonLevelDataObsolete(filename::String, isoClass::IsotopeClass, NoExcitations::Int64, upperShellNo::Int64,
-                               newIonClasses::Array{Plasma.IonicClass,1})`  
-    ... reads in, if available, the ionic-level data for the given isotope class from filename.
-        The ionic-level data are accepted for return, if (1) they belong to isotope (Z,A) in isoClasses
-        and if they fullfill (2) upperShellNo <= filename:upperShellNo, (3) NoExcitations <= filename:NoExcitations.
-        The newIonClasses are updated/appended in the given ionClasses data and a new ionic-level data file is written
-        out. The procedure terminates with an error if no proper ionic level data are found in filename.
-        Nothing is returned. ... This procedures is not used a present.
-"""
-function readUpdateIonLevelDataObsolete(filename::String, isoClass::IsotopeClass, noExcitations::Int64, upperShellNo::Int64,
-                                newIonClasses::Array{Plasma.IonicClass,1})
-    found = false;  chargeStates = Int64[];    updatedIonClasses = Plasma.IonicClass[]
-        
-    # Open the file and try to read in the directory
-    data = JLD2.load(filename)
-    @show data
-    
-    if  trunc(isoData["Z"], digits=3)  ==  trunc(isoClass.isotopicFraction.Z, digits=3)   &&
-        trunc(isoData["A"], digits=3)  ==  trunc(isoClass.isotopicFraction.A, digits=3)   &&
-        isoData["NoExcitations"]       >=  NoExcitations                                  &&                      
-        isoData["upperShellNo"]        >=  upperShellNo  
-        
-        # Update or append all new data
-        for  (qkey,v)  in  newIonLevelData    isoData[qkey] = v   end
-            
-        # The given data look suitable to be used; now construct a newIsoClass to be printed out
-        for  ionClass in isoClass.ionClasses
-            qkey = "q" * string(ionClass.q) * "Levels"
-            if   haskey(isoData, qkey)     push!(updatedIonClasses, IonicClass(ionClass.q, ionClass.groundEnergy, isoData[qkey]) )
-            else                           push!(updatedIonClasses, ionClass)
-                println(">> No ionic-level data are found for q = $(ionClass.q) ... ")
-            end
-        end
-        #
-        newIsoClass = Plasma.IsotopeClass( newIsoClass.isotopicDensity, newIsoClass.Lambda, newIsoClass.dominantEnergy,
-                                           newIsoClass.isotopicFraction, updatedIonClasses)
-    end
-
-    # Write out newIsoClass if needed
-    if  writeData
-        sa = "   " * round(Int, isoClass.isotopicFraction.Z);    sb = "   " * round(Int, isoClass.isotopicFraction.A)
-        filename = "newIonicLevelDataZ" * sa[end-1:end] * sa[end-2:end]
-        Plasma.writeIonLevelData(filename, newIsoClass)
-        println(">>> New ionic-level data are printed to file $filename.")
-    end
-    
-    return ( nothing )
 end
 
 
@@ -1162,27 +1148,38 @@ end
 """
 function updateIpdPlasmaModel(pm::Basics.AbstractPlasmaModel, temp::Float64, ne::Float64, isotopeClasses::Array{IsotopeClass,1})
     
-    # Determine the ionization potential shifts that depend on the given plasma model
-    if      typeof(pm) == Basics.NoPlasmaModel                    npm = pm
-    elseif  typeof(pm) == Basics.WithoutAutoionizationModel       npm = pm
-    elseif  typeof(pm) == Basics.DebyeHueckelModel
+    # Screening (charge-weighted) density  nt = n_e + sum_z n_z z^2  that enters the (one-component) Debye length;
+    # this is the same nt for both the DebyeHueckelModel and the StewartPyattModel below, which share the same
+    # underlying Debye length -- see Stewart & Pyatt (1966), Astrophys. J. 144, 1203.
+    function screeningDensity()
         nt = ne
         for  isotopeClass in isotopeClasses
             for ionClass  in  isotopeClass.ionClasses
                 for  level in ionClass.ionLevels
                     nt = nt + level.nDensity * ionClass.q^2
-                end 
-            end 
-        end 
-        debyeLength = sqrt( nt/ temp )
-        npm = Basics.DebyeHueckelModel(debyeLength, pm.debyeRadius)
-    elseif  typeof(pm) == Basics.IonSphereModel 
+                end
+            end
+        end
+        return( nt )
+    end
+
+    # Determine the ionization potential shifts that depend on the given plasma model
+    if      typeof(pm) == Basics.NoPlasmaModel                    npm = pm
+    elseif  typeof(pm) == Basics.WithoutAutoionizationModel       npm = pm
+    elseif  typeof(pm) == Basics.DebyeHueckelModel
+        debyeLength = sqrt( temp / (4pi * screeningDensity()) )
+        npm = Basics.DebyeHueckelModel(debyeLength)
+    elseif  typeof(pm) == Basics.IonSphereModel
         npm = Basics.IonSphereModel(pm.radius, ne)
     elseif  typeof(pm) == Basics.StewartPyattModel
-        ni = 0.;    for isoClass  in  isotopeClasses    ni = ni + isoClass.isotopicDensity * isoClass.isotopicFraction.x   end 
-        lambda = 4pi / temp * ne * (ne / ni + 1.)
-        lambda = 1 / sqrt(lambda)
+        lambda = sqrt( temp / (4pi * screeningDensity()) )
         npm = Basics.StewartPyattModel(pm.radius, ne, lambda)
+    elseif  typeof(pm) == Basics.EckerKroellModel
+        # The same screening density as above, and it is exactly the sum over all charged components of Ecker &
+        # Kroell's Eq. (26) -- electrons AND ions.  An electron-only Debye length is not this model;  cEK is the
+        # caller's and is carried through unchanged.
+        lambda = sqrt( temp / (4pi * screeningDensity()) )
+        npm = Basics.EckerKroellModel(pm.radius, ne, lambda, pm.cEK)
     else
         error("Undefined plasma model.")
     end
@@ -1215,73 +1212,4 @@ function writeIonLevelData(filename::String, isoClass::IsotopeClass, NoExcitatio
     return ( nothing )
 end
 
-
-"""
-`Plasma.writeIonLevelDataRobin(filenameRobin::String, filenameJac::String)`  
-    ... reads-in ion-level data from filenameRobin (in tabular form) and writes a proper isoData file
-        for the given isotope class to filenameJac. Nothing is returned.
-"""
-function writeIonLevelDataRobin(filenameRobin::String, filenameJac::String)
-    # Generate a proper dictionary to be printed out; Z and A must be commuicated and set explicitly
-    wZ = 6.0;   wA = 12.2
-    isoData = Dict{String, Any}();     ionClasses = Plasma.IonicClass[]
-    isoData["Z"]              =  trunc(wZ, digits=3)
-    isoData["A"]              =  trunc(wA, digits=3)
-    isoData["NoExcitations"]  =  0            
-    isoData["upperShellNo"]   =  6  
-    # The given data look suitable to be used; now construct a newIsoClass to be printed out
-    f = open(filenameRobin)
-    readline(f);    readline(f)  # Jump over the header
-    
-    sLines = String[]
-    while  !eof(f)
-        push!(sLines, readline(f))
-    end
-    @show  length(sLines), sLines[1]
-    
-    # Test that all data are read-in properly
-    #== for  sLine  in sLines
-        nele = Base.parse(Int64,   strip(sLine[17:20]) );   q = round(Int, wZ) - nele
-        en   = Base.parse(Float64, strip(sLine[33:52]) )
-        g    = Base.parse(Int64,   strip(sLine[54:57]) )
-        @show nele, q, en, g
-    end
-    error("Check the test !!")  ==#
-
-    # Determine all q in the data set
-    qs = Int64[]
-    for  sLine  in sLines
-        nele = Base.parse(Int64,   strip(sLine[17:20]) );   q = round(Int, wZ) - nele
-        push!(qs, q)
-    end
-    qs = unique(qs)
-    println(">> Charge state in the input file are: $qs ")
-    
-    # Create an IonClass for each q
-    for  q  in qs
-        ionLevels = Plasma.IonicLevel[];  groundEnergy = 1.0e6
-        for  sLine  in sLines
-            nele = Base.parse(Int64,   strip(sLine[17:20]) );   qx = round(Int, wZ) - nele
-            if  qx == q
-                en   = Base.parse(Float64, strip(sLine[33:52]) )
-                g    = Base.parse(Int64,   strip(sLine[54:57]) )
-                push!(ionLevels, Plasma.IonicLevel(en, g, 0.) )
-                if  en < groundEnergy   groundEnergy = en   end
-            end
-        end
-        push!(ionClasses, Plasma.IonicClass(q, groundEnergy, ionLevels) )
-    end
-    println(">> Number of ionic classes in the input file is: $(length(ionClasses)) ")
-    
-    for  ionClass in ionClasses
-        qkey = "q" * string(ionClass.q) * "Levels"
-        isoData[qkey]         = ionClass
-    end
-    
-    # Open the file and dump the directory
-    println(">> Save ion level data to file  $filenameJac")
-    JLD2.@save filenameJac isoData
-    
-    return ( nothing )
-end
 

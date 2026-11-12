@@ -1,8 +1,12 @@
 
 
+<!-- The codecov badge below deliberately keeps the OLD repository name: codecov keys the project under
+     `OpenJAC/JAC.jl` and does not follow the GitHub rename.  Measured 02-Nov-2026, the old path reports 41 %
+     while `OpenJAC/JenaAtomicCalculator.jl` reports "unknown".  Do not "correct" it without first checking
+     that codecov has been re-pointed. -->
 | **Documentation**                                                               | **Build Status**                                                                                | **Try JAC in Cloud** 
 |:-------------------------------------------------------------------------------:|:-----------------------------------------------------------------------------------------------:|:-----------------------------------------------------------------------------------------------:|
-| [![Documentation](https://img.shields.io/badge/Documentation-stable-blue)](https://openjac.github.io/JenaAtomicCalculator.jl/stable) [![Documentation](https://img.shields.io/badge/Documentation-dev-blue)](https://openjac.github.io/JenaAtomicCalculator.jl/dev) | [![Build Status](https://github.com/OpenJAC/JAC.jl/workflows/CI/badge.svg)](https://github.com/OpenJAC/JAC.jl/actions) [![codecov](https://codecov.io/gh/OpenJAC/JAC.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/OpenJAC/JAC.jl)  | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/OpenJAC/JAC.jl/master) |
+| [![Documentation](https://img.shields.io/badge/Documentation-stable-blue)](https://openjac.github.io/JenaAtomicCalculator.jl/stable) [![Documentation](https://img.shields.io/badge/Documentation-dev-blue)](https://openjac.github.io/JenaAtomicCalculator.jl/dev) | [![Build Status](https://github.com/OpenJAC/JenaAtomicCalculator.jl/workflows/CI/badge.svg)](https://github.com/OpenJAC/JenaAtomicCalculator.jl/actions) [![codecov](https://codecov.io/gh/OpenJAC/JAC.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/OpenJAC/JAC.jl)  | [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/OpenJAC/JenaAtomicCalculator.jl/master) |
 
 
 
@@ -117,6 +121,23 @@ using JenaAtomicCalculator
 
 !!! @info "Info"
     We suggest to use  JenaAtomicCalculator  with the Julia v1.10.
+
+## Author and principal developer
+
+JAC is created and maintained by **Stephan Fritzsche** (Helmholtz Institute Jena &
+GSI Helmholtz Centre for Heavy Ion Research, Darmstadt).
+
+Contact: s.fritzsche@hi-jena.gsi.de
+
+If you use JAC in published work, please cite the reference article:
+
+> S. Fritzsche, *A fresh computational approach to atomic structures, processes and cascades*,
+> Comput. Phys. Commun. **240**, 1–14 (2019).
+> DOI: [10.1016/j.cpc.2019.01.012](https://doi.org/10.1016/j.cpc.2019.01.012)
+
+A `CITATION.cff` file is included in this repository; GitHub displays a *Cite this repository*
+button in the sidebar that formats the citation automatically.
+
 
 ## Current limitations of JAC
 

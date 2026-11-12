@@ -48,13 +48,15 @@ end
 """
 function amplitude(K::Integer, level::Level, grid::Radial.Grid; display::Bool=false)
 
-    ##x printstyled("Compute multipole moment for level $(level.index) ...", color=:light_green)
 
     radialParts = Dict()
     angularParts = Dict()
     for (sub1, orb1) in level.basis.orbitals, (sub2, orb2) in level.basis.orbitals
         radialParts[sub1, sub2] = RadialIntegrals.rkDiagonal(K, orb1, orb2, grid)
-        angularParts[sub1, sub2] = AngularMomentum.CL_reduced_me_rb(sub1, K, sub2)
+        ## the former CL_reduced_me_rb convention: Grant's reduced matrix element divided by
+        ## sqrt(2 j_a + 1), with j_a from the FIRST argument as passed (10-Aug-2026).
+        angularParts[sub1, sub2] = AngularMomentum.CL_reduced_me(sub1, K, sub2) /
+                                       sqrt( Basics.subshell_2j(sub1) + 1 )
     end
 
     moment = 0.0
@@ -63,17 +65,13 @@ function amplitude(K::Integer, level::Level, grid::Radial.Grid; display::Bool=fa
             continue
         end
 
-        if Defaults.saRatip()
-            spinAngularCoeffs = Basics.compute("angular coefficients: 1-p, Grasp92", 0, K, level.basis.csfs[i], level.basis.csfs[j]) 
-        end
         if Defaults.saGG()
-            operator = SpinAngular.OneParticleOperator(K, plus, true)
+            operator = SpinAngular.OneParticleOperator(K, Basics.multipoleParity(EmMultipole(K, true)))
             spinAngularCoeffs = SpinAngular.computeCoefficients(operator, level.basis.csfs[i], level.basis.csfs[j], level.basis.subshells)
         end
 
         csfME = 0.0
         for coeff in spinAngularCoeffs
-            ##x @show radialParts[coeff.a, coeff.b], angularParts[coeff.a, coeff.b]
             csfME += coeff.T * radialParts[coeff.a, coeff.b] * angularParts[coeff.a, coeff.b]
         end
 
@@ -84,7 +82,6 @@ function amplitude(K::Integer, level::Level, grid::Radial.Grid; display::Bool=fa
     wigner3jvalue = AngularMomentum.Wigner_3j(j, K, j, j, 0, -j)
     moment = moment * (-1)^(2*j - K + 1) * wigner3jvalue * sqrt(2*j+1)
 
-    ##x printstyled("done. \n", color=:light_green)
 
     if display
         sa = @sprintf("%.5e", moment)
@@ -113,27 +110,20 @@ function dipoleAmplitude(finalLevel::Level, initialLevel::Level, grid::Radial.Gr
         #
         for  r = 1:nf
             for  s = 1:ni
-                ##x wa = Basics.compute("angular coefficients: 1-p, Grasp92", 0, 1, finalLevel.basis.csfs[r], initialLevel.basis.csfs[s])
                 # Calculate the spin-angular coefficients
-                if  Defaults.saRatip()
-                    waR = Basics.compute("angular coefficients: 1-p, Grasp92", 0, 1, finalLevel.basis.csfs[r], initialLevel.basis.csfs[s])
-                    wa  = waR       
-                end
                 if  Defaults.saGG()
                     subshellList = initialLevel.basis.subshells
-                    opa = SpinAngular.OneParticleOperator(1, plus, true)
+                    opa = SpinAngular.OneParticleOperator(1, Basics.multipoleParity(EmMultipole(1, true)))
                     waG = SpinAngular.computeCoefficients(opa, finalLevel.basis.csfs[r], initialLevel.basis.csfs[s], subshellList) 
                     wa  = waG
                 end
-                if  Defaults.saRatip() && Defaults.saGG() && true
-                    if  length(waR) != 0     println("\n>> Angular coeffients from GRASP/MCT   = $waR ")    end
-                    if  length(waG) != 0     println(  ">> Angular coeffients from SpinAngular = $waG ")    end
-                end
                 #
                 for  coeff in wa
-                    ja = Basics.subshell_2j(finalLevel.basis.orbitals[coeff.a].subshell)
-                    jb = Basics.subshell_2j(initialLevel.basis.orbitals[coeff.b].subshell)
-                    tamp  = InteractionStrength.dipole(finalLevel.basis.orbitals[coeff.a], initialLevel.basis.orbitals[coeff.b], grid)
+                    # eMultipole at k = 1, not InteractionStrength.dipole: the two compute the same electric-dipole reduced
+                    # matrix element and differ by exactly sqrt(2 j_a + 1), which eMultipole divides out and dipole does not.
+                    # coeff.T arrives GRASP-dressed, so only the eMultipole form pairs correctly with it -- the same pairing
+                    # the rank-k branch below already uses.
+                    tamp  = InteractionStrength.eMultipole(1, finalLevel.basis.orbitals[coeff.a], initialLevel.basis.orbitals[coeff.b], grid)
                     matrix[r,s] = matrix[r,s] + coeff.T * tamp  
                 end
             end
@@ -161,34 +151,68 @@ end
 `MultipoleMoment.emmStaticAmplitude(k::Int64, finalLevel::Level, initialLevel::Level, grid::Radial.Grid; display::Bool=false)`  
         ... to compute the (reduced static) electric-multipole-moment (EMM) amplitude   
             <alpha_f J_f || T^(Ek) || alpha_i J_i>  for the given final and initial level. A value::ComplexF64 is returned.
+
+        THE sqrt(2J_f+1) IS APPLIED HERE, AND UNTIL 15-Sep-2026 IT WAS NOT.  `SpinAngular.computeCoefficients` returns
+        the rank-k coefficients in a normalization that yields the reduced matrix element up to that factor -- the same
+        convention `WeakInteractionMoment.oneParticleAmplitude` absorbs, where both factors were MEASURED against exact
+        one-electron reduced matrix elements rather than assumed.  This routine contracted them without it and so
+        returned an amplitude too small by sqrt(2J_f+1).
+
+        WHICH SIDE WAS RIGHT WAS DECIDED BY PUBLISHED DATA, not by inspection -- that the two routines differed had been
+        known since `examples/example-Cn.jl` branch a printed them side by side.  Against Cserveny & Roberts,
+        PRA 112, 032816 (2025), Table II for Ba+ (all-order, Breit + QED, ~1 %), the ratios of the UNNORMALIZED
+        amplitudes to the published values are 0.813 / 0.571 / 0.558 / 0.458 for <6s||d||6p_1/2>, <6s||d||6p_3/2>,
+        <6s||Q2||5d_3/2>, <6s||Q2||5d_5/2> -- NOT constant, so not a convention difference at all -- while divided by
+        sqrt(2J_f+1) they become 1.150 / 1.142 / 1.116 / 1.122, i.e. ONE 12-15 % mean-field error common to all four.
+        Rule 18: the factor belongs here, not at a call site;  the hand-compensation that branch g of that example
+        carried is exactly the drift the rule exists to stop.
+
+        AND THE TWO SUBSHELL LISTS ARE MERGED, as `oneParticleAmplitude` merges them.  Passing
+        `initialLevel.basis.subshells` alone raised a `BoundsError` whenever the two levels came from separately
+        computed multiplets, which is the ordinary way a polarizibility or Stark calculation obtains them.
 """
 function emmStaticAmplitude(k::Int64, finalLevel::Level, initialLevel::Level, grid::Radial.Grid; display::Bool=false)
-    #
-    if     finalLevel.parity != initialLevel.parity     amplitude = 0.
+    # An electric multipole operator of rank k has parity (-1)^k: for even k, the reduced matrix
+    # element vanishes unless finalLevel/initialLevel share the SAME parity; for odd k (e.g. the E1
+    # dipole), it vanishes unless they have OPPOSITE parity. A blind "parity must differ" guard is
+    # only correct for even k; for odd k it lets a diagonal (finalLevel===initialLevel, trivially
+    # same-parity) call silently "pass through" and compute a spurious nonzero value instead of the
+    # true zero required by the parity selection rule.
+    if     iseven(k)  &&  finalLevel.parity != initialLevel.parity     amplitude = 0.
+    elseif isodd(k)   &&  finalLevel.parity == initialLevel.parity     amplitude = 0.
     else
-        nf = length(finalLevel.basis.csfs);    ni = length(initialLevel.basis.csfs)
+        # THE TWO LEVELS MAY COME FROM SEPARATELY COMPUTED MULTIPLETS, and then their subshell lists differ; using
+        # the initial level's list alone indexes the final level's CSFs against the wrong subshells and raises a
+        # BoundsError.  Merged here exactly as WeakInteractionMoment.oneParticleAmplitude merges them.
+        if  initialLevel.basis.subshells == finalLevel.basis.subshells
+            iLevel = initialLevel;    fLevel = finalLevel
+        else
+            subshells = Basics.merge(initialLevel.basis.subshells, finalLevel.basis.subshells)
+            iLevel    = Level(initialLevel, subshells);     fLevel = Level(finalLevel, subshells)
+        end
+        nf = length(fLevel.basis.csfs);    ni = length(iLevel.basis.csfs)
         if display   printstyled("Compute (static) EMM matrix of dimension $nf x $ni in the final- and initial-state bases " *
                                  "for the transition [$(initialLevel.index)- $(finalLevel.index)] ... ", color=:light_green)     end
         matrix = zeros(Float64, nf, ni)
         #
         for  r = 1:nf
             for  s = 1:ni
-                if  finalLevel.mc[r] == 0  ||  initialLevel.mc[s] == 0    continue    end
+                if  fLevel.mc[r] == 0  ||  iLevel.mc[s] == 0    continue    end
                     
-                subshellList = initialLevel.basis.subshells
-                opa = SpinAngular.OneParticleOperator(k, plus, true)
-                wa  = SpinAngular.computeCoefficients(opa, finalLevel.basis.csfs[r], initialLevel.basis.csfs[s], subshellList) 
+                subshellList = iLevel.basis.subshells
+                opa = SpinAngular.OneParticleOperator(k, Basics.multipoleParity(EmMultipole(k, true)))
+                wa  = SpinAngular.computeCoefficients(opa, fLevel.basis.csfs[r], iLevel.basis.csfs[s], subshellList) 
                 #
                 for  coeff in wa
-                    ja   = Basics.subshell_2j(finalLevel.basis.orbitals[coeff.a].subshell)
-                    jb   = Basics.subshell_2j(initialLevel.basis.orbitals[coeff.b].subshell)
-                    tamp = InteractionStrength.eMultipole(k, finalLevel.basis.orbitals[coeff.a], initialLevel.basis.orbitals[coeff.b], grid)
+                    tamp = InteractionStrength.eMultipole(k, fLevel.basis.orbitals[coeff.a], iLevel.basis.orbitals[coeff.b], grid)
                     matrix[r,s] = matrix[r,s] + coeff.T * tamp  
                 end
             end
         end
         if display   printstyled("done. \n", color=:light_green)   end
-        amplitude = transpose(finalLevel.mc) * matrix * initialLevel.mc 
+        # sqrt(2J_f+1): see the docstring.  SpinAngular's rank-k coefficients give the reduced matrix element up to
+        # this factor, and it belongs here rather than at a call site (Rule 18).
+        amplitude = sqrt( Basics.twice(fLevel.J) + 1.0 ) * transpose(fLevel.mc) * matrix * iLevel.mc 
     end
     #
     if  display
@@ -216,6 +240,19 @@ end
 """
 function transitionAmplitude(mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level, 
                                 grid::Radial.Grid; display::Bool=false)
+    error("\n\nMultipoleMoment.transitionAmplitude is PARKED, 28-Aug-2026, and gives no number.\n"                    *
+          ">>> IT HAS NOT BEEN CALLABLE FOR SOME TIME: it asks for its angular coefficients through the Ratip2013\n" *
+          ">>> route, whose include is commented out of JenaAtomicCalculator.jl, so the call raised\n"                *
+          ">>> `UndefVarError: AngularCoefficientsRatip2013` rather than returning anything. That was true on\n"      *
+          ">>> HEAD before this change, and it is why nothing ever validated the routine.\n"                          *
+          ">>> ROUTING IT THROUGH SpinAngular WAS TRIED AND WITHDRAWN. It then ran and obeyed the E1 selection\n"     *
+          ">>> rule, but its two gauges disagreed (length/velocity ratio -0.57 and -1.45 at the true transition\n"    *
+          ">>> energy, with a sign difference), and against PhotoEmission.amplitude for the SAME transition of\n"     *
+          ">>> Be-like C it was too large by a factor of 1974 in length and 9309 in velocity. Shipping that would\n"  *
+          ">>> have turned a loud failure into a silent wrong answer.\n"                                              *
+          ">>> USE `PhotoEmission.amplitude(Basics.Absorption(), mp, gauge, omega, fLevel, iLevel, grid)` instead;\n" *
+          ">>> it is exercised by the test suite and by several examples.\n"                                          *
+          ">>> Reviving this one needs its normalization derived and checked against PhotoEmission, not guessed.\n")
     nf = length(finalLevel.basis.csfs);    ni = length(initialLevel.basis.csfs)
     printstyled("Compute multipole-moment transition matrix of dimension $nf x $ni in the final- and initial-state bases " *
                 "for the transition [$(initialLevel.index)- $(finalLevel.index)] ... ", color=:light_green)
@@ -223,10 +260,13 @@ function transitionAmplitude(mp::EmMultipole, gauge::EmGauge, omega::Float64, fi
     #
     for  r = 1:nf
         for  s = 1:ni
-            wa = compute("angular coefficients: 1-p, Grasp92", 0, mp.L, finalLevel.basis.csfs[r], initialLevel.basis.csfs[s])
+            # The Ratip2013 angular-coefficient route was RETIRED on 30-Aug-2026: its module was already absent
+            # from src/ and its include already commented out of JenaAtomicCalculator.jl, so this line could
+            # never have run -- and it is in any case unreachable, since this function raises at its first
+            # statement (see the STATUS block above). Left as an explicit stub rather than silently deleted, so
+            # that whoever un-parks this routine sees that its angular coefficients must be re-sourced.
+            wa = error("MultipoleMoment.transitionAmplitude: no angular-coefficient route; see the STATUS block.")
             for  coeff in wa
-                ##x ja = Basics.subshell_2j(finalLevel.basis.orbitals[coeff.a].subshell)
-                ##x jb = Basics.subshell_2j(initialLevel.basis.orbitals[coeff.b].subshell)
                 tamp  = InteractionStrength.multipoleTransition(mp, gauge, omega, finalLevel.basis.orbitals[coeff.a], 
                                                                     initialLevel.basis.orbitals[coeff.b], grid)
                 matrix[r,s] = matrix[r,s] + coeff.T * tamp  

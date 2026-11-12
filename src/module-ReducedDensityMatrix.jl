@@ -1,8 +1,8 @@
 
 """
-`module  JAC.ReducedDensityMatrix`  
-... a submodel of JAC that contains all methods for computing reduced density matrices, natural orbitals, radial density
-    distributions and related information for some level(s).
+`module  JAC.ReducedDensityMatrix`
+    ... a submodel of JAC that contains all methods for computing reduced density matrices, natural orbitals, radial density distributions
+        and related information for some level(s).
 """
 module ReducedDensityMatrix
 
@@ -10,9 +10,10 @@ module ReducedDensityMatrix
 using Printf, ..Basics, ..Defaults, ..InteractionStrength, ..ManyElectron, ..Nuclear, ..Radial, ..RadialIntegrals,
                 ..SpinAngular, ..TableStrings
 
+
 """
-`struct  ReducedDensityMatrix.Settings  <:  AbstractPropertySettings`  
-    ... defines a type for providing and parameters for reduced density matrices and other parameters.
+`struct  ReducedDensityMatrix.Settings  <:  AbstractPropertySettings`
+    ... defines a type for the parameters that control the computation of reduced density matrices and the quantities derived from them.
 
     + calcNatural              ::Bool             ... True if natural orbitals need to be calculated, and false otherwise.
     + calcDensity              ::Bool             ... True if the radial density need to be calculated, and false otherwise.
@@ -33,17 +34,48 @@ end
 
 
 """
-`ReducedDensityMatrix.Settings(; calcNatural::Bool=true, calcDensity::Bool=true, calcIpq::Bool=false, 
-                                    printBefore::Bool=true, levelSelection::LevelSelection=LevelSelection()) 
-    ... keyword constructor to overwrite selected value of reduced-density matrix computations.
+`ReducedDensityMatrix.Settings(; calcNatural::Bool=true, calcDensity::Bool=true, calcIpq::Bool=false,
+                                calc2pRDM::Bool=false, printBefore::Bool=true, levelSelection::LevelSelection=LevelSelection())`
+    ... keyword constructor to overwrite selected values of the reduced-density-matrix computations.
+        A settings::ReducedDensityMatrix.Settings is returned.
 """
-function Settings(; calcNatural::Bool=true, calcDensity::Bool=true, calcIpq::Bool=false, 
-                                    printBefore::Bool=true, levelSelection::LevelSelection=LevelSelection())
-    Settings(calcNatural, calcDensity, calcIpq, printBefore, levelSelection)
+function Settings(; calcNatural::Bool=true, calcDensity::Bool=true, calcIpq::Bool=false,
+                    calc2pRDM::Bool=false, printBefore::Bool=true, levelSelection::LevelSelection=LevelSelection())
+    Settings(calcNatural, calcDensity, calcIpq, calc2pRDM, printBefore, levelSelection)
 end
 
-# `Base.show(io::IO, settings::ReducedDensityMatrix.Settings)`  
-#       ... prepares a proper printout of the variable settings::ReducedDensityMatrix.Settings.
+
+"""
+`ReducedDensityMatrix.Settings(set::ReducedDensityMatrix.Settings;`
+
+    calcNatural..., calcDensity..., calcIpq..., calc2pRDM..., printBefore..., levelSelection...)
+
+    ... constructor for modifying the given ReducedDensityMatrix.Settings by 'overwriting' the previously selected parameters.
+        A settings::ReducedDensityMatrix.Settings is returned.
+"""
+function Settings(set::ReducedDensityMatrix.Settings;
+                        calcNatural::Union{Nothing,Bool} = nothing,
+                        calcDensity::Union{Nothing,Bool} = nothing,
+                        calcIpq::Union{Nothing,Bool} = nothing,
+                        calc2pRDM::Union{Nothing,Bool} = nothing,
+                        printBefore::Union{Nothing,Bool} = nothing,
+                        levelSelection::Union{Nothing,LevelSelection} = nothing )
+
+    if  isnothing(calcNatural)      calcNaturalx    = set.calcNatural      else   calcNaturalx    = calcNatural      end
+    if  isnothing(calcDensity)      calcDensityx    = set.calcDensity      else   calcDensityx    = calcDensity      end
+    if  isnothing(calcIpq)          calcIpqx        = set.calcIpq          else   calcIpqx        = calcIpq          end
+    if  isnothing(calc2pRDM)        calc2pRDMx      = set.calc2pRDM        else   calc2pRDMx      = calc2pRDM        end
+    if  isnothing(printBefore)      printBeforex    = set.printBefore      else   printBeforex    = printBefore      end
+    if  isnothing(levelSelection)   levelSelectionx = set.levelSelection   else   levelSelectionx = levelSelection   end
+
+    Settings( calcNaturalx, calcDensityx, calcIpqx, calc2pRDMx, printBeforex, levelSelectionx )
+end
+
+
+"""
+`Base.show(io::IO, settings::ReducedDensityMatrix.Settings)`
+    ... prepares a proper printout of the variable settings::ReducedDensityMatrix.Settings; nothing is returned.
+"""
 function Base.show(io::IO, settings::ReducedDensityMatrix.Settings) 
     println(io, "calcNatural:              $(settings.calcNatural)  ")
     println(io, "calcDensity:              $(settings.calcDensity)  ")
@@ -64,10 +96,10 @@ end
     + naturalOrbitalExpansion   ::Dict{Subshell, Array{Float64,1}} 
         ... Dictionary of the expansion of (one-electron) natural orbitals in terms of the standard orbitals
             from the given basis.
-    + naturalOrbitals           ::Dict{Subshell, Orbital} . Dictionary of (one-electron) natural orbitals.
+    + naturalOrbitals           ::Dict{Subshell, Orbital} ... Dictionary of (one-electron) natural orbitals.
     + orbitalInteraction        ::Array{Float64,2}      ... Orbital interaction I_pq = I[ip,iq].
     + rho1p                     ::Array{Float64,2}      ... One-particle RDM rho^(1p) [ip,iq].
-    + rho2p                     ::Array{Float64,4}      ... Two-particle RDM rho^(1p) [ip,iq].
+    + rho2p                     ::Array{Float64,4}      ... Two-particle RDM rho^(2p) [ip,iq,ir,is].
     + electronDensity           ::Radial.Density        ... Radial density distribution.
 """
 struct Outcome 
@@ -84,15 +116,20 @@ end
 
 
 """
-`ReducedDensityMatrix.Outcome()`  ... constructor for an `empty` instance of Hfs.Outcome for the computation of isotope-shift properties.
+`ReducedDensityMatrix.Outcome()`
+    ... constructor for an `empty` instance of ReducedDensityMatrix.Outcome, i.e. with the level and every derived quantity unset.
+        An outcome::ReducedDensityMatrix.Outcome is returned.
 """
 function Outcome()
-    Outcome(Level(), Subshell[], Float64[], Dict{Subshell, Array{Float64,1}}, Dict{Subshell, Orbital}(), 
+    Outcome(Level(), Subshell[], Float64[], Dict{Subshell, Array{Float64,1}}(), Dict{Subshell, Orbital}(), 
             zeros(1,1), zeros(1,1), zeros(1,1,1,1), Radial.Density() )
 end
 
 
-# `Base.show(io::IO, outcome::ReducedDensityMatrix.Outcome)`  ... prepares a proper printout of the variable outcome::ReducedDensityMatrix.Outcome.
+"""
+`Base.show(io::IO, outcome::ReducedDensityMatrix.Outcome)`
+    ... prepares a proper printout of the variable outcome::ReducedDensityMatrix.Outcome; nothing is returned.
+"""
 function Base.show(io::IO, outcome::ReducedDensityMatrix.Outcome) 
     println(io, "level:                   $(outcome.level)  ")
     println(io, "naturalSubshells:        $(outcome.naturalSubshells)  ")
@@ -107,146 +144,6 @@ end
 
 
 """
-`ReducedDensityMatrix.computeOutcomes(multiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                        settings::ReducedDensityMatrix.Settings; output=true)` 
-    ... to compute (as selected) the 1-particle and 2-particle reduced density matrices, natural orbitals or other
-        requested information for the levels of interest.
-"""
-function computeOutcomes(multiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                            settings::ReducedDensityMatrix.Settings; output=true)
-    println("")
-    printstyled("ReducedDensityMatrix.computeOutcomes(): The computation of the reduced density matrices starts now ... \n", color=:light_green)
-    printstyled("------------------------------------------------------------------------------------------------------ \n", color=:light_green)
-    #
-    outcomes = ReducedDensityMatrix.determineOutcomes(multiplet, settings)
-    # Display all selected levels before the computations start
-    if  settings.printBefore    ReducedDensityMatrix.displayOutcomes(outcomes, settings)    end
-    # Calculate all requested properties for each outcome
-    newOutcomes = ReducedDensityMatrix.Outcome[]
-    for  outcome in outcomes
-        newOutcome = ReducedDensityMatrix.computeProperties(outcome, nm, grid, settings) 
-        push!( newOutcomes, newOutcome)
-    end
-    # Print all results to screen
-    ReducedDensityMatrix.displayResults(stdout, newOutcomes, grid, settings)
-    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
-    if  printSummary    ReducedDensityMatrix.displayResults(iostream, newOutcomes, grid, settings)   end
-    #
-    if    output    return( newOutcomes )
-    else            return( nothing )
-    end
-end
-
-
-"""
-`ReducedDensityMatrix.computeNaturalOrbitalExpansion(rho1p::Array{Float64,2}, level::Level)`  
-    ... to perform the expansion of the natural orbitals for the given level in terms of the standard orbitals
-        as defined by the basis. A tuple (naturalOcc::Array{Float64,1}, naturalExp::Dict{Subshell, Array{Float64,1}})
-        is returned which provides the natural occpuation numbers and expansion coefficients with regard
-        to the given list of natural orbitals. This method makes use of the 1-particle RDM to extract and diagonalize the 
-        expansion matrix.
-"""
-function  computeNaturalOrbitalExpansion(rho1p::Array{Float64,2}, level::Level)
-    naturalOcc = Float64[];      naturalExp = Dict{Subshell, Array{Float64,1}}();       lenNO = length(level.basis.subshells)
-    eigen  = Basics.diagonalize("matrix: LinearAlgebra", rho1p)
-    orbIndices = Float64[]
-    for  vector in eigen.vectors    wx = findmax(vector);   push!(orbIndices, wx[2])    end
-    @show "  "
-    @show orbIndices
-    for i = 1:lenNO     
-        wx = findfirst(x->x==i, orbIndices)
-    end
-    
-    return( naturalOcc, naturalExp )
-end
-
-
-"""
-`ReducedDensityMatrix.computeNaturalOrbitals(naturalSubshells::Array{Subshell,1}, naturalExp::Dict{Subshell, Array{Float64,1}}, level::Level)`  
-    ... to compute the natural orbitals as superposition of the standard orbitals; for each subshell in naturalExp,
-        an orbital is computed, and naturalOrbitals::Dict{Subshell, Orbital} returned
-"""
-function  computeNaturalOrbitals(naturalSubshells::Array{Subshell,1}, naturalExp::Dict{Subshell, Array{Float64,1}}, level::Level)
-    naturalOrbitals = Dict{Subshell, Orbital}()
-    println(">> computeNaturalOrbitals() ... not yet implemented !!")
-
-    return( naturalOrbitals )
-end
-
-
-"""
-`ReducedDensityMatrix.computeOrbitalInteractions(naturalSubshells::Array{Subshell,1}, naturalOrbitals::Dict{Subshell, Orbital}, level::Level)`  
-    ... to compute the natural orbitals as superposition of the standard orbitals; for each subshell in naturalExp,
-        an orbital is computed, and naturalOrbitals::Dict{Subshell, Orbital} returned
-"""
-function  computeOrbitalInteractions(naturalSubshells::Array{Subshell,1}, naturalOrbitals::Dict{Subshell, Orbital}, level::Level)
-    ns = length(naturalSubshells)
-    orbitalInteraction = zeros(ns,ns)    
-    println(">> computeOrbitalInteractions() ... not yet implemented !!")
-
-    return( orbitalInteraction )
-end
-
-
-"""
-`ReducedDensityMatrix.computeProperties(outcome::ReducedDensityMatrix.Outcome, nm::Nuclear.Model, grid::Radial.Grid, 
-                                        settings::ReducedDensityMatrix.Settings) 
-    ... to compute all properties for a given level; an outcome::ReducedDensityMatrix.Outcome is returned for 
-        which the properties are now evaluated explicitly.
-"""
-function  computeProperties(outcome::ReducedDensityMatrix.Outcome, nm::Nuclear.Model, grid::Radial.Grid,
-                            settings::ReducedDensityMatrix.Settings)
-    naturalOccupation = outcome.naturalOccupation;        naturalOrbitalExp  = outcome.naturalOrbitalExpansion;  
-    naturalOrbitals   = outcome.naturalOrbitals;          orbitalInteraction = outcome.orbitalInteraction;       
-    electronDensity   = outcome.electronDensity;          rho1p              = outcome.rho1p;             rho2p = outcome.rho2p
-    
-    naturalSubshells   = copy(outcome.level.basis.subshells)
-    
-    if  settings.calcNatural
-        rho1p                                = compute1pRDM(outcome.level)
-        naturalOccupation, naturalOrbitalExp = computeNaturalOrbitalExpansion(rho1p, outcome.level)
-        naturalOrbitals                      = computeNaturalOrbitals(naturalSubshells, naturalOrbitalExp, outcome.level)
-        # For test purposes
-        naturalOccupation                    = ones( length(naturalSubshells) )
-        naturalOrbitalExp[Subshell(1,-1)]    = zeros( length(naturalSubshells) )
-        naturalOrbitalExp[Subshell(2,-1)]    = ones(  length(naturalSubshells) )
-    end
-
-    if  settings.calcDensity
-        electronDensity = computeRadialDistribution(naturalOrbitalExp, grid, outcome.level)
-        # For test purposes
-        electronDensity = Radial.Density("Radial dist", ones(grid.NoPoints), grid)
-    end
-
-    if  settings.calcIpq
-        orbitalInteraction = computeOrbitalInteractions(naturalSubshells, naturalOrbitals, outcome.level)
-    end
-
-    if  settings.calc2pRDM
-        rho2p = compute2pRDM(outcome.level)
-    end
-
-    newOutcome = ReducedDensityMatrix.Outcome( outcome.level, naturalSubshells,  naturalOccupation, naturalOrbitalExp,
-                                                naturalOrbitals, orbitalInteraction, rho1p, rho2p, electronDensity )
-    return( newOutcome )
-end
-
-
-"""
-`ReducedDensityMatrix.computeRadialDistribution(naturalExp::Dict{Subshell, Array{Float64,1}}, grid::Radial.Grid, level::Level)`  
-    ... to compute the radial distribution function from the given standard orbitals and natural expansion
-        coefficients. An radial disribution D::Array{Float64,1} is returned that specifies the radial distribution
-        w.r.t. the given grid.
-"""
-function  computeRadialDistribution(naturalExp::Dict{Subshell, Array{Float64,1}}, grid::Radial.Grid, level::Level)
-    D = Radial.Density()
-    println(">> computeRadialDistribution() ... not yet implemented !!")
-
-    return( D )
-end
-
-
-"""
 `ReducedDensityMatrix.compute1pRDM(level::Level)`  
     ... to compute 1p RDM; a rdm::Array{Float64,2} is returned.
 """
@@ -254,21 +151,23 @@ function  compute1pRDM(level::Level)
     subshellList = level.basis.subshells
     lenNO = length(subshellList);    rho_pq     = zeros(lenNO,lenNO)
     # Cycle over all matrix elements of the CSF basis
-    opa          = SpinAngular.OneParticleOperator(0, plus, true)
+    opa          = SpinAngular.OneParticleOperator(0, plus)
+    # EACH COEFFICIENT IS ACCUMULATED ONCE, AT ITS OWN (a,b). Until 28-Aug-2026 this loop searched every pair of
+    # subshells for a coefficient matching EITHER ordering and then assigned to rho[p,q] AND rho[q,p], which
+    # double-counted twice over and made every OFF-DIAGONAL element exactly 4x too large -- the diagonals were
+    # right, so the error was invisible in a trace or an occupation sum. Measured on Be 1s^2 2s^2 + 1s^2 2s 3s,
+    # rho[2s,3s] came out -7.706351480018e-01 against the correct -1.926587870004e-01.
+    # The two factors: the spin-angular list carries BOTH orderings of a pair, since the (ir,is) loop visits
+    # csf(1,2) with a=2s,b=3s and csf(2,1) with a=3s,b=2s; and the (ip,iq)/(iq,ip) search then took each of those
+    # twice. Hermiticity needs no help here -- T(r,s;a,b) = T(s,r;b,a), so the (is,ir) pass fills rho[b,a] with
+    # the same value and the matrix comes out symmetric on its own.
+    index = Dict( sh => i  for (i, sh) in enumerate(subshellList) )
     for  (ir, rcsf) in enumerate(level.basis.csfs)
         for  (is, scsf) in enumerate(level.basis.csfs)
-            # Calculate angular coefficient for rank-0 operator
             wa = SpinAngular.computeCoefficients(opa, rcsf, scsf, subshellList) 
-            # Cycle over the pair of natural subshells in rho_pq
-            for (ip,p)  in  enumerate(subshellList)
-                for (iq,q)  in  enumerate(subshellList)
-                    for  coeff in wa
-                        if  (p == coeff.a   &&  q == coeff.b)  ||  (p == coeff.b   &&  q == coeff.a)
-                            jj = Basics.subshell_2j(level.basis.orbitals[coeff.a].subshell)
-                            rho_pq[ip,iq] = rho_pq[iq,ip] = rho_pq[ip,iq] + level.mc[ir] * coeff.T * sqrt( jj + 1) * level.mc[is]
-                        end
-                    end
-                end
+            for  coeff in wa
+                ip = index[coeff.a];    iq = index[coeff.b]
+                rho_pq[ip,iq] = rho_pq[ip,iq] + level.mc[ir] * coeff.T * level.mc[is]
             end
         end
     end
@@ -278,14 +177,105 @@ end
 
 
 """
-`ReducedDensityMatrix.compute2pRDM(level::Level)`  
+`ReducedDensityMatrix.compute1pRDMDirect(level::Level)`
+    ... to compute the 1p RDM directly from the CI mixing coefficients and CSF occupation numbers, following Eq. (7) of Ma et al., Atoms 12,
+        30 (2024), rho^kappa_nn' = sum_ij c_i v^ij_nn' c_j -- but derived here from elementary second quantization, independently of
+        SpinAngular.computeCoefficients.
+
+        Diagonal elements need no angular-momentum recoupling at all: the expectation value of a number operator in a normalized state is
+        just the mc-weighted sum of that CSF's own occupation number.
+
+        Off-diagonal elements are supported for the simplest, and here relevant, case only: two CSFs that differ by moving ONE electron
+        between two subshells of the SAME kappa, each holding 0 or 1 electron (e.g. a single 2s->3s substitution), with all other subshells
+        in identical coupling. For this case the transfer coefficient is the universal value sqrt(2), independent of kappa/j: writing the
+        singly-occupied pair coupled to a scalar (J=0) as |ab;0> = (1/sqrt(2j+1)) sum_m (-1)^(j-m) a+_{am} a+_{b,-m} |0> (the standard
+        pair-coupling identity) and the closed-shell pair as |aa;0> = (1/sqrt(2*(2j+1))) sum_m (-1)^(j-m) a+_{am} a+_{a,-m} |0> (note the
+        extra factor of 2 under the root here, from the (m,-m) double counting that only affects the same-shell case), direct evaluation of
+        N_ab = sum_m a+_{am} a_{bm} gives N_ab |ab;0> = sqrt(2) |aa;0> for ANY j. CSF pairs with a more general occupation pattern (more
+        than one electron differing per subshell) are NOT handled and raise an error -- those need the full
+        coefficient-of-fractional-parentage machinery in SpinAngularTables.
+        A rho_pq::Array{Float64,2} is returned.
+"""
+function  compute1pRDMDirect(level::Level)
+    subshellList = level.basis.subshells;    lenNO = length(subshellList)
+    rho_pq       = zeros(lenNO, lenNO)
+    csfs         = level.basis.csfs
+
+    # Diagonal expectation values: mc-weighted CSF occupation numbers, no coupling needed.
+    for  (i, csf)  in  enumerate(csfs)
+        for  ip = 1:lenNO    rho_pq[ip,ip] = rho_pq[ip,ip] + level.mc[i]^2 * csf.occupation[ip]    end
+    end
+
+    # Off-diagonal (cross-CSF) contributions from single-electron substitutions between subshells of the same kappa.
+    for  (ir, rcsf)  in  enumerate(csfs)
+        for  (is, scsf)  in  enumerate(csfs)
+            if  ir == is    continue    end
+            diffSubshells = Int64[];    validSingleSubstitution = true
+            for  i = 1:lenNO
+                diff = rcsf.occupation[i] - scsf.occupation[i]
+                if       diff == 0          continue
+                elseif   abs(diff) == 1     push!(diffSubshells, i)
+                else     validSingleSubstitution = false;    break
+                end
+            end
+            if  !validSingleSubstitution  ||  length(diffSubshells) != 2    continue    end
+
+            ia, ib = diffSubshells
+            if  subshellList[ia].kappa != subshellList[ib].kappa    continue    end
+            # Determine, order-independently, whether each of the two differing subshells oscillates between
+            # {0,1} (empty-type) or {full-1,full} (full-type) across the CSF pair -- direction (which CSF is
+            # bra/ket) does not matter since the sqrt(2) transfer coefficient is accumulated symmetrically below.
+            fullA = Basics.subshell_2j(subshellList[ia]) + 1;    fullB = Basics.subshell_2j(subshellList[ib]) + 1
+            occAset = Set([rcsf.occupation[ia], scsf.occupation[ia]])
+            occBset = Set([rcsf.occupation[ib], scsf.occupation[ib]])
+            if      occAset == Set([0,1])        &&  occBset == Set([fullB-1,fullB])
+                emptySite, fullSite = ia, ib
+            elseif  occAset == Set([fullA-1,fullA])  &&  occBset == Set([0,1])
+                emptySite, fullSite = ib, ia
+            else
+                error("ReducedDensityMatrix.compute1pRDMDirect: only single substitutions between a fully-closed " *
+                        "shell (one hole created) and an empty shell (one electron added) are supported; got "     *
+                        "occupations $(rcsf.occupation[ia]),$(scsf.occupation[ia]) and $(rcsf.occupation[ib]),"    *
+                        "$(scsf.occupation[ib]).")
+            end
+            # All other subshells must be in identical coupling for the plain sqrt(2) transfer coefficient to apply.
+            samecoupling = true
+            for  i = 1:lenNO
+                if  i == ia  ||  i == ib    continue    end
+                if  rcsf.occupation[i]  != scsf.occupation[i]   ||  rcsf.subshellJ[i] != scsf.subshellJ[i]  ||
+                    rcsf.subshellX[i]   != scsf.subshellX[i]     ||  rcsf.seniorityNr[i] != scsf.seniorityNr[i]
+                    samecoupling = false;    break
+                end
+            end
+            if  !samecoupling    continue    end
+
+            # The operator a+_fullSite a_emptySite has a NONZERO matrix element in only ONE (ir,is) direction:
+            # bra (rcsf) = the closed configuration (full at fullSite, empty at emptySite), ket (scsf) = the open
+            # one. The opposite ordering is an exact zero (it would need to annihilate an electron at emptySite
+            # that the closed-shell ket does not have) and must be skipped here -- accumulating it too would
+            # double the physical value. Hermiticity/reality already mirrors this single contribution into
+            # rho_pq[emptySite,fullSite] below.
+            fullCapacity = Basics.subshell_2j(subshellList[fullSite]) + 1
+            if  rcsf.occupation[fullSite] == fullCapacity  &&  rcsf.occupation[emptySite] == 0
+                rho_pq[fullSite,emptySite] = rho_pq[emptySite,fullSite] =
+                    rho_pq[fullSite,emptySite] + level.mc[ir] * sqrt(2.) * level.mc[is]
+            end
+        end
+    end
+
+    return( rho_pq )
+end
+
+
+"""
+`ReducedDensityMatrix.compute2pRDM(level::Level)`
     ... to compute 2p RDM for all pairs (p,q;r,s) of subshells; a rdm::Array{Float64,4} is returned.
 """
 function  compute2pRDM(level::Level)
     subshellList = level.basis.subshells
     lenNO = length(subshellList);    rdm     = zeros(lenNO,lenNO,lenNO,lenNO)
     # Cycle over all matrix elements of the CSF basis
-    opa = SpinAngular.TwoParticleOperator(0, plus, true)
+    opa = SpinAngular.TwoParticleOperator(0, plus)
     for  (i, icsf) in enumerate(level.basis.csfs)
         for  (j, jcsf) in enumerate(level.basis.csfs)
             # Calculate angular coefficient for rank-0 operator
@@ -298,9 +288,6 @@ function  compute2pRDM(level::Level)
                             for  coeff in wa
                                 if  (p == coeff.a   &&  q == coeff.b   &&  r == coeff.c   &&  s == coeff.d)  ||  
                                     (p == coeff.c   &&  q == coeff.d   &&  r == coeff.a   &&  s == coeff.b)
-                                    ##x if  coeff.V != 0.  @show i, j, coeff.V    end
-                                    ##x jj = Basics.subshell_2j(level.basis.orbitals[coeff.a].subshell)
-                                    ##x rdm[ip,iq,ir,is] = rdm[ir,is,ip,iq] = rdm[ip,iq,ir,is] + level.mc[ir] * coeff.T * sqrt( jj + 1) * level.mc[is]
                                     rdm[ip,iq,ir,is] = rdm[ir,is,ip,iq] = rdm[ip,iq,ir,is] + level.mc[i] * coeff.V * level.mc[j]
                                 end
                             end
@@ -316,15 +303,213 @@ end
 
 
 """
+`ReducedDensityMatrix.computeNaturalOrbitalExpansion(rho1p::Array{Float64,2}, level::Level)`
+    ... to perform the expansion of the natural orbitals for the given level in terms of the standard orbitals as defined by the basis. A
+        tuple (naturalOcc::Array{Float64,1}, naturalExp::Dict{Subshell, Array{Float64,1}}) is returned which provides the natural occpuation
+        numbers and expansion coefficients with regard to the given list of natural orbitals. This method makes use of the 1-particle RDM to
+        extract and diagonalize the expansion matrix. Since the (rank-0) 1p RDM has no matrix elements between subshells of different
+        relativistic symmetry kappa, it is block-diagonal in kappa; each kappa-block is diagonalized separately (Eqs. 7-8 of Ma et al.,
+        Atoms 12, 30 (2024)) and the resulting natural orbitals (sorted by decreasing occupation within the block) are associated, in turn,
+        with the standard subshells of that same kappa.
+"""
+function  computeNaturalOrbitalExpansion(rho1p::Array{Float64,2}, level::Level)
+    subshellList = level.basis.subshells;    lenNO = length(subshellList)
+    naturalOcc   = zeros(Float64, lenNO);     naturalExp = Dict{Subshell, Array{Float64,1}}()
+
+    kappaGroups = Dict{Int64, Array{Int64,1}}()
+    for  (i, sh)  in  enumerate(subshellList)     push!( get!(kappaGroups, sh.kappa, Int64[]), i )     end
+
+    for  (_, idxList)  in  kappaGroups
+        subMatrix = rho1p[idxList, idxList]
+        eigen     = Basics.fixEigenvectorPhase!( Basics.diagonalize(MatrixWithLinearAlgebra(), subMatrix) )
+        order     = sortperm(eigen.values, rev=true)                     # decreasing natural occupation
+        for  (k, ord)  in  enumerate(order)
+            i             = idxList[k]
+            labelSubshell = subshellList[i]
+            naturalOcc[i] = eigen.values[ord]
+            fullExp       = zeros(Float64, lenNO)
+            fullExp[idxList] = eigen.vectors[ord]
+            naturalExp[labelSubshell] = fullExp
+        end
+    end
+
+    return( naturalOcc, naturalExp )
+end
+
+
+"""
+`ReducedDensityMatrix.computeNaturalOrbitals(naturalSubshells::Array{Subshell,1}, naturalExp::Dict{Subshell, Array{Float64,1}},
+                                            level::Level)`
+    ... to compute the natural orbitals as superposition of the standard orbitals; for each subshell in naturalExp, an orbital is computed,
+        and naturalOrbitals::Dict{Subshell, Orbital} returned. Follows Eqs. 10-11 of Ma et al., Atoms 12, 30 (2024): P-tilde_n'kappa(r) =
+        sum_n u^kappa_{n,n'} P_nkappa(r), and likewise for Q.
+"""
+function  computeNaturalOrbitals(naturalSubshells::Array{Subshell,1}, naturalExp::Dict{Subshell, Array{Float64,1}}, level::Level)
+    subshellList    = level.basis.subshells
+    naturalOrbitals = Dict{Subshell, Orbital}()
+
+    for  subsh  in  naturalSubshells
+        exp = naturalExp[subsh]
+        mtp = 0
+        for  (i, s)  in  enumerate(subshellList)
+            if  exp[i] != 0.    mtp = max(mtp, length(level.basis.orbitals[s].P))    end
+        end
+        P = zeros(mtp);   Q = zeros(mtp);   Pprime = zeros(mtp);   Qprime = zeros(mtp);   energy = 0.
+
+        for  (i, s)  in  enumerate(subshellList)
+            c = exp[i];    if  c == 0.    continue    end
+            orb = level.basis.orbitals[s];   n = length(orb.P)
+            P[1:n]      = P[1:n]      + c * orb.P
+            Q[1:n]      = Q[1:n]      + c * orb.Q
+            if  !isempty(orb.Pprime)
+                Pprime[1:n] = Pprime[1:n] + c * orb.Pprime;   Qprime[1:n] = Qprime[1:n] + c * orb.Qprime
+            end
+            energy = energy + c^2 * orb.energy
+        end
+
+        parentOrb = level.basis.orbitals[subsh]
+        naturalOrbitals[subsh] = Orbital(subsh, parentOrb.isBound, parentOrb.useStandardGrid, energy, P, Q, Pprime, Qprime, parentOrb.grid)
+    end
+
+    return( naturalOrbitals )
+end
+
+
+"""
+`ReducedDensityMatrix.computeOrbitalInteractions(naturalSubshells::Array{Subshell,1}, naturalOrbitals::Dict{Subshell, Orbital},
+                                                level::Level)`
+    ... to compute the orbital interaction I_pq between pairs of natural orbitals; a matrix orbitalInteraction::Array{Float64,2} is
+        returned. Not yet implemented -- this quantity is not part of the Ma et al. (2024) recipe used elsewhere in this module and still
+        needs its own definition/derivation.
+"""
+function  computeOrbitalInteractions(naturalSubshells::Array{Subshell,1}, naturalOrbitals::Dict{Subshell, Orbital}, level::Level)
+    ns = length(naturalSubshells)
+    # NOT IMPLEMENTED, and it REFUSES rather than returning zeros.  Until 28-Aug-2026 it printed one line and
+    # returned zeros(ns,ns), which displayResults then tabulated under the heading "Orbital interactions I_pq" --
+    # a full, well-formatted table of zeros that says nothing about its own emptiness.  That is the same defect
+    # class as the 2pRDM table fixed in 26f1d2c, which printed orbitalInteraction in place of the rho_pprr it had
+    # just built.  settings.calcIpq now fails loudly instead.
+    error("\n\nReducedDensityMatrix.computeOrbitalInteractions() is NOT IMPLEMENTED, and settings.calcIpq = true\n" *
+          "therefore cannot be honoured.  It formerly returned a zero matrix, which was printed as a table of\n"     *
+          "orbital interactions I_pq (28-Aug-2026).\n\n"                                                             *
+          "    Set calcIpq = false to run everything else in this module.\n"                                         *
+          "    Implementing I_pq needs its own definition first: the quantity is NOT part of the Ma et al.\n"        *
+          "    (2024) recipe that the natural-orbital and density machinery here follows.\n")
+
+    return( zeros(ns,ns) )
+end
+
+
+"""
+`ReducedDensityMatrix.computeOutcomes(multiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
+                                        settings::ReducedDensityMatrix.Settings; output=true)` 
+    ... to compute (as selected) the 1-particle and 2-particle reduced density matrices, natural orbitals or other requested information for
+        the levels of interest. This is the driver of the module: it determines the outcomes, computes the properties of each and displays
+        the results to screen and to the summary file.
+        A newOutcomes::Array{ReducedDensityMatrix.Outcome,1} is returned for output = true, and nothing otherwise.
+"""
+function computeOutcomes(multiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
+                            settings::ReducedDensityMatrix.Settings; output=true)
+    println("")
+    printstyled("ReducedDensityMatrix.computeOutcomes(): The computation of the reduced density matrices starts now ... \n", color=:light_green)
+    printstyled("------------------------------------------------------------------------------------------------------ \n", color=:light_green)
+
+    outcomes = ReducedDensityMatrix.determineOutcomes(multiplet, settings)
+    # Display all selected levels before the computations start
+    if  settings.printBefore    ReducedDensityMatrix.displayOutcomes(outcomes, settings)    end
+    # Calculate all requested properties for each outcome
+    newOutcomes = ReducedDensityMatrix.Outcome[]
+    for  outcome in outcomes
+        newOutcome = ReducedDensityMatrix.computeProperties(outcome, nm, grid, settings) 
+        push!( newOutcomes, newOutcome)
+    end
+    # Print all results to screen
+    ReducedDensityMatrix.displayResults(stdout, newOutcomes, grid, settings)
+    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
+    if  printSummary    ReducedDensityMatrix.displayResults(iostream, newOutcomes, grid, settings)   end
+
+    if    output    return( newOutcomes )
+    else            return( nothing )
+    end
+end
+
+
+"""
+`ReducedDensityMatrix.computeProperties(outcome::ReducedDensityMatrix.Outcome, nm::Nuclear.Model, grid::Radial.Grid,
+                                        settings::ReducedDensityMatrix.Settings)`
+    ... to compute all properties for a given level; an outcome::ReducedDensityMatrix.Outcome is returned for which the properties are now
+        evaluated explicitly.
+"""
+function  computeProperties(outcome::ReducedDensityMatrix.Outcome, nm::Nuclear.Model, grid::Radial.Grid,
+                            settings::ReducedDensityMatrix.Settings)
+    naturalOccupation = outcome.naturalOccupation;        naturalOrbitalExp  = outcome.naturalOrbitalExpansion;  
+    naturalOrbitals   = outcome.naturalOrbitals;          orbitalInteraction = outcome.orbitalInteraction;       
+    electronDensity   = outcome.electronDensity;          rho1p              = outcome.rho1p;             rho2p = outcome.rho2p
+    
+    naturalSubshells   = copy(outcome.level.basis.subshells)
+    # The PUBLISHED route is compute1pRDM, which goes through SpinAngular and recouples properly at every rank.
+    # compute1pRDMDirect is kept as an independent cross-check only. It is a special-case shortcut, and its
+    # `samecoupling` test compares the RUNNING coupling subshellX[i] as well as subshellJ[i], so whenever the two
+    # substituted subshells ia < ib have any spectator BETWEEN them, that spectator's X necessarily differs and
+    # the whole element is dropped -- silently, by `continue`, not by the error its docstring promises.
+    # Measured 28-Aug-2026, Ne 1s^2 2s^2 2p^6 + 1s^2 2s^2 2p^5 3p, level 1: the diagonal agrees to every digit and
+    # both traces give 10.000000000000007, but rho[2p_1/2,3p_1/2] = +0.4913514443 and rho[2p_3/2,3p_3/2] =
+    # -0.2252087383 from the general route both come back as exactly 0.0 from Direct. Those off-diagonals ARE the
+    # correlation; dropping them leaves natural orbitals that are just the SCF orbitals again.
+    rho1p              = compute1pRDM(outcome.level)
+    naturalOccupation, naturalOrbitalExp = computeNaturalOrbitalExpansion(rho1p, outcome.level)
+
+    if  settings.calcNatural  ||  settings.calcDensity  ||  settings.calcIpq
+        naturalOrbitals = computeNaturalOrbitals(naturalSubshells, naturalOrbitalExp, outcome.level)
+    end
+
+    if  settings.calcDensity
+        electronDensity = computeRadialDistribution(naturalOccupation, naturalOrbitals, naturalSubshells, grid)
+    end
+
+    if  settings.calcIpq
+        orbitalInteraction = computeOrbitalInteractions(naturalSubshells, naturalOrbitals, outcome.level)
+    end
+
+    if  settings.calc2pRDM
+        rho2p = compute2pRDM(outcome.level)
+    end
+
+    newOutcome = ReducedDensityMatrix.Outcome( outcome.level, naturalSubshells,  naturalOccupation, naturalOrbitalExp,
+                                                naturalOrbitals, orbitalInteraction, rho1p, rho2p, electronDensity )
+
+    return( newOutcome )
+end
+
+
+"""
+`ReducedDensityMatrix.computeRadialDistribution(naturalOcc::Array{Float64,1}, naturalOrbitals::Dict{Subshell, Orbital},
+                                                    naturalSubshells::Array{Subshell,1}, grid::Radial.Grid)`
+    ... to compute the total radial electron density from the (occupation-weighted) natural orbitals, D(r) = sum_(n'kappa) occ_(n'kappa) [
+        P-tilde_(n'kappa)(r)^2 + Q-tilde_(n'kappa)(r)^2 ]. A Radial.Density is returned w.r.t. the given grid.
+"""
+function  computeRadialDistribution(naturalOcc::Array{Float64,1}, naturalOrbitals::Dict{Subshell, Orbital},
+                                        naturalSubshells::Array{Subshell,1}, grid::Radial.Grid)
+    Dr = zeros(grid.NoPoints)
+    for  (i, subsh)  in  enumerate(naturalSubshells)
+        occ = naturalOcc[i];    if  occ == 0.    continue    end
+        orb = naturalOrbitals[subsh];    mtp = length(orb.P)
+        for  k = 1:mtp    Dr[k] = Dr[k] + occ * (orb.P[k]^2 + orb.Q[k]^2)    end
+    end
+
+    return( Radial.Density("Radial density from natural orbitals", Dr, grid) )
+end
+
+
+"""
 `ReducedDensityMatrix.determineOutcomes(multiplet::Multiplet, settings::ReducedDensityMatrix.Settings)`  
-    ... to determine a list of Outcomes's for the computation of reduced density matrices and other information 
-        for the given multiplet. It takes into account the particular selections and settings. 
+    ... to determine a list of Outcomes's for the computation of reduced density matrices and other information for the given multiplet. It
+        takes into account the particular selections and settings.
         An Array{ReducedDensityMatrix.Outcome,1} is returned. Apart from the level specification, all physical 
         properties are set to zero during the initialization process.
 """
 function  determineOutcomes(multiplet::Multiplet, settings::ReducedDensityMatrix.Settings) 
     outcomes = ReducedDensityMatrix.Outcome[]
-    @show settings.levelSelection
     for  level  in  multiplet.levels
         if  Basics.selectLevel(level, settings.levelSelection)
             push!( outcomes, ReducedDensityMatrix.Outcome(level, Subshell[], Float64[], Dict{Subshell, Array{Float64,1}}(), 
@@ -337,9 +522,9 @@ end
 
 """
 `ReducedDensityMatrix.displayOutcomes(outcomes::Array{ReducedDensityMatrix.Outcome,1}, settings::ReducedDensityMatrix.Settings)`  
-    ... to display a list of levels that have been selected for the computations. A small neat table of all 
-        selected levels and their energies is printed but nothing is returned otherwise. Moreover, the
-        selected properties and information is printed as well, though not yet calculated.
+    ... to display a list of levels that have been selected for the computations. A small neat table of all selected levels and their
+        energies is printed but nothing is returned otherwise. Moreover, the selected properties and information is printed as well, though
+        not yet calculated.
 """
 function  displayOutcomes(outcomes::Array{ReducedDensityMatrix.Outcome,1}, settings::ReducedDensityMatrix.Settings)
     nx = 43
@@ -353,7 +538,7 @@ function  displayOutcomes(outcomes::Array{ReducedDensityMatrix.Outcome,1}, setti
     sa = sa * TableStrings.center(14, "Energy"; na=4);              
     sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
     println(sa);    println(sb);    println("  ", TableStrings.hLine(nx)) 
-    #  
+
     for  outcome in outcomes
         sa  = "  ";    sym = Basics.LevelSymmetry( outcome.level.J, outcome.level.parity)
         sa = sa * TableStrings.center(10, TableStrings.level(outcome.level.index); na=2)
@@ -362,7 +547,7 @@ function  displayOutcomes(outcomes::Array{ReducedDensityMatrix.Outcome,1}, setti
         println( sa )
     end
     println("  ", TableStrings.hLine(nx))
-    #
+
     println("\n\n  The following properties are calculated: \n")
     println("  + Natural occupations numbers")
     println("  + Natural orbital expansion in terms of the standard orbitals.")
@@ -375,11 +560,12 @@ end
 
 
 """
-`ReducedDensityMatrix.displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcome,1}, grid::Radial.Grid, 
-                                        settings::ReducedDensityMatrix.Settings)`  
-    ... to display a list of levels that have been selected for the computations. A small neat table of all 
-        selected levels and their energies is printed but nothing is returned otherwise. Moreover, the
-        selected properties and information is printed as well, though not yet calculated.
+`ReducedDensityMatrix.displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcome,1}, grid::Radial.Grid,
+                                     settings::ReducedDensityMatrix.Settings)`
+    ... to display the computed results for all outcomes on the given stream. The selected levels and their energies are tabulated first,
+        and then, for each level in turn, the 1-particle RDM, the natural occupation numbers and the natural orbital expansion; the natural
+        orbitals, the radial electron density, the orbital interactions I_pq and the 2-particle RDM follow for whichever of them the
+        settings requested. Nothing is returned.
 """
 function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcome,1}, grid::Radial.Grid, 
                             settings::ReducedDensityMatrix.Settings)
@@ -394,7 +580,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
     sa = sa * TableStrings.center(14, "Energy"; na=4);              
     sb = sb * TableStrings.center(14, TableStrings.inUnits("energy"); na=4)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #  
+
     for  outcome in outcomes
         sa  = "  ";    sym = Basics.LevelSymmetry( outcome.level.J, outcome.level.parity)
         sa = sa * TableStrings.center(10, TableStrings.level(outcome.level.index); na=2)
@@ -403,7 +589,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
         println(stream,  sa )
     end
     println(stream, "  ", TableStrings.hLine(nx))
-    #
+
     # Now print all selected result for each outcome
     for  outcome in outcomes
         nx = 120;       sym = Basics.LevelSymmetry( outcome.level.J, outcome.level.parity) 
@@ -412,8 +598,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
         println(stream, "  =============================")
         println(stream, "  Level: $(outcome.level.index) with symmetry $sym  ")
         println(stream, "  =============================")
-        #
-        #
+
         println(stream, " ")
         println(stream, "  1-particle RDM:")
         println(stream, " ")
@@ -425,7 +610,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             println(stream,  sb)
         end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
+
         for  (i, subsh)  in  enumerate(outcome.level.basis.subshells)
             sb = string(subsh)
             wa = TableStrings.floatList(10, outcome.rho1p[i,:])
@@ -436,8 +621,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             end
         end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
-        #
+
         println(stream, " ")
         println(stream, "  Natural occupation numbers:  ")
         println(stream, " ")
@@ -449,14 +633,13 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             println(stream,  sb)
         end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
+
         wa = TableStrings.floatList(10, outcome.naturalOccupation)
         for  (i, sa)  in  enumerate(wa)
             println(stream,  "          " * sa)
         end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
-        #
+
         nx = 120
         println(stream, " ")
         println(stream, "  Natural orbital expansion:")
@@ -469,20 +652,18 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             println(stream,  sb)
         end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
-        for  (i, subsh)  in  enumerate(outcome.naturalSubshells)
+
+        for  subsh  in  outcome.naturalSubshells
             sb = string(subsh)
-            if  i > 2   println(stream, "     " * sb * "    test ...");    break     end
             wa = TableStrings.floatList(10, outcome.naturalOrbitalExpansion[subsh])
             for  (j, sa)  in  enumerate(wa)
                 if       j == 1  sb = "     " * sb * "   " * sa
                 else             sb = "                  " * sa      end
                 println(stream,  sb)
             end
-            end
+        end
         println(stream, "  ", TableStrings.hLine(nx))
-        #
-        #
+
         if  settings.calcNatural
             println(stream, "\n  Natural orbitals are calculated for the following subshells and are available by outcome.naturalOrbitals:\n")
             wa = TableStrings.subshellList(10, outcome.naturalSubshells)
@@ -495,8 +676,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             end
             println(stream, "  ", TableStrings.hLine(nx))
         end
-        #
-        #
+
         if  settings.calcDensity
             println(stream, "\n  Radial electron distribution:\n")
             nx = 42;    sa = "         i)         r[i]       density[i]"
@@ -509,8 +689,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             end
             println(stream, "  ", TableStrings.hLine(nx))
         end
-        #
-        #
+
         if  settings.calcIpq
             nx = 120
             println(stream, "\n  Orbital interactions I_pq:\n")
@@ -522,7 +701,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
                 println(stream,  sb)
             end
             println(stream, "  ", TableStrings.hLine(nx))
-            #
+
             for  (i, subsh)  in  enumerate(outcome.naturalSubshells)
                 sb = string(subsh)
                 wa = TableStrings.floatList(10, outcome.orbitalInteraction[i,:])
@@ -534,8 +713,7 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             end
             println(stream, "  ", TableStrings.hLine(nx))
         end
-        #
-        #
+
         if  settings.calc2pRDM
             println(stream, "\n  Reduced 2-particle RDM were calculated for the following subshells and are available by outcome.rho2p:\n")
             wa = TableStrings.subshellList(10, outcome.level.basis.subshells)
@@ -547,11 +725,11 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
                 println(stream,  sb)
             end
             println(stream, "  ", TableStrings.hLine(nx))
-            #
+
             # Compute the diagonal part of rho2p
             lenNO = length(outcome.level.basis.subshells);   rho_pprr = zeros(lenNO,lenNO)
             for  ip = 1:lenNO   for  ir = 1:lenNO     rho_pprr[ip,ir] = outcome.rho2p[ip,ip, ir,ir]     end   end
-            #
+
             println(stream, "\n  The diagonal part of the 2-particle RDM refers the mean (product) of occuaption numbers " *
                             "rho_pp,rr = (n_p * n_r)_av:\n")
             wa = TableStrings.subshellList(10, outcome.level.basis.subshells)
@@ -563,10 +741,10 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
                 println(stream,  sb)
             end
             println(stream, "  ", TableStrings.hLine(nx))
-            #
+
             for  (i, subsh)  in  enumerate(outcome.level.basis.subshells)
                 sb = string(subsh)
-                wa = TableStrings.floatList(10, outcome.orbitalInteraction[i,:])
+                wa = TableStrings.floatList(10, rho_pprr[i,:])
                 for  (j, sa)  in  enumerate(wa)
                     if       j == 1  sb = "     " * sb * "     " * sa
                     else             sb = "                    " * sa      end
@@ -575,10 +753,11 @@ function  displayResults(stream::IO, outcomes::Array{ReducedDensityMatrix.Outcom
             end
             println(stream, "  ", TableStrings.hLine(nx))
         end
-        #
+
     end # outcomes
-    #
+
     return( nothing )
 end
+
 
 end # module

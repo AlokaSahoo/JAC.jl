@@ -6,7 +6,8 @@
 module DoubleAutoIonization
 
 
-using Printf, ..AngularMomentum, ..AtomicState, ..AutoIonization, ..Basics, ..ManyElectron, ..Nuclear, ..Radial,  ..TableStrings
+using Printf, ..AngularMomentum, ..AtomicState, ..AutoIonization, ..Basics, ..Bsplines, ..ManyElectron, ..Nuclear, ..Radial,
+      ..TableStrings
 
 
 """
@@ -22,29 +23,69 @@ using Printf, ..AngularMomentum, ..AtomicState, ..AutoIonization, ..Basics, ..Ma
     + operator                ::AbstractEeInteraction   ... Auger operator that is to be used for evaluating the Auger amplitudes: 
                                                             allowed values are: CoulombInteraction(), BreitInteraction(), ...
     + lineSelection           ::LineSelection           ... Specifies the selected levels, if any.
+    + continuumExchange       ::Union{Nothing,Bool}     ... True/false to force exchange between the free electrons and
+                                                            the bound electrons on or off; `nothing` -- the default -- lets
+                                                            `Basics.perform` decide automatically from the final-ion
+                                                            `AsfSettings.scField` (`Continuum.resolveExchangeDefault`, item 99).
 """
 struct Settings  <:  AbstractProcessSettings
     green                     ::Array{GreenChannel,1}
-    NoEnergySharings          ::Int64 
-    printBefore               ::Bool 
+    NoEnergySharings          ::Int64
+    printBefore               ::Bool
     minAugerEnergy            ::Float64
     maxAugerEnergy            ::Float64
-    maxKappa                  ::Int64  
+    maxKappa                  ::Int64
     operator                  ::AbstractEeInteraction
-    lineSelection             ::LineSelection 
-end 
+    lineSelection             ::LineSelection
+    continuumExchange         ::Union{Nothing,Bool}
+end
 
 
 """
 `DoubleAutoIonization.Settings()`  ... constructor for the default values of DoubleAutoIonization line computations
 """
 function Settings()
-    Settings(GreenChannel[], 0, false, 0., 10e5, 100, CoulombInteraction(), LineSelection())
+    Settings(GreenChannel[], 0, false, 0., 10e5, 100, CoulombInteraction(), LineSelection(), nothing)
+end
+
+
+"""
+`DoubleAutoIonization.Settings(set::DoubleAutoIonization.Settings;`
+
+    green..., NoEnergySharings..., printBefore..., minAugerEnergy..., maxAugerEnergy..., maxKappa..., operator...,
+    lineSelection..., continuumExchange...)
+
+    ... constructor for modifying the given DoubleAutoIonization.Settings by 'overwriting' the previously selected parameters.
+        A settings::DoubleAutoIonization.Settings is returned.
+"""
+function Settings(set::DoubleAutoIonization.Settings;
+                        green::Union{Nothing,Array{GreenChannel,1}} = nothing,
+                        NoEnergySharings::Union{Nothing,Int64} = nothing,
+                        printBefore::Union{Nothing,Bool} = nothing,
+                        minAugerEnergy::Union{Nothing,Float64} = nothing,
+                        maxAugerEnergy::Union{Nothing,Float64} = nothing,
+                        maxKappa::Union{Nothing,Int64} = nothing,
+                        operator::Union{Nothing,AbstractEeInteraction} = nothing,
+                        lineSelection::Union{Nothing,LineSelection} = nothing,
+                        continuumExchange::Union{Nothing,Bool} = nothing )
+
+    if  isnothing(green)              greenx            = set.green              else   greenx            = green              end
+    if  isnothing(NoEnergySharings)   NoEnergySharingsx = set.NoEnergySharings   else   NoEnergySharingsx = NoEnergySharings   end
+    if  isnothing(printBefore)        printBeforex      = set.printBefore        else   printBeforex      = printBefore        end
+    if  isnothing(minAugerEnergy)     minAugerEnergyx   = set.minAugerEnergy     else   minAugerEnergyx   = minAugerEnergy     end
+    if  isnothing(maxAugerEnergy)     maxAugerEnergyx   = set.maxAugerEnergy     else   maxAugerEnergyx   = maxAugerEnergy     end
+    if  isnothing(maxKappa)           maxKappax         = set.maxKappa           else   maxKappax         = maxKappa           end
+    if  isnothing(operator)           operatorx         = set.operator           else   operatorx         = operator           end
+    if  isnothing(lineSelection)      lineSelectionx    = set.lineSelection      else   lineSelectionx    = lineSelection      end
+    if  isnothing(continuumExchange)  continuumExchangex = set.continuumExchange else   continuumExchangex = continuumExchange end
+
+    Settings( greenx, NoEnergySharingsx, printBeforex, minAugerEnergyx, maxAugerEnergyx, maxKappax, operatorx,
+              lineSelectionx, continuumExchangex )
 end
 
 
 # `Base.show(io::IO, settings::DoubleAutoIonization.Settings)`  ... prepares a proper printout of the variable settings::DoubleAutoIonization.Settings.
-function Base.show(io::IO, settings::DoubleAutoIonization.Settings) 
+function Base.show(io::IO, settings::DoubleAutoIonization.Settings)
     println(io, "green:                         (settings.green)  ")
     println(io, "NoEnergySharings:             $(settings.NoEnergySharings)  ")
     println(io, "printBefore:                  $(settings.printBefore)  ")
@@ -53,6 +94,7 @@ function Base.show(io::IO, settings::DoubleAutoIonization.Settings)
     println(io, "maxKappa:                     $(settings.maxKappa)  ")
     println(io, "operator:                     $(settings.operator)  ")
     println(io, "lineSelection:                $(settings.lineSelection)  ")
+    println(io, "continuumExchange:            $(settings.continuumExchange)  ")
 end
 
 
@@ -181,10 +223,8 @@ function amplitude(kind::String, channel::DoubleAutoIonization.ReducedChannel,
                 println(">>> Apply Green function channel with symmetry $(greenChannel.symmetry)")
                 for  (nlev, level)  in  enumerate(greenChannel. gMultiplet.levels)
                     ## if  nlev > 2  println(">>> Skip nlev > 2 ... need to be corrected !!!!");    break     end
-                    auChannel = AutoIonization.Channel(channel.kappa1, channel.xSymmetry, channel.phase1, ComplexF64(0.))
-                    am_ni     = AutoIonization.amplitude(CoulombInteraction(), auChannel, level, initialLevel, grid; printout=false)
-                    auChannel = AutoIonization.Channel(channel.kappa2, symi, channel.phase2, ComplexF64(0.))
-                    am_fn     = AutoIonization.amplitude(CoulombInteraction(), auChannel, continuumLevel, level, grid; printout=false)
+                    am_ni     = AutoIonization.amplitude(CoulombInteraction(), channel.kappa1, channel.phase1, level, initialLevel, grid; printout=false)
+                    am_fn     = AutoIonization.amplitude(CoulombInteraction(), channel.kappa2, channel.phase2, continuumLevel, level, grid; printout=false)
                     amplitude = amplitude  +  am_fn * am_ni / (eni - level.energy)
                     println(">> DAI for level $nlev  with  am_fn(A) = $am_fn  and  am_ni(A) = $am_ni")
                 end 
@@ -208,18 +248,23 @@ end
 function  computeAmplitudesProperties(line::DoubleAutoIonization.Line, nm::Nuclear.Model, grid::Radial.Grid, 
                                         settings::DoubleAutoIonization.Settings)
     newSharings  = DoubleAutoIonization.Sharing[]
-    contSettings = Continuum.Settings(false, grid.NoPoints-50);    trate = 0.
+    contSettings = Continuum.Settings(isnothing(settings.continuumExchange) ? false : settings.continuumExchange, grid.NoPoints-50);    trate = 0.
+    # The nuclear potential and the B-spline primitives depend only on (nm, grid) and are constant here, while the loop
+    # below generates TWO continuum orbitals per channel and per sharing; building them once keeps that work out of it.
+    nucPot       = Nuclear.nuclearPotential(nm, grid)
+    primitives   = Bsplines.generatePrimitives(grid)
     symi         = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
     #
     for sharing in line.sharings
-        @show sharing.epsilon1, sharing.epsilon2, sharing.weight
         newChannels = DoubleAutoIonization.ReducedChannel[];    drate = 0.
         for (ich, ch)  in  enumerate(sharing.channels)
             newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, line.initialLevel.basis.subshells)
             newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, newiLevel.basis.subshells)
             # Generate two continuum orbitals as associated with this sharing; these orbitals move each in the potential of the final level
-            cOrbital1, phase1 = Continuum.generateOrbitalForLevel(ch.energy1, Subshell(101, ch.kappa1), newfLevel, nm, grid, contSettings)
-            cOrbital2, phase2 = Continuum.generateOrbitalForLevel(ch.energy2, Subshell(102, ch.kappa2), newfLevel, nm, grid, contSettings)
+            cOrbital1, phase1 = Continuum.generateOrbitalForLevel(ch.energy1, Subshell(101, ch.kappa1), newfLevel, nm, grid, contSettings;
+                                                                   nuclearPot=nucPot, primitives=primitives)
+            cOrbital2, phase2 = Continuum.generateOrbitalForLevel(ch.energy2, Subshell(102, ch.kappa2), newfLevel, nm, grid, contSettings;
+                                                                   nuclearPot=nucPot, primitives=primitives)
             # Expand these continuum orbitals in the orbital set as given by the Green function
             greenOrbs  = settings.green[1].gMultiplet.levels[1].basis.orbitals
             bOrbitals1 = Basics.expandOrbital(cOrbital1, greenOrbs, 3.0e-5, grid, printout=true)
@@ -232,7 +277,6 @@ function  computeAmplitudesProperties(line::DoubleAutoIonization.Line, nm::Nucle
                 if   bOrb1.subshell  in  newfLevel.basis.subshells        continue    end
                 for  bOrb2  in  bOrbitals2
                     if   bOrb2.subshell  in  newfLevel.basis.subshells    continue    end
-                    @show ich, bOrb1.subshell, bOrb2.subshell
                     if   bOrb1.subshell < bOrb2.subshell
                         # Only  subshell_1 < subshell_2  need to be considered since the 'reversed' case is part of another channel 
                         # Perhaps, one needs to multiply with 2 here (??)
@@ -247,7 +291,6 @@ function  computeAmplitudesProperties(line::DoubleAutoIonization.Line, nm::Nucle
             push!( newChannels, ReducedChannel(ch.energy1, ch.kappa1, phase1, ch.xSymmetry,
                                                 ch.energy2, ch.kappa2, phase2, amplitude) )
             drate = drate  +  2pi * abs(amplitude)^2
-            @show ich, drate, "   ", amplitude
         end
         # Calculate the differential decay rates
         push!( newSharings, DoubleAutoIonization.Sharing( sharing.epsilon1, sharing.epsilon2, sharing.weight, drate, newChannels) )

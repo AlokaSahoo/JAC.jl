@@ -1,8 +1,13 @@
 
 """
 `module JAC.RacahAlgebra`  
-... a submodel of JAC that contains procedures for defining a Nuclear.Model and for calculating various nuclear
-    potentials.
+... a submodel of JAC that contains procedures for the symbolic evaluation of expressions from Racah's algebra.
+
+    LINE WIDTH: THIS FILE IS EXEMPT FROM THE 140-COLUMN RULE (maintainer's decision, 31-Aug-2026), as are the two
+    `RacahAlgebra-inc-` files, which have been out of hygiene scope since 28-Aug-2026. The over-long lines are
+    almost all `RacahExpression( ... )` constructor calls carrying all eleven fields positionally, written one per
+    line with the fields in fixed columns so that two expressions can be compared by eye. That is a table in
+    everything but name and is left as it is.
 """
 module  RacahAlgebra
 
@@ -19,9 +24,33 @@ export  ClebschGordan, Integral, Kronecker, Triangle, W3j, W6j, W9j, Ylm, Djpq, 
 """
 struct  AngMomentum   end
 
+"""
+`RacahAlgebra.AngMomentum(x::Basic)`
+    ... passes a symbolic angular momentum through unchanged; a value::Basic is returned. The identity case of the
+        family, so that a caller need not know whether its argument is already symbolic.
+"""
 function AngMomentum(x::Basic)   return(x)                                end
+
+
+"""
+`RacahAlgebra.AngMomentum(x::Int64)`
+    ... converts an integer angular momentum to the symbolic `Basic` the algebra works in; a value::Basic is returned.
+"""
 function AngMomentum(x::Int64)   return( Basic(x) )                       end
+
+
+"""
+`RacahAlgebra.AngMomentum(x::Symbol)`
+    ... turns a Julia symbol such as `:ja` into the SymEngine symbol of the same name, so that an angular momentum
+        may be left unspecified and carried through the algebra by name; a value::Basic is returned.
+"""
 function AngMomentum(x::Symbol)  return( SymEngine.symbols(string(x)) )   end
+"""
+`RacahAlgebra.AngMomentum(x::Rational{Int64})`
+    ... converts a rational angular momentum to the symbolic `Basic` the algebra works in, ACCEPTING ONLY integer
+        and half-integer values -- a denominator other than 1 or 2 raises, since nothing else is an angular
+        momentum. A value::Basic is returned. The companion methods take a Basic, an Int64 or a Symbol.
+"""
 function AngMomentum(x::Rational{Int64})  
     if  x.den == 1 || x.den == 2     return( Basic(x.num//x.den) )   
     else    error("Angular momenta must be integer or half-interger.")
@@ -284,6 +313,12 @@ function  Ylm(l::AngMomentum, m::AngMomentum, theta::Basic, phi::Basic, star::Bo
 end
 
 
+"""
+`RacahAlgebra.Ylm(wl::Basic, wm::Basic, theta::Basic, phi::Basic, star::Bool)`
+    ... returns the spherical harmonic Y_lm(theta,phi), or its COMPLEX CONJUGATE if star = true. The conjugate is
+        not formed by conjugating the function but by using Y*_lm = (-1)^m Y_l,-m, so the result stays a
+        RacahExpression the algebra can go on simplifying. A rex::RacahExpression is returned.
+"""
 function  Ylm(wl::Basic, wm::Basic, theta::Basic, phi::Basic, star::Bool)
     if  star    rex = RacahExpression( Basic[], Integral[], -wm, Basic(1), Kronecker[], Triangle[], W3j[], W6j[], W9j[], [Ylm(wl, -wm, theta, phi)], Djpq[] )
                 return( rex )
@@ -440,17 +475,17 @@ function RacahExpression(rex::RacahAlgebra.RacahExpression;
                             w6js::Union{Nothing,Array{W6j,1}}=nothing,                w9js::Union{Nothing,Array{W9j,1}}=nothing,
                             ylms::Union{Nothing,Array{Ylm,1}}=nothing,                djpqs::Union{Nothing,Array{Djpq,1}}=nothing) 
     
-    if  summations == nothing   summationsx = rex.summations    else   summationsx = summations     end 
-    if  integrals  == nothing   integralsx  = rex.integrals     else   integralsx  = integrals      end 
-    if  phase      == nothing   phasex      = rex.phase         else   phasex = phase               end 
-    if  weight     == nothing   weightx     = rex.weight        else   weightx = weight             end 
-    if  deltas     == nothing   deltasx     = rex.deltas        else   deltasx = deltas             end 
-    if  triangles  == nothing   trianglesx  = rex.triangles     else   trianglesx = triangles       end 
-    if  w3js       == nothing   w3jsx       = rex.w3js          else   w3jsx  = w3js                end 
-    if  w6js       == nothing   w6jsx       = rex.w6js          else   w6jsx  = w6js                end 
-    if  w9js       == nothing   w9jsx       = rex.w9js          else   w9jsx  = w9js                end 
-    if  ylms       == nothing   ylmsx       = rex.ylms          else   ylmsx  = ylms                end 
-    if  djpqs      == nothing   djpqsx      = rex.djpqs         else   djpqsx = djpqs               end 
+    if  isnothing(summations)   summationsx = rex.summations    else   summationsx = summations     end 
+    if  isnothing(integrals)    integralsx  = rex.integrals     else   integralsx  = integrals      end 
+    if  isnothing(phase)        phasex      = rex.phase         else   phasex = phase               end 
+    if  isnothing(weight)       weightx     = rex.weight        else   weightx = weight             end 
+    if  isnothing(deltas)       deltasx     = rex.deltas        else   deltasx = deltas             end 
+    if  isnothing(triangles)    trianglesx  = rex.triangles     else   trianglesx = triangles       end 
+    if  isnothing(w3js)         w3jsx       = rex.w3js          else   w3jsx  = w3js                end 
+    if  isnothing(w6js)         w6jsx       = rex.w6js          else   w6jsx  = w6js                end 
+    if  isnothing(w9js)         w9jsx       = rex.w9js          else   w9jsx  = w9js                end 
+    if  isnothing(ylms)         ylmsx       = rex.ylms          else   ylmsx  = ylms                end 
+    if  isnothing(djpqs)        djpqsx      = rex.djpqs         else   djpqsx = djpqs               end 
     
     RacahExpression( summationsx, integralsx, phasex, weightx, deltasx, trianglesx, w3jsx, w6jsx, w9jsx, ylmsx, djpqsx)
 end
@@ -759,7 +794,7 @@ end
 
 
 """
-`RacahAlgebra.evaluate(rex::RacahExpression; special::Bool=false)`  
+`RacahAlgebra.evaluate(rx::RacahExpression)`  
     ... attempts to evaluate and symbolically simplify a Racah expression by means of special values, if
         special=true, or by sum rules. A newrex::RacahExpression is returned once a (single) simplification 
         has been found, and nothing otherwise. No attempt is presently made to find further simplication, 
@@ -772,21 +807,21 @@ function  evaluate(rx::RacahExpression; special::Bool=false)
     if  special
         # Simplify by means of special values if this is requested
         for  (iaW3j, aW3j) in enumerate(rex.w3js)    wa = evaluate(aW3j)
-            if wa != nothing    newW3js = W3j[]     
+            if !isnothing(wa)    newW3js = W3j[]     
                 for  (ibW3j, bW3j) in enumerate(rex.w3js)   if  iaW3j == ibW3j  else  push!(newW3js, ibW3j)   end    end
                 rrex = RacahExpression( rex.summations, rex.integrals, rex.phase, rex.weight, rex.deltas, rex.triangles, newW3js, rex.w6js, rex.w9js, rex.ylms, rex.djpqs)
                 return( rrex * wa )
             end
         end
         for  (iaW6j, aW6j) in enumerate(rex.w6js)    wa = evaluate(aW6j)
-            if wa != nothing    newW6js = W6j[]     
+            if !isnothing(wa)    newW6js = W6j[]     
                 for  (ibW6j, bW6j) in enumerate(rex.w6js)   if  iaW6j == ibW6j  else  push!(newW6js, ibW6j)   end    end
                 rrex = RacahExpression( rex.summations, rex.integrals, rex.phase, rex.weight, rex.deltas, rex.triangles, rex.w3js, newW6js, rex.w9js, rex.ylms, rex.djpqs)
                 return( rrex * wa )
             end
         end
         for  (iaW9j, aW9j) in enumerate(rex.w9js)    wa = evaluate(aW9j)
-            if wa != nothing    newW9js = W9j[]     
+            if !isnothing(wa)    newW9js = W9j[]     
                 for  (ibW9j, bW9j) in enumerate(rex.w9js)   if  iaW9j == ibW9j  else  push!(newW9js, ibW9j)   end    end
                 rrex = RacahExpression( rex.summations, rex.integrals, rex.phase, rex.weight, rex.deltas, rex.triangles, rex.w3js, rex.w6js, newW9js, rex.ylms, rex.djpqs)
                 return( rrex * wa )
@@ -1107,7 +1142,8 @@ function purifyPhase(phase::SymEngine.Basic)
         elseif   length(SymEngine.get_args(wa)) == 2
             wb = SymEngine.get_args(wa);   wc = convert(Int64,wb[1]);   wc = rem(wc+100,4);    if  wc == 3   wc = -1   end                                    
                                                         newphase = newphase + wc * wb[2]
-        else     error("stop a")
+        else     error("RacahAlgebra: a phase argument with $(length(SymEngine.get_args(wa))) sub-terms is not handled here; " *
+                     "only a bare symbol (0) or a two-argument product is.")
         end
     end
     
@@ -1116,7 +1152,7 @@ end
 
 
 """
-`RacahAlgebra.recursionW3j(ww::W3j, rule::AbstractRecursionW3j)`  
+`RacahAlgebra.recursionW3j(w3j::W3j, rule::AbstractRecursionW3j)`  
     ... applies a given recursion rules to w3j; an rexList::Array{RacahAlgebra.RacahExpression,1} is returned.
 """
 function recursionW3j(w3j::W3j, rule::AbstractRecursionW3j)
@@ -1453,7 +1489,7 @@ function selectW3j(n::Int64)
     elseif  n == 16     w3j = W3j(j, j, 2, m, -m, 0)
 
     elseif  n == 20     w3j = FAIL
-    else    error("stop a")
+    else    error("RacahAlgebra.selectW3j(): there is no test W3j numbered $n. Valid: 1-16 and 20.")
     end
     
     return( w3j )
@@ -1496,7 +1532,7 @@ function selectW6j(n::Int64)
     elseif  n == 20     w6j = W6j( a, b, c, 2, c-1, b)
     elseif  n == 21     w6j = W6j( a, b, c, 2, c-1, b+1)
     elseif  n == 22     w6j = W6j( a, b, c, 2, c  , b)
-    else    error("stop a")
+    else    error("RacahAlgebra.selectW6j(): there is no test W6j numbered $n. Valid: 1-22.")
     end
     
     return( w6j )
@@ -1520,7 +1556,7 @@ function selectW9j(n::Int64)
     
     if      n ==  1     w9j = W9j(a, b, 0, c, d, 0, ee, f, 0)
     elseif  n ==  2     w9j = W9j(a, b, c, d, ee, f, g, h, 0)
-    else    error("stop a")
+    else    error("RacahAlgebra.selectW9j(): there is no test W9j numbered $n. Valid: 1-2.")
     end
     
     return( w9j )
@@ -1683,7 +1719,7 @@ function selectRacahExpression(n::Int64)
                         dw3j = W3j(j4, j10, j5, m4, m10, -m5);  ew3j = W3j(j5, j11, j6, m5, m11, -m6);    fw3j = W3j(j6, j12, j1, m6, m12, -m1)
                         rex = RacahExpression( [m1, m2, m3, m4, m5, m6], Integral[], -m1-m2-m3-m4-m5-m6, Basic(1), Kronecker[], Triangle[], 
                                                 W3j[aw3j, bw3j, cw3j, dw3j, ew3j, fw3j], W6j[], W9j[], Ylm[], Djpq[] )
-    else    error("stop a")
+    else    error("RacahAlgebra.selectRacahExpression(): there is no test expression numbered $n.")
     end
     
     return( rex )
@@ -1710,7 +1746,7 @@ function selectRacahIntegral(n::Int64)
     # Integral rules for one Ylm symbol   ... to be adapted
     if      n ==  1     w3j = W3j(j, j, J, m, -m, M)
                         rex = RacahExpression( [m], Integral[], Basic(-m), Basic(1), Kronecker[], Triangle[], [w3j], W6j[], W9j[], Ylm[], Djpq[] )
-    else    error("stop a")
+    else    error("RacahAlgebra.selectRacahIntegral(): there is no test integral numbered $n. Valid: 1.")
     end
     
     return( rex )
@@ -1811,7 +1847,8 @@ function simplifyDeltas(rex::RacahExpression)
             newYlms       = RacahAlgebra.subs(newYlms,      delta.k, delta.i)
             newDjpqs      = RacahAlgebra.subs(newDjpqs,     delta.k, delta.i)
             newIntegrals  = RacahAlgebra.subs(newIntegrals, delta.k, delta.i)
-        else    error("stop a")
+        else    error("RacahAlgebra: a Kronecker delta must carry either two symbols or a symbol and an integer; " *
+                    "this one carries neither, so there is nothing to substitute.")
         end
         
         nrex = RacahExpression( newSummations, newIntegrals, newPhase, newWeight, newDeltas, newTriangles, newW3js, newW6js, newW9js, newYlms, newDjpqs )
@@ -2120,7 +2157,8 @@ function symmetricForms(w3j::RacahAlgebra.W3j; regge::Bool=false)
     deltas  = Kronecker[];    triangles = Triangle[];   w3js = W3j[];   w6js = W6j[];   w9js = W9j[];   ylms = Ylm[];   djpqs = Djpq[];   ints = Integral[]
     sums    = Basic[];    phase = Basic(0);    weight = Basic(1)
     
-    if regge    error("stop a")
+    if regge    error("RacahAlgebra.symmetricForms(::W3j): the REGGE symmetries are not implemented. Call with " *
+                     "regge = false for the twelve classical symmetries.")
     else
         j1 = w3j.ja;  j2 = w3j.jb;  j3 = w3j.jc;  m1 = w3j.ma;  m2 = w3j.mb;  m3 = w3j.mc
         push!( rexList, RacahExpression( sums, ints, phase,            weight, deltas, triangles, [W3j(j1,j2,j3, m1,m2,m3)],     w6js, w9js, ylms, djpqs ) )
@@ -2152,7 +2190,8 @@ function symmetricForms(w6j::RacahAlgebra.W6j; regge::Bool=false)
     deltas  = Kronecker[];    triangles = Triangle[];   w3js = W3j[];   w6js = W6j[];   w9js = W9j[];   ylms = Ylm[];   djpqs = Djpq[];   ints = Integral[]
     sums    = Basic[];        phase = Basic(0);    weight = Basic(1)
     
-    if regge    error("stop a")
+    if regge    error("RacahAlgebra.symmetricForms(::W6j): the REGGE symmetries are not implemented. Call with " *
+                     "regge = false for the twenty-four classical symmetries.")
     else
         j1 = w6j.a;  j2 = w6j.b;  j3 = w6j.c;  j4 = w6j.d;  j5 = w6j.e;  j6 = w6j.f
         push!( rexList, RacahExpression( sums, ints, phase, weight, deltas, triangles, w3js, [W6j(j1,j2,j3, j4,j5,j6)], w9js, ylms, djpqs ) )
@@ -2353,19 +2392,33 @@ end
 
 
 """
-`RacahAlgebra.testSpecialValuesW3j(; short::Bool=true)`  
+`RacahAlgebra.testPrint(sa::String, success::Bool)`
+    ... writes one line of a self-test report -- the label sa padded to column 100, then `[OK]` or `[Fail]` -- to
+        the test stream. Nothing is returned. The twin of `TestFrames.testPrint`, kept here so that this module's
+        self-tests do not depend on the test framework.
+"""
+function testPrint(sa::String, success::Bool)
+    printTest, iostream = Defaults.getDefaults("test flag/stream")
+    ok(succ) =  succ ? "[OK]" : "[Fail]"
+    sb = sa * repeat(" ", 110);   sb = sb[1:100] * ok(success);    println(iostream, sb)
+    return( nothing )
+end
+
+
+"""
+`RacahAlgebra.testSpecialValuesW3j(; short::Bool=true)`
     ... tests the implemented special values of the Wigner 3j symbols by just comparing comparing the number of Wigner symbols,
         which must be 0 in all cases. The success::Bool of these tests is returned.
 """
 function testSpecialValuesW3j(; short::Bool=true)
-    success  = true;   
+    success  = true;
     #
     for n = 2:16
         w3j = RacahAlgebra.selectW3j(n);;    nrex = RacahAlgebra.evaluate(w3j);      nwnjs = RacahAlgebra.countWignerSymbols(nrex)
         if  nwnjs != 0   println(">> Test fails for special value rule  $n :");      @show w3j;    @show nrex;    @show nwnjs     end
         success = success && (nwnjs == 0)
     end
-    
+    testPrint("testSpecialValuesW3j()::", success)
     return( success )
 end
 
@@ -2376,14 +2429,14 @@ end
         which must be 0 in all cases. The success::Bool of these tests is returned.
 """
 function testSpecialValuesW6j(; short::Bool=true)
-    success  = true;   
+    success  = true;
     #
     for n = 1:22
         w6j = RacahAlgebra.selectW6j(n);;    nrex = RacahAlgebra.evaluate(w6j);      nwnjs = RacahAlgebra.countWignerSymbols(nrex)
         if  nwnjs != 0   println(">> Test fails for special value rule  $n :");      @show w6j;    @show nrex;    @show nwnjs     end
         success = success && (nwnjs == 0)
     end
-    
+    testPrint("testSpecialValuesW6j()::", success)
     return( success )
 end
 
@@ -2394,14 +2447,14 @@ end
         which must be 0 in all cases. The success::Bool of these tests is returned.
 """
 function testSpecialValuesW9j(; short::Bool=true)
-    success  = true;   
+    success  = true;
     #
     for n = 1:2
         w9j = RacahAlgebra.selectW6j(n);;    nrex = RacahAlgebra.evaluate(w9j);      nwnjs = RacahAlgebra.countWignerSymbols(nrex)
         if  nwnjs != 0   println(">> Test fails for special value rule  $n :");      @show w6j;    @show nrex;    @show nwnjs     end
         success = success && (nwnjs == 0)
     end
-    
+    testPrint("testSpecialValuesW9j()::", success)
     return( success )
 end
 
@@ -2464,7 +2517,7 @@ function testSumRules(; short::Bool=true)
         success = success && (nwnjs == nwnjList[n])
         if  !(nwnjs == nwnjList[n])     println("\n**** Test for rule $n  with nwnjs = $(nwnjs)  !=== $(nwnjList[n])")       end
     end
-    
+    testPrint("testSumRules()::", success)
     return( success )
 end
 

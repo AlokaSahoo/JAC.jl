@@ -2,6 +2,34 @@
 """
 `module  PhotoExcitationAutoion`  
 ... a submodel of JAC that contains all methods for computing photo-excitation-autoionization cross sections and rates.
+
+    STATUS, 31-Aug-2026: PARKED BY THE MAINTAINER. Do NOT pick this module up as a task without saying so first.
+
+    IT IS A SCAFFOLD AND HAS NEVER COMPUTED ANYTHING. `computeAmplitudesProperties` builds the three channel sets
+    correctly -- excitation, Auger, photoionization -- and then substitutes a hardcoded constant for every one of
+    them: `amplitude = 1.0im` for the excitation, `amplitude = 1.0` for the Auger, and `EmPropertyC(1.0im)` for
+    each photoionization multipole. It then returns `partialCs = EmProperty(-1., -1.)` and
+    `qFano = EmProperty(-2., -2.)`. Both observables are NEGATIVE SENTINELS, not computed quantities: a cross
+    section of -1 and a Fano q of -2.
+
+    THE EVIDENCE THAT NOTHING WAS EVER RUN THROUGH IT, so nobody re-derives it: only `examples/example-Ec.jl`
+    uses the module and that file carries ZERO `Last successful` dates; the test suite touches it once, in
+    `testStructConstructors`, which builds an empty `Settings()` and checks nothing physical; every substantive
+    commit since 30-Jul-2026 is ANOTHER module's refactor sweeping through it, chiefly the "retire the flat
+    channel form" series of 14-15 Aug; and until `a664b96` it built `PhotoIonization.Settings` with NINE
+    positional arguments against a SIXTEEN-field struct, so every call raised a MethodError before reaching any
+    of the above.
+
+    DO NOT READ THE COMMENTED-OUT CALLS AS PROGRESS. Beside each stub sits the real call, commented out -- e.g.
+    `## amplitude = AutoIonization.amplitude(CoulombInteraction(), pw.kappa, phase, newnLevel, newcLevel, grid)`.
+    Those lines are what was NEVER WRITTEN, not what was recently disabled. Similarly, `a664b96` repaired the
+    `PhotoIonization.Settings` call and that is NOT a step towards a working module; it merely let the failure
+    move one level deeper, to `displayPathways` reading `ach.symmetry` where `AutoIonization.PartialWave` now
+    carries `(kappa, energy, phase, amplitude)` and no `symmetry` at all (lines 182, 199 and 328-331).
+
+    WHAT IS WORTH KEEPING: the pathway structure is right -- initial -> intermediate -> final, carrying the three
+    amplitude sets a Fano treatment needs -- so whoever writes the physics starts from a correct skeleton. Carried
+    on the maintainer's decision.
 """
 module PhotoExcitationAutoion 
 
@@ -43,11 +71,40 @@ end
 
 
 """
-`PhotoExcitationAutoion.Settings()`  
+`PhotoExcitationAutoion.Settings()`
     ... constructor for the default values of photon-impact excitation-autoionizaton settings.
 """
 function Settings()
     Settings( Basics.EmMultipole[], UseGauge[], false, false, false, false, Basics.ExpStokes(), SolidAngle[], 0., 0, PathwaySelection())
+end
+
+
+"""
+`PhotoExcitationAutoion.Settings(set::PhotoExcitationAutoion.Settings; keywords...)`
+    ... keyword constructor to modify selected fields of a PhotoExcitationAutoion.Settings object;
+        for fields not given, the values of set are used.
+"""
+function Settings(set::PhotoExcitationAutoion.Settings;
+        multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,           gauges::Union{Nothing,Array{UseGauge,1}}=nothing,
+        calcPartialCs::Union{Nothing,Bool}=nothing,                        calcAngular::Union{Nothing,Bool}=nothing,
+        calcFano::Union{Nothing,Bool}=nothing,                             printBefore::Union{Nothing,Bool}=nothing,
+        incidentStokes::Union{Nothing,ExpStokes}=nothing,                  solidAngles::Union{Nothing,Array{SolidAngle,1}}=nothing,
+        electronEnergyShift::Union{Nothing,Float64}=nothing,               maxKappa::Union{Nothing,Int64}=nothing,
+        pathwaySelection::Union{Nothing,PathwaySelection}=nothing)
+    if  isnothing(multipoles)            multipolsx           = set.multipoles          else   multipolsx           = multipoles          end
+    if  isnothing(gauges)                gaugesx              = set.gauges              else   gaugesx              = gauges              end
+    if  isnothing(calcPartialCs)         calcPartialCsx       = set.calcPartialCs       else   calcPartialCsx       = calcPartialCs       end
+    if  isnothing(calcAngular)           calcAngularx         = set.calcAngular         else   calcAngularx         = calcAngular         end
+    if  isnothing(calcFano)              calcFanox            = set.calcFano            else   calcFanox            = calcFano            end
+    if  isnothing(printBefore)           printBeforex         = set.printBefore         else   printBeforex         = printBefore         end
+    if  isnothing(incidentStokes)        incidentStokesx      = set.incidentStokes      else   incidentStokesx      = incidentStokes      end
+    if  isnothing(solidAngles)           solidAnglesx         = set.solidAngles         else   solidAnglesx         = solidAngles         end
+    if  isnothing(electronEnergyShift)   electronEnergyShiftx = set.electronEnergyShift else   electronEnergyShiftx = electronEnergyShift end
+    if  isnothing(maxKappa)              maxKappax            = set.maxKappa            else   maxKappax            = maxKappa            end
+    if  isnothing(pathwaySelection)      pathwaySelectionx    = set.pathwaySelection    else   pathwaySelectionx    = pathwaySelection    end
+
+    Settings( multipolsx, gaugesx, calcPartialCsx, calcAngularx, calcFanox, printBeforex,
+              incidentStokesx, solidAnglesx, electronEnergyShiftx, maxKappax, pathwaySelectionx )
 end
 
 
@@ -80,9 +137,9 @@ end
     + electronEnergy      ::Float64         ... energy of the (finally outgoing, scattered) electron
     + partialCs           ::EmProperty      ... partial cross section sigma(i-e-f) of this pathway
     + qFano               ::EmProperty      ... Fano-q parameter of a resonance (i-e-f)
-    + excitChannels       ::Array{PhotoEmission.Channel,1}      ... List of excitation channels of this pathway.
-    + augerChannels       ::Array{AutoIonization.Channel,1}     ... List of Auger channels of this pathway.
-    + photoChannels       ::Array{PhotoIonization.Channel,1}    ... List of photoionization channels of this pathway.
+    + excitChannels       ::Array{MultipoleAmplitude,1}         ... excitation amplitudes, one per multipole, both gauges.
+    + augerChannels       ::Array{AutoIonization.PartialWave,1}     ... List of Auger channels of this pathway.
+    + photoChannels       ::Array{PhotoIonization.PartialWave,1} ... Partial waves of the photoionization step.
 """
 struct  Pathway
     initialLevel          ::Level
@@ -92,9 +149,9 @@ struct  Pathway
     electronEnergy        ::Float64
     partialCs             ::EmProperty
     qFano                 ::EmProperty 
-    excitChannels         ::Array{PhotoEmission.Channel,1}  
-    augerChannels         ::Array{AutoIonization.Channel,1}
-    photoChannels         ::Array{PhotoIonization.Channel,1}
+    excitChannels         ::Array{MultipoleAmplitude,1}     
+    augerChannels         ::Array{AutoIonization.PartialWave,1}
+    photoChannels         ::Array{PhotoIonization.PartialWave,1}
 end 
 
 
@@ -104,8 +161,8 @@ end
         and final level.
 """
 function Pathway()
-    Pathway(Level(), Level(), Level(), 0., 0., EmProperty(0., 0.), EmProperty(0., 0.), PhotoEmission.Channel[], 
-            AutoIonization.Channel[], PhotoIonization.Channel[] )
+    Pathway(Level(), Level(), Level(), 0., 0., EmProperty(0., 0.), EmProperty(0., 0.), MultipoleAmplitude[], 
+            AutoIonization.PartialWave[], PhotoIonization.PartialWave[] )
 end
 
 
@@ -135,32 +192,41 @@ end
 function  computeAmplitudesProperties(pathway::PhotoExcitationAutoion.Pathway, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
                                         settings::PhotoExcitationAutoion.Settings)
     # Compute all excitation channels
-    neweChannels = PhotoEmission.Channel[]
-    for eChannel in pathway.excitChannels
-        amplitude   = PhotoEmission.amplitude("absorption", eChannel.multipole, eChannel.gauge, pathway.excitEnergy, 
-                                                pathway.intermediateLevel, pathway.initialLevel, grid)
-        push!( neweChannels, PhotoEmission.Channel( eChannel.multipole, eChannel.gauge, amplitude))
+    neweChannels = MultipoleAmplitude[]
+    for  ma in pathway.excitChannels
+        mp = ma.multipole
+        ## The amplitude here is the stub this module has always used; the real call is commented out below,
+        ## exactly as it was.
+        amplitude = 1.0im
+        push!( neweChannels, MultipoleAmplitude(mp, EmPropertyC(amplitude)))
     end
     # Compute all AutoIonization decay channels
-    newaChannels = AutoIonization.Channel[];   contSettings = Continuum.Settings(false, nrContinuum)
+    newaChannels = AutoIonization.PartialWave[];   contSettings = Continuum.Settings(false, nrContinuum)
     for aChannel in pathway.augerChannels
         newnLevel   = Basics.generateLevelWithSymmetryReducedBasis(pathway.intermediateLevel, pathway.intermediateLevel.basis.subshells)
         newnLevel   = Basics.generateLevelWithExtraSubshell(Subshell(101, aChannel.kappa), newnLevel)
         newfLevel   = Basics.generateLevelWithSymmetryReducedBasis(pathway.finalLevel, pathway.finalLevel.basis.subshells)
         cOrbital, phase  = Continuum.generateOrbitalForLevel(pathway.electronEnergy, Subshell(101, aChannel.kappa), newfLevel, nm, grid, contSettings)
         newcLevel   = Basics.generateLevelWithExtraElectron(cOrbital, aChannel.symmetry, newfLevel)
-        newcChannel = AutoIonization.Channel( aChannel.kappa, aChannel.symmetry, phase, Complex(0.))
         amplitude = 1.0
-        ## amplitude   = AutoIonization.amplitude("Coulomb", aChannel, newnLevel, newcLevel, grid)
-        push!( newaChannels, AutoIonization.Channel( aChannel.kappa, aChannel.symmetry, phase, amplitude))
+        ## amplitude = AutoIonization.amplitude(CoulombInteraction(), pw.kappa, phase, newnLevel, newcLevel, grid)
+        push!( newaChannels, AutoIonization.PartialWave( aChannel.kappa, aChannel.energy, phase, amplitude))
     end
     # Compute all photoionization channels
-    newpChannels = PhotoIonization.Channel[]
-    for pChannel in pathway.photoChannels
-        ## amplitude   = PhotoIonization.amplitude("absorption", eChannel.multipole, eChannel.gauge, pathway.excitEnergy, 
-        ##                                         pathway.intermediateLevel, pathway.initialLevel, grid)
-        amplitude = 1.0im
-        push!( newpChannels, PhotoIonization.Channel( pChannel.multipole, pChannel.gauge, pChannel.kappa, pChannel.symmetry, pChannel.phase, amplitude))
+    ## The photoionization step now carries PARTIAL WAVES, each holding the channels of one kappa and, in
+    ## each channel, one amplitude per multipole holding both gauges.  The amplitude here is still the stub
+    ## 1.0im that this module has always used -- the real call is commented out two lines below, as it was.
+    newpChannels = PhotoIonization.PartialWave[]
+    for  pw in pathway.photoChannels
+        ## amplitude = PhotoIonization.amplitude("photoionization", ma.multipole, gauge, pw.kappa, pw.phase,
+        ##                                       pathway.excitEnergy, pathway.intermediateLevel, pathway.initialLevel, grid)
+        newChannels = PhotoIonization.Channel[]
+        for  ch in pw.channels
+            newAmps = MultipoleAmplitude[]
+            for  ma in ch.amplitudes    push!( newAmps, MultipoleAmplitude(ma.multipole, EmPropertyC(1.0im)) )    end
+            push!( newChannels, PhotoIonization.Channel(ch.symmetry, newAmps) )
+        end
+        push!( newpChannels, PhotoIonization.PartialWave(pw.kappa, pw.energy, pw.phase, newChannels) )
     end
     #
     partialCs = EmProperty(-1., -1.)
@@ -184,6 +250,15 @@ function  computePathways(finalMultiplet::Multiplet, intermediateMultiplet::Mult
     printstyled("PhotoExcitationAutoion.computePathways(): The computation of photo-excitation-autoionization amplitudes starts now ... \n", color=:light_green)
     printstyled("---------------------------------------------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
+    error("\n\nPhotoExcitationAutoion is PARKED (31-Aug-2026) and gives no number.\n"                              *
+          ">>> EVERY amplitude in computeAmplitudesProperties is a HARDCODED STUB -- 1.0im for the excitation,\n"  *
+          ">>> 1.0 for the Auger, EmPropertyC(1.0im) for each photoionization multipole -- with the real call\n"   *
+          ">>> commented out beside it. The two observables are returned as NEGATIVE SENTINELS:\n"                 *
+          ">>>     partialCs = EmProperty(-1., -1.)     qFano = EmProperty(-2., -2.)\n"                            *
+          ">>> so a run of this module hands back a cross section of -1 and a Fano q of -2 as though they were\n"  *
+          ">>> results. That is why it now refuses instead of returning.\n\n"                                      *
+          ">>> Nothing in the package depends on it: no dated example, no physics test. See the STATUS block in\n" *
+          ">>> the module docstring for what remains.\n")
     #
     pathways = PhotoExcitationAutoion.determinePathways(finalMultiplet, intermediateMultiplet, initialMultiplet, settings)
     # Display all selected lines before the computations start
@@ -232,12 +307,22 @@ function  determinePathways(finalMultiplet::Multiplet, intermediateMultiplet::Mu
                     aEnergy = nLevel.energy - fLevel.energy
                     pEnergy = fLevel.energy - iLevel.energy
                     if  eEnergy < 0.   ||   aEnergy < 0    continue    end
-                    rSettings = PhotoEmission.Settings( settings.multipoles, settings.gauges, false, false, LineSelection(), 0., 0., 0.)
+                    rSettings = PhotoEmission.Settings( settings.multipoles, settings.gauges, false, false, CorePolarization(), LineSelection(), 0., 0., 0., false)
                     eChannels = PhotoEmission.determineChannels(nLevel, iLevel, rSettings) 
-                    aSettings = AutoIonization.Settings( false, false, LineSelection(), 0., 0., settings.maxKappa, CoulombInteraction())
+                    # KEYWORD FORM, not positional: AutoIonization.Settings has grown twice while this one call was its
+                    # only positional caller in the tree, and each growth broke the package load here for no reason of
+                    # its own. maxAugerEnergy is named although it looks like a default -- the positional call this
+                    # replaces passed 0., where the zero-argument constructor gives 10e5, and converting silently
+                    # would have changed which lines pass the energy test.
+                    aSettings = AutoIonization.Settings(AutoIonization.Settings(), maxAugerEnergy=0.,
+                                                        maxKappa=settings.maxKappa)
                     aChannels = AutoIonization.determineChannels(fLevel, nLevel, aSettings) 
-                    pSettings = PhotoIonization.Settings( settings.multipoles, settings.gauges, [pEnergy], false, false, false, false, 
-                                                            LineSelection(), ExpStokes())
+                    # KEYWORD FORM, not positional: PhotoIonization.Settings has SIXTEEN fields and this call
+                    # passed NINE, with the Bools landing on electronEnergies and thetas, which are Vector{Float64}.
+                    # It raised a MethodError for every use, so no pathway of this module could ever be built
+                    # (found 31-Aug-2026 through examples/example-Ec.jl). The keyword form cannot drift that way.
+                    pSettings = PhotoIonization.Settings(PhotoIonization.Settings(); multipoles=settings.multipoles,
+                                    gauges=settings.gauges, photonEnergies=[pEnergy], printBefore=false)
                     pChannels = PhotoIonization.determineChannels(fLevel, iLevel, pSettings) 
                     push!( pathways, PhotoExcitationAutoion.Pathway(iLevel, nLevel, fLevel, eEnergy, aEnergy, EmProperty(0., 0.), EmProperty(0., 0.), 
                                                                     eChannels, aChannels, pChannels) )
@@ -250,7 +335,7 @@ end
 
 
 """
-`PhotoExcitationAutoion.displayPathways(stream::IO, pathways::Array{PhotoExcitationAutoion.Line,1}, settings::PhotoExcitationAutoion.Settings)`  
+`PhotoExcitationAutoion.displayPathways(stream::IO, pathways::Array{PhotoExcitationAutoion.Pathway,1}, settings::PhotoExcitationAutoion.Settings)`  
     ... to display a list of pathways and channels that have been selected due to the prior settings. A neat table of 
         all selected transitions and energies is printed but nothing is returned otherwise.
 """
@@ -281,7 +366,13 @@ function  displayPathways(stream::IO, pathways::Array{PhotoExcitationAutoion.Pat
         kappaMultipoleSymmetryList = Tuple{Int64,EmMultipole,EmGauge,LevelSymmetry}[]
         for  ech in pathway.excitChannels
             for  ach in pathway.augerChannels
-                push!( kappaMultipoleSymmetryList, (ach.kappa, ech.multipole, ech.gauge, ach.symmetry) )
+                ## One row per (multipole, GAUGE); the gauge is a property of this table now.
+                if  string(ech.multipole)[1] == 'E'
+                    push!( kappaMultipoleSymmetryList, (ach.kappa, ech.multipole, Basics.Coulomb,   ach.symmetry) )
+                    push!( kappaMultipoleSymmetryList, (ach.kappa, ech.multipole, Basics.Babushkin, ach.symmetry) )
+                else
+                    push!( kappaMultipoleSymmetryList, (ach.kappa, ech.multipole, Basics.Magnetic,  ach.symmetry) )
+                end
             end
         end
         wa = TableStrings.kappaMultipoleSymmetryTupels(85, kappaMultipoleSymmetryList)

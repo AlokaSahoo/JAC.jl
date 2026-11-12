@@ -1,17 +1,19 @@
 
 """
 `module  JAC.PhotoRecombination`  
-... a submodel of JAC that contains all methods for computing photo-recomnbination, i.e. radiative recombination 
-    and radiative electron capture properties between some initial and final-state multiplets.
+... a submodel of JAC that contains all methods for computing photo-recomnbination, i.e. radiative recombination and radiative electron
+    capture properties between some initial and final-state multiplets.
 """
 module PhotoRecombination
 
 
-using Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..HydrogenicIon, ..InteractionStrength,
+using Printf, ..AngularMomentum, ..Basics, ..Bsplines, ..Continuum, ..Defaults, ..HydrogenicIon, ..InteractionStrength,
                 ..ManyElectron, ..PhotoEmission, ..Radial, ..Nuclear, ..TableStrings
 
+
 """
-`struct  PhotoRecombination.Settings  <:  AbstractProcessSettings` ... defines a type for the details and parameters of computing photo recombination lines.
+`struct  PhotoRecombination.Settings  <:  AbstractProcessSettings`
+    ... defines a type for the details and parameters of computing photo recombination lines.
 
     + multipoles          ::Array{EmMultipole}  ... Multipoles of the radiation field that are to be included.
     + gauges              ::Array{UseGauge}     ... Gauges to be included into the computations.
@@ -20,58 +22,63 @@ using Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..Hydrogenic
     + useIonEnergies      ::Bool                ... Make use of ion energies in [MeV/u] to obtain the electron energies.
     + calcTotalCs         ::Bool                ... True, if the total cross sections is to be calculated/displayed for all initial levels.
     + calcAnisotropy      ::Bool                ... True, if the overall anisotropy is to be calculated.
-    + calcTensors         ::Bool                ... True, if the statistical tensors are to be calculated and 
-                                                    false otherwise.
+    + calcTensors         ::Bool                ... True, if the statistical tensors are to be calculated and false otherwise.
     + printBefore         ::Bool                ... True, if all energies and lines are printed before their evaluation.
     + maxKappa            ::Int64               ... Maximum kappa value of partial waves to be included.
     + lineSelection       ::LineSelection       ... Specifies the selected levels, if any.
+    + continuumExchange   ::Union{Nothing,Bool} ... True/false to force exchange between the captured electron and the bound
+                                                    electrons on or off; `nothing` -- the default -- lets `Basics.perform`
+                                                    decide automatically from the final-ion `AsfSettings.scField`
+                                                    (`Continuum.resolveExchangeDefault`, item 99).
 """
 struct Settings  <:  AbstractProcessSettings
     multipoles            ::Array{EmMultipole}
     gauges                ::Array{UseGauge}
-    electronEnergies      ::Array{Float64,1} 
+    electronEnergies      ::Array{Float64,1}
     ionEnergies           ::Array{Float64,1}
     useIonEnergies        ::Bool
     calcTotalCs           ::Bool
     calcAnisotropy        ::Bool
-    calcTensors           ::Bool 
-    printBefore           ::Bool 
-    maxKappa              ::Int64 
-    lineSelection         ::LineSelection 
-end 
+    calcTensors           ::Bool
+    printBefore           ::Bool
+    maxKappa              ::Int64
+    lineSelection         ::LineSelection
+    continuumExchange     ::Union{Nothing,Bool}
+end
 
 
 """
-`PhotoRecombination.Settings(set::PhotoRecombination..Settings;`
+`PhotoRecombination.Settings(set::PhotoRecombination.Settings;`
 
-        multipoles=..,          gauges=..,              electronEnergies=..,          ionEnergies=..,     
-        useIonEnergies=..,      calcTotalCs..,          calcAnisotropy=..,            calcTensors=..,             
-        printBefore=..,         maxKappa=..,            lineSelection=..)
-                    
-    ... constructor for modifying the given PhotoRecombination..Settings by 'overwriting' the previously selected parameters.
+        multipoles=..,          gauges=..,              electronEnergies=..,          ionEnergies=..,
+        useIonEnergies=..,      calcTotalCs..,          calcAnisotropy=..,            calcTensors=..,
+        printBefore=..,         maxKappa=..,            lineSelection=..,             continuumExchange=..)
+
+    ... constructor for modifying the given PhotoRecombination.Settings by 'overwriting' the previously selected parameters.
 """
-function Settings(set::PhotoRecombination.Settings;    
-    multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,                gauges::Union{Nothing,Array{UseGauge,1}}=nothing,  
-    electronEnergies::Union{Nothing,Array{Float64,1}}=nothing,              ionEnergies::Union{Nothing,Array{Float64,1}}=nothing,       
-    useIonEnergies::Union{Nothing,Bool}=nothing,                            calcTotalCs::Union{Nothing,Bool}=nothing, 
-    calcAnisotropy::Union{Nothing,Bool}=nothing,                            calcTensors::Union{Nothing,Bool}=nothing,   
-    printBefore::Union{Nothing,Bool}=nothing,                               maxKappa::Union{Nothing,Int64}=nothing, 
-    lineSelection::Union{Nothing,LineSelection}=nothing)  
-    
-    if  multipoles        == nothing   multipolesx        = set.multipoles        else  multipolesx        = multipoles         end 
-    if  gauges            == nothing   gaugesx            = set.gauges            else  gaugesx            = gauges             end 
-    if  electronEnergies  == nothing   electronEnergiesx  = set.electronEnergies  else  electronEnergiesx  = electronEnergies   end 
-    if  ionEnergies       == nothing   ionEnergiesx       = set.ionEnergies       else  ionEnergiesx       = ionEnergies        end 
-    if  useIonEnergies    == nothing   useIonEnergiesx    = set.useIonEnergies    else  useIonEnergiesx    = useIonEnergies     end 
-    if  calcTotalCs       == nothing   calcTotalCsx       = set.calcTotalCs       else  calcTotalCsx       = calcTotalCs        end 
-    if  calcAnisotropy    == nothing   calcAnisotropyx    = set.calcAnisotropy    else  calcAnisotropyx    = calcAnisotropy     end 
-    if  calcTensors       == nothing   calcTensorsx       = set.calcTensors       else  calcTensorsx       = calcTensors        end 
-    if  printBefore       == nothing   printBeforex       = set.printBefore       else  printBeforex       = printBefore        end 
-    if  maxKappa          == nothing   maxKappax          = set.maxKappa          else  maxKappax          = maxKappa           end 
-    if  lineSelection     == nothing   lineSelectionx     = set.lineSelection     else  lineSelectionx     = lineSelection      end 
+function Settings(set::PhotoRecombination.Settings;
+    multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,                gauges::Union{Nothing,Array{UseGauge,1}}=nothing,
+    electronEnergies::Union{Nothing,Array{Float64,1}}=nothing,              ionEnergies::Union{Nothing,Array{Float64,1}}=nothing,
+    useIonEnergies::Union{Nothing,Bool}=nothing,                            calcTotalCs::Union{Nothing,Bool}=nothing,
+    calcAnisotropy::Union{Nothing,Bool}=nothing,                            calcTensors::Union{Nothing,Bool}=nothing,
+    printBefore::Union{Nothing,Bool}=nothing,                               maxKappa::Union{Nothing,Int64}=nothing,
+    lineSelection::Union{Nothing,LineSelection}=nothing,                    continuumExchange::Union{Nothing,Bool}=nothing)
 
-    Settings( multipolesx, gaugesx, electronEnergiesx, ionEnergiesx, useIonEnergiesx, calcTotalCsx, calcAnisotropyx, 
-              calcTensorsx, printBeforex, maxKappax, lineSelectionx)
+    if  isnothing(multipoles)          multipolesx        = set.multipoles        else  multipolesx        = multipoles         end
+    if  isnothing(gauges)              gaugesx            = set.gauges            else  gaugesx            = gauges             end
+    if  isnothing(electronEnergies)    electronEnergiesx  = set.electronEnergies  else  electronEnergiesx  = electronEnergies   end
+    if  isnothing(ionEnergies)         ionEnergiesx       = set.ionEnergies       else  ionEnergiesx       = ionEnergies        end
+    if  isnothing(useIonEnergies)      useIonEnergiesx    = set.useIonEnergies    else  useIonEnergiesx    = useIonEnergies     end
+    if  isnothing(calcTotalCs)         calcTotalCsx       = set.calcTotalCs       else  calcTotalCsx       = calcTotalCs        end
+    if  isnothing(calcAnisotropy)      calcAnisotropyx    = set.calcAnisotropy    else  calcAnisotropyx    = calcAnisotropy     end
+    if  isnothing(calcTensors)         calcTensorsx       = set.calcTensors       else  calcTensorsx       = calcTensors        end
+    if  isnothing(printBefore)         printBeforex       = set.printBefore       else  printBeforex       = printBefore        end
+    if  isnothing(maxKappa)            maxKappax          = set.maxKappa          else  maxKappax          = maxKappa           end
+    if  isnothing(lineSelection)       lineSelectionx     = set.lineSelection     else  lineSelectionx     = lineSelection      end
+    if  isnothing(continuumExchange)   continuumExchangex = set.continuumExchange else  continuumExchangex = continuumExchange  end
+
+    Settings( multipolesx, gaugesx, electronEnergiesx, ionEnergiesx, useIonEnergiesx, calcTotalCsx, calcAnisotropyx,
+              calcTensorsx, printBeforex, maxKappax, lineSelectionx, continuumExchangex)
 end
 
 
@@ -79,13 +86,13 @@ end
 `PhotoRecombination.Settings()`  ... constructor for the default values of photo recombination line computations
 """
 function Settings()
-    Settings(EmMultipole[], UseGauge[], Float64[], Float64[], false, false, false, false, false, 0, LineSelection() )
+    Settings(EmMultipole[], UseGauge[], Float64[], Float64[], false, false, false, false, false, 0, LineSelection(), nothing )
 end
 
 
-# `Base.show(io::IO, settings::PhotoRecombination.Settings)`  
+# `Base.show(io::IO, settings::PhotoRecombination.Settings)`
 #		... prepares a proper printout of the variable settings::PhotoRecombination.Settings.
-function Base.show(io::IO, settings::PhotoRecombination.Settings) 
+function Base.show(io::IO, settings::PhotoRecombination.Settings)
     println(io, "multipoles:               $(settings.multipoles)  ")
     println(io, "gauges:                   $(settings.gauges)  ")
     println(io, "electronEnergies:         $(settings.electronEnergies)  ")
@@ -97,68 +104,72 @@ function Base.show(io::IO, settings::PhotoRecombination.Settings)
     println(io, "printBefore:              $(settings.printBefore)  ")
     println(io, "maxKappa:                 $(settings.maxKappa)  ")
     println(io, "lineSelection:            $(settings.lineSelection)  ")
+    println(io, "continuumExchange:        $(settings.continuumExchange)  ")
 end
 
 
 """
-`struct  PhotoRecombination.Channel`  
-    ... defines a type for a photorecombination channel to help characterize a single multipole and scattering 
-        (continuum) state of many electron-states with a single free electron.
+`struct  PhotoRecombination.Channel`
+    ... ONE asymptotic scattering state: the initial ion plus a free electron, coupled to a total symmetry.
 
-    + multipole      ::EmMultipole          ... Multipole of the photon emission/absorption.
-    + gauge          ::EmGauge              ... Gauge for dealing with the (coupled) radiation field.
-    + kappa          ::Int64                ... partial-wave of the free electron
-    + symmetry       ::LevelSymmetry        ... total angular momentum and parity of the scattering state
-    + phase          ::Float64              ... phase of the partial wave
-    + amplitude      ::Complex{Float64}     ... Rec amplitude associated with the given channel.
+    + symmetry       ::LevelSymmetry                            ... total J^parity of the scattering state.
+    + amplitudes     ::Array{MultipoleAmplitude,1}        ... one entry per contributing multipole.
 """
 struct  Channel
-    multipole        ::EmMultipole
-    gauge            ::EmGauge
-    kappa            ::Int64
     symmetry         ::LevelSymmetry
-    phase            ::Float64
-    amplitude        ::Complex{Float64}
+    amplitudes       ::Array{MultipoleAmplitude,1}
 end
 
 
 """
-`struct  PhotoRecombination.Line`  
-    ... defines a type for a Photorecombination line that may include the definition of channels.
+`struct  PhotoRecombination.PartialWave`
+    ... ONE partial wave of the incoming free electron, and the channels it serves.
 
-    + initialLevel   ::Level                  ... initial-(state) level
-    + finalLevel     ::Level                  ... final-(state) level
-    + electronEnergy ::Float64                ... Energy of the (incoming free) electron.
-    + photonEnergy   ::Float64                ... Energy of the emitted photon.
-    + betaGamma2     ::Float64                ... beta^2 * gamma^2.
-    + weight         ::Float64                ... weight of line in the integration over electron energies.
-    + crossSection   ::EmProperty             ... Cross section for this electron capture.
-    + channels       ::Array{PhotoRecombination.Channel,1}    ... List of photorecombination channels of this line.
+    + kappa          ::Int64                            ... partial wave of the free electron.
+    + energy         ::Float64                          ... energy of the free electron.
+    + phase          ::Float64                          ... scattering phase; a property of (energy, kappa).
+    + channels       ::Array{Channel,1}           ... the total symmetries this partial wave serves.
+
+        The radial orbital and the phase belong HERE, not to a channel: they do not depend on the total symmetry, which is precisely why one
+        kappa can serve several of them. computeAmplitudesProperties needed a per-kappa dictionary to exploit that; here it follows from the
+        shape.
+"""
+struct  PartialWave
+    kappa            ::Int64
+    energy           ::Float64
+    phase            ::Float64
+    channels         ::Array{Channel,1}
+end
+
+
+"""
+`struct  PhotoRecombination.Line`
+    ... defines a type for a photo-recombination line between an initial ion level and a final (recombined) level, for one energy of the
+        incoming electron, and carries that electron as a list of partial waves.
+
+    + initialLevel   ::Level                            ... initial-(state) level
+    + finalLevel     ::Level                            ... final-(state) level
+    + electronEnergy ::Float64                          ... Energy of the (incoming free) electron.
+    + photonEnergy   ::Float64                          ... Energy of the emitted photon.
+    + betaGamma2     ::Float64                          ... beta^2 * gamma^2.
+    + weight         ::Float64                          ... weight of line in the integration over electron energies.
+    + crossSection   ::EmProperty                       ... Cross section for this electron capture.
+    + partialWaves   ::Array{PartialWave,1}       ... partial waves, each with the channels it serves.
 """
 struct  Line
     initialLevel     ::Level
     finalLevel       ::Level
     electronEnergy   ::Float64
     photonEnergy     ::Float64
-    betaGamma2       ::Float64 
+    betaGamma2       ::Float64
     weight           ::Float64
     crossSection     ::EmProperty
-    channels         ::Array{PhotoRecombination.Channel,1}
-end 
-
-
-"""
-`PhotoRecombination.Line()`  
-    ... constructor for an `empty instance` of a photorecombination line between a specified initial 
-        and final level.
-"""
-function Line(initialLevel::Level, finalLevel::Level)
-    Line(initialLevel::Level, finalLevel::Level, 0., 0., 0., 0., EmProperty(0., 0.), false, Channel[])
+    partialWaves     ::Array{PartialWave,1}
 end
 
 
 # `Base.show(io::IO, line::PhotoRecombination.Line)`  ... prepares a proper printout of the variable line::PhotoRecombination.Line.
-function Base.show(io::IO, line::PhotoRecombination.Line) 
+function Base.show(io::IO, line::PhotoRecombination.Line)
     println(io, "initialLevel:      $(line.initialLevel)  ")
     println(io, "finalLevel:        $(line.finalLevel)  ")
     println(io, "electronEnergy:    $(line.electronEnergy)  ")
@@ -166,24 +177,27 @@ function Base.show(io::IO, line::PhotoRecombination.Line)
     println(io, "betaGamma2:        $(line.betaGamma2)  ")
     println(io, "weight:            $(line.weight)  ")
     println(io, "crossSection:      $(line.crossSection)  ")
-    println(io, "channels:          $(line.channels)  ")
+    println(io, "partialWaves:      $(line.partialWaves)  ")
 end
 
 
+#################################################################################################################################
+#################################################################################################################################
+
 """
-`PhotoRecombination.amplitude(kind::String, channel::PhotoRecombination.Channel, energy::Float64, finalLevel::Level, 
-                                continuumLevel::Level, grid::Radial.Grid)`  
-    ... to compute the kind = (photorecombination) amplitude  
-        < alpha_f J_f || O^(photorecombination) || (alpha_i J_i, epsilon kappa) J_t>  due to the electron-photon 
-        interaction for the given final and continuum level, the partial wave of the outgoing electron as well as 
+`PhotoRecombination.amplitude(kind::String, mp::EmMultipole, gauge::EmGauge, kappa::Int64, phase::Float64,
+                                energy::Float64, finalLevel::Level, continuumLevel::Level, grid::Radial.Grid)`
+
+    ... to compute the kind = (photorecombination) amplitude < alpha_f J_f || O^(photorecombination) || (alpha_i J_i, epsilon kappa) J_t>
+        due to the electron-photon interaction for the given final and continuum level, the partial wave of the outgoing electron as well as
         the given multipole and gauge. A value::ComplexF64 is returned.
 """
-function amplitude(kind::String, channel::PhotoRecombination.Channel, energy::Float64, finalLevel::Level, 
-                    continuumLevel::Level, grid::Radial.Grid)
+function amplitude(kind::String, mp::EmMultipole, gauge::EmGauge, kappa::Int64, phase::Float64, energy::Float64,
+                    finalLevel::Level, continuumLevel::Level, grid::Radial.Grid)
     if      kind in [ "photorecombination"]
     #-----------------------------------
-        amplitude = PhotoEmission.amplitude("emission", channel.multipole, channel.gauge, energy, finalLevel, continuumLevel, grid)
-        amplitude = im^Basics.subshell_l(Subshell(101, channel.kappa)) * exp( im*channel.phase ) * amplitude
+        amplitude = PhotoEmission.amplitude(Emission(), mp, gauge, energy, finalLevel, continuumLevel, grid)
+        amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( im*phase ) * amplitude
     else    error("stop b")
     end
     
@@ -192,271 +206,235 @@ end
 
 
 """
-`PhotoRecombination.checkConsistentMultiplets(finalMultiplet::Multiplet, initialMultiplet::Multiplet)`  
-    ... to check that the given initial- and final-state levels and multiplets are consistent to each other and
-        to avoid later problems with the computations. An error message is issued if an inconsistency occurs,
-        and nothing is returned otherwise.
+`PhotoRecombination.checkPartialWavesAreAdmitted(settings::PhotoRecombination.Settings)`
+    ... to check that the given settings admit at least one partial wave of the free electron, so that a computation which
+        cannot produce anything says so instead of reporting zeros. An error is raised if none is admitted, and nothing is
+        returned otherwise.
+
+        WHY THIS EXISTS. `PhotoRecombination.Settings()` leaves `maxKappa = 0`, and `determineChannels` discards every
+        partial wave with `abs(kappa) > settings.maxKappa`. Since `abs(kappa) >= 1` always, `maxKappa = 0` discards ALL of
+        them: the channel list comes back empty and every amplitude and cross section is exactly 0.0. Measured 30-Aug-2026,
+        a computation differing from `examples/example-Dd.jl:110` only in omitting `maxKappa` spent 47 minutes on genuine
+        SCF and continuum work and then reported 0.000000e+00 for both gauges at all fifteen of its (Z, energy) points, with
+        nothing to say that the run had been empty from the start. A zero cross section is a physically meaningful answer,
+        which is exactly why it must not be produced by a setting that admits no channel.
+"""
+function  checkPartialWavesAreAdmitted(settings::PhotoRecombination.Settings)
+    if  settings.maxKappa >= 1    return( nothing )    end
+
+    error("\nNo partial wave of the free electron is admitted: settings.maxKappa = $(settings.maxKappa), and every \n" *
+          "partial wave has abs(kappa) >= 1, so PhotoRecombination.determineChannels would discard all of them and \n"  *
+          "every cross section would come back as exactly 0.0.\n\n"                                                    *
+          ">>> Set maxKappa explicitly; PhotoRecombination.Settings() leaves it at 0, which is not a usable default. \n" *
+          "    The examples use 3 or 4, and the suite test uses 2; convergence is checked by raising it until the \n"   *
+          "    cross section stops moving.\n")
+end
+
+
+"""
+`PhotoRecombination.checkConsistentMultiplets(finalMultiplet::Multiplet, initialMultiplet::Multiplet)`
+    ... to check that the given initial- and final-state levels and multiplets are consistent with each other, so that later
+        problems in the computation are avoided. An error is raised if an inconsistency occurs, and nothing is returned
+        otherwise.
+
+        THE REQUIREMENT IS A PREFIX, AND IT IS NOT THIS FUNCTION'S TO RELAX. Basics.generateLevelWithSymmetryReducedBasis,
+        which every amplitude below goes through, supports only the ADDITION of subshells: it raises unless the initial
+        subshells are the opening segment of the final ones AND strictly fewer. Ignoring subshells that are empty in every
+        initial CSF was tried on 28-Aug-2026 and REVERTED, because it admits exactly the cases that then fail one level
+        deeper with an unexplained "stop a" -- a permissive guard in front of a strict one helps nobody.
+
+        This is why a BARE ion must be written with the empty shell being the very shell captured INTO: Configuration("2s^0")
+        for capture into 2s. Configuration("1s^0") against a 2s final state compares [1s_1/2] with [2s_1/2] and is refused
+        here, with the remedy named. Making one spelling serve every channel means changing that shared Basics routine, which
+        is not a small change and is carried as its own item.
 """
 function  checkConsistentMultiplets(finalMultiplet::Multiplet, initialMultiplet::Multiplet)
     initialSubshells      = initialMultiplet.levels[1].basis.subshells;             ni = length(initialSubshells)
-    finalSubshells        = finalMultiplet.levels[1].basis.subshells
-    
-    if initialSubshells[1:end] == finalSubshells[1:ni]
-    else
-        @show initialSubshells
-        @show finalSubshells
-        error("\nThe order of subshells must be equal for the initial- and final states. \n" *
-                "However, the initial states can have less subshells; this limitation arises from the angular coefficients.")
-    end
-        
+    finalSubshells        = finalMultiplet.levels[1].basis.subshells;               nf = length(finalSubshells)
+
+    # The ni <= nf test is not redundant: without it, a longer initial list made the slice below raise a BoundsError
+    # instead of the message written here, so the commonest way of getting this wrong reported nothing useful.
+    if  ni <= nf   &&   initialSubshells[1:end] == finalSubshells[1:ni]    return( nothing )    end
+
+    error("\nThe order of subshells must be equal for the initial- and final states; the initial states may have \n" *
+          "FEWER subshells, but they must be the FIRST ones and in the same order. This limitation arises from \n"    *
+          "the angular coefficients and from Basics.generateLevelWithSymmetryReducedBasis.\n\n"                      *
+          "    initial = $initialSubshells \n"                                                                       *
+          "    final   = $finalSubshells \n\n"                                                                      *
+          ">>> Write every configuration over the SAME subshells, with explicit ZERO occupations where a shell is \n" *
+          "    empty. A BARE ion is spelled with the shell being captured INTO, e.g. Configuration(\"2s^0\") for \n"  *
+          "    capture into 2s; Configuration(\"1s^0\") there compares [1s_1/2] with [2s_1/2] and fails.\n")
+
     return( nothing )
 end
 
 
 """
-`PhotoRecombination.computeAmplitudesProperties(line::PhotoRecombination.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64, 
-                                                settings::PhotoRecombination.Settings)`  
-    ... to compute all amplitudes and properties of the given line; a line::PhotoRecombination.Line is returned for 
-        which the amplitudes and properties are now evaluated.
+`PhotoRecombination.computeAmplitudesProperties(line::PhotoRecombination.Line, nm::Nuclear.Model,
+        grid::Radial.Grid, nrContinuum::Int64, settings::PhotoRecombination.Settings;
+        nuclearPot::Union{Nothing,Radial.Potential}=nothing, primitives::Union{Nothing,Bsplines.Primitives}=nothing)`
+    ... computes the amplitudes of every partial wave of the given line and, from them, the cross section. The two keywords carry the
+        nuclear potential and the B-spline primitives, which are constant for a whole computation and are therefore passed in rather than
+        rebuilt per line. A newLine::PhotoRecombination.Line with all amplitudes and the cross section evaluated is returned.
+
+        ONE continuum orbital and ONE extended final level are generated per PARTIAL WAVE, which the loop nesting expresses directly, so
+        that no dictionary keyed on the continuum subshell is needed.
+
+        An electric multipole is evaluated twice, once per gauge, into one EmPropertyC; a magnetic multipole once, into an EmPropertyC with
+        equal components.
 """
-function  computeAmplitudesProperties(line::PhotoRecombination.Line, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
-                                        settings::PhotoRecombination.Settings)
-    newChannels = PhotoRecombination.Channel[];;   contSettings = Continuum.Settings(false, nrContinuum)
-    for channel in line.channels
-        newfLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, line.finalLevel.basis.subshells)
-        newiLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, newfLevel.basis.subshells)
-        newfLevel  = Basics.generateLevelWithExtraSubshell(Subshell(101, channel.kappa), newfLevel)
-        cOrbital, phase = Continuum.generateOrbitalForLevel(line.electronEnergy, Subshell(101, channel.kappa), newiLevel, nm, grid, contSettings)
-        newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newiLevel)
-        newChannel = PhotoRecombination.Channel(channel.multipole, channel.gauge, channel.kappa, channel.symmetry, phase, 0.)
-        amplitude  = PhotoRecombination.amplitude("photorecombination", channel, line.photonEnergy, newfLevel, newcLevel, grid)
-        push!( newChannels, PhotoRecombination.Channel(newChannel.multipole, newChannel.gauge, newChannel.kappa, newChannel.symmetry, 
-                                                        newChannel.phase, amplitude) )
+function computeAmplitudesProperties(line::PhotoRecombination.Line, nm::Nuclear.Model, grid::Radial.Grid,
+                                           nrContinuum::Int64, settings::PhotoRecombination.Settings;
+                                           nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                           primitives::Union{Nothing,Bsplines.Primitives}=nothing)
+    contSettings = Continuum.Settings(isnothing(settings.continuumExchange) ? false : settings.continuumExchange, nrContinuum)
+    redFLevel    = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, line.finalLevel.basis.subshells)
+    newiLevel    = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, redFLevel.basis.subshells)
+    newPartialWaves = PhotoRecombination.PartialWave[]
+
+    for  pw in line.partialWaves
+        cSubshell = Subshell(101, pw.kappa)
+        newfLevel = Basics.generateLevelWithExtraSubshell(cSubshell, redFLevel)
+        cOrbital, phase = Continuum.generateOrbitalForLevel(line.electronEnergy, cSubshell, newiLevel, nm, grid,
+                                                            contSettings; nuclearPot=nuclearPot, primitives=primitives)
+        newChannels = PhotoRecombination.Channel[]
+        for  ch in pw.channels
+            newcLevel = Basics.generateLevelWithExtraElectron(cOrbital, ch.symmetry, newiLevel)
+            newAmps   = MultipoleAmplitude[]
+            for  ma in ch.amplitudes
+                mp = ma.multipole
+                if  string(mp)[1] == 'E'
+                    ampC = PhotoRecombination.amplitude("photorecombination", mp, Basics.Coulomb, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                    ampB = PhotoRecombination.amplitude("photorecombination", mp, Basics.Babushkin, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                    push!(newAmps, MultipoleAmplitude(mp, EmPropertyC(ampC, ampB)))
+                else
+                    ampM = PhotoRecombination.amplitude("photorecombination", mp, Basics.Magnetic, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                    push!(newAmps, MultipoleAmplitude(mp, EmPropertyC(ampM)))
+                end
+            end
+            push!(newChannels, PhotoRecombination.Channel(ch.symmetry, newAmps))
+        end
+        push!(newPartialWaves, PhotoRecombination.PartialWave(pw.kappa, line.electronEnergy, phase, newChannels))
     end
-    newLine      = PhotoRecombination.Line( line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy, line.betaGamma2, 
-                                            line.weight, line.crossSection, newChannels)
+    newLine      = PhotoRecombination.Line(line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy,
+                                                 line.betaGamma2, line.weight, line.crossSection, newPartialWaves)
     crossSection = PhotoRecombination.computeCrossSectionForMultipoles(settings.multipoles, newLine)
-    newLine      = PhotoRecombination.Line( line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy, line.betaGamma2, 
-                                            line.weight, crossSection, newChannels)
+    newLine      = PhotoRecombination.Line(line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy,
+                                                 line.betaGamma2, line.weight, crossSection, newPartialWaves)
+
     return( newLine )
 end
 
 
+"""
+`PhotoRecombination.computeAnisotropyParameter(nu::Int64, line::PhotoRecombination.Line)`
+    ... computes the anisotropy parameter beta_nu of the emitted photons for an initially unpolarized ion; a value::EmPropertyC is returned,
+        holding BOTH gauges, so that a single call covers what would otherwise be one call per gauge.
 
+        No gauge argument is needed and no gauge guard has to be written: the product conj(amp) * ampp of two EmPropertyC is componentwise,
+        so Coulomb meets Coulomb and Babushkin meets Babushkin, while a magnetic amplitude has equal components and therefore enters both.
+
+        Pairs are formed ACROSS partial waves: kappa and kappa' are independent, and that interference is the physical content of the
+        anisotropy.
 """
-`PhotoRecombination.computeAnisotropyParameter(nu::Int64, gauge::EmGauge, line::PhotoRecombination.Line)`  
-    ... to compute the anisotropy parameter of the emitted photons for the photorecombination of an initially unpolarized ion. 
-        A value::ComplexF64 is returned.
-"""
-function  computeAnisotropyParameter(nu::Int64, gauge::EmGauge, line::PhotoRecombination.Line)
-        wa = 0.0im;    Ji = line.initialLevel.J;    Jf = line.finalLevel.J   
-    wn = 0.;    
-    for  ch in line.channels   
-        if  gauge != ch.gauge  &&  gauge != Basics.Magnetic   continue    end
-        wn = wn + conj(ch.amplitude) * ch.amplitude   
+function computeAnisotropyParameter(nu::Int64, line::PhotoRecombination.Line)
+    Ji = line.initialLevel.J;    Jf = line.finalLevel.J
+    # Flatten once: one entry per (partial wave, total symmetry, multipole), each carrying both gauges.
+    entries = Tuple{Int64,LevelSymmetry,EmMultipole,EmPropertyC}[]
+    for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+        push!(entries, (pw.kappa, ch.symmetry, ma.multipole, ma.amplitude))
     end
-    
-    for  cha  in line.channels
-        if  gauge != cha.gauge  &&  gauge != Basics.Magnetic   continue    end
-        J = cha.symmetry.J;    L = cha.multipole.L;    if  cha.multipole.electric   p = 1   else    p = 0   end
-        j = AngularMomentum.kappa_j(cha.kappa);    l = AngularMomentum.kappa_l(cha.kappa)
-        #
-        for  chp  in line.channels  
-            if  gauge != chp.gauge  &&  gauge != Basics.Magnetic   continue    end
-            Jp = chp.symmetry.J;    Lp = chp.multipole.L;    if  chp.multipole.electric   pp = 1   else    pp = 0   end
-            jp = AngularMomentum.kappa_j(chp.kappa);     lp = AngularMomentum.kappa_l(chp.kappa)
-            #
+    wn = EmProperty(0., 0.)
+    for  (kapa, syma, mpa, ampa)  in entries      wn = wn + abs2(ampa)      end
+
+    wa = EmPropertyC(0.0im)
+    for  (kapa, syma, mpa, ampa)  in entries
+        J = syma.J;    L = mpa.L;    if  mpa.electric   p = 1   else    p = 0   end
+        j = AngularMomentum.kappa_j(kapa);    l = AngularMomentum.kappa_l(kapa)
+
+        for  (kapb, symb, mpb, ampb)  in entries
+            Jp = symb.J;   Lp = mpb.L;   if  mpb.electric   pp = 1   else    pp = 0   end
+            jp = AngularMomentum.kappa_j(kapb);     lp = AngularMomentum.kappa_l(kapb)
+
             if  1 + (-1)^(L + p + Lp + pp - nu) == 0    continue    end
-            @show 1.0im^(L + p - Lp - pp)
-            @show AngularMomentum.phaseFactor([Ji, -1, AngularJ64(1//2), -1, Jf])
-            @show sqrt( AngularMomentum.bracket([AngularJ64(L), AngularJ64(Lp), l, lp, j, jp, J, Jp]) )
-            wa = wa + 1.0im^(L + p - Lp - pp) * AngularMomentum.phaseFactor([Ji, -1, AngularJ64(1//2), -1, Jf]) *
-                                sqrt( AngularMomentum.bracket([AngularJ64(L), AngularJ64(Lp), l, lp, j, jp, J, Jp]) ) *  
+            wa = wa + (1.0im)^(L + p - Lp - pp) * AngularMomentum.phaseFactor([Ji, -1, AngularJ64(1//2), -1, Jf]) *
+                                sqrt( AngularMomentum.bracket([AngularJ64(L), AngularJ64(Lp), l, lp, j, jp, J, Jp]) ) *
                                 AngularMomentum.ClebschGordan( l, AngularM64(0), lp, AngularM64(0),  AngularJ64(nu),  AngularM64(0)) *
-                                AngularMomentum.ClebschGordan( AngularJ64(L), AngularM64(1), AngularJ64(Lp), AngularM64(-1), 
+                                AngularMomentum.ClebschGordan( AngularJ64(L), AngularM64(1), AngularJ64(Lp), AngularM64(-1),
                                                             AngularJ64(nu), AngularM64(0)) *
-                                AngularMomentum.Wigner_6j(J, Jp, AngularJ64(nu), AngularJ64(Lp), AngularJ64(L), Jf) * 
-                                AngularMomentum.Wigner_6j(J, Jp, AngularJ64(nu), jp, j, Ji) * 
-                                AngularMomentum.Wigner_6j(j, jp, AngularJ64(nu), lp, l, AngularJ64(1//2)) * 
-                                conj(cha.amplitude) * chp.amplitude
+                                AngularMomentum.Wigner_6j(J, Jp, AngularJ64(nu), AngularJ64(Lp), AngularJ64(L), Jf) *
+                                AngularMomentum.Wigner_6j(J, Jp, AngularJ64(nu), jp, j, Ji) *
+                                AngularMomentum.Wigner_6j(j, jp, AngularJ64(nu), lp, l, AngularJ64(1//2)) *
+                                (conj(ampa) * ampb)
         end
     end
-    
-    value = - 0.5 * wa / wn
-    return( value )
+
+    # The prefactor is fixed by the nu = 0 sum rule: the SAME expression evaluated at nu = 0 must return beta_0 = 1, since that is what
+    # normalizes W(theta) = (sigma/4pi) [1 + Sum_nu beta_nu P_nu(cos theta)].  At nu = 0 every Clebsch-Gordan and 6j collapses to a
+    # Kronecker delta, sqrt(bracket) cancels the product of the square-root denominators exactly, and the surviving phase is
+    # (-1)^(2J) (-1)^(2J_i) = -1 whether J_i is integer or half-integer -- so wa = -wn identically and the factor must be -1, not -1/2.
+    # Checked against the physics as well: E1 radiative recombination into an s shell has W ~ sin^2(theta), i.e. beta_2 = -1 and full
+    # linear polarization, which this returns and the earlier -0.5 did not.  (09-Sep-2026; the -0.5 had made every beta_nu of this
+    # module, and the polarization of PhotoRecombinationInterference, a factor two too small.)
+    return( EmPropertyC(- wa.Coulomb / wn.Coulomb, - wa.Babushkin / wn.Babushkin) )
 end
 
 
 """
-`PhotoRecombination.computeCrossSectionBareIon(energy_eV::Float64, subshell::Subshell, multipoles::Array{EmMultipole,1}, 
-                                                gauge::EmGauge, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64)`  
-    ... to compute the (hydrogenic) RR cross section for the capture of an electron into a single subshell; 
-        only the amplitudes for the given multipoles are taken into account; an cs::Float64 [a.u.] is returned.
-"""
-function computeCrossSectionBareIon(energy_eV::Float64, subshell::Subshell, multipoles::Array{EmMultipole,1}, 
-                                    gauge::EmGauge, nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64)
-    energy   = Defaults.convertUnits("energy: from eV to atomic", energy_eV)
-    
-    fOrbital = HydrogenicIon.orbital(subshell, nm, grid)
-    omega    = energy - fOrbital.energy
-    @show omega, energy, fOrbital.energy
-    #
-    csa = 0.;       maxKappa = 4;        contSettings = Continuum.Settings(false, nrContinuum);   
-    jf = Basics.subshell_j(subshell);   lf           = Basics.subshell_l(subshell)
-    if   iseven(lf)   symf = LevelSymmetry( jf, Basics.plus )   else   symf = LevelSymmetry( jf, Basics.minus ) end
-    @show  energy_eV, nm.Z, omega, energy, gauge, subshell, symf, fOrbital.energy
-    # Generate a Coulomb potential for the given nuclear model
-    potential = Nuclear.nuclearPotential(nm, grid)
-    for  multipole  in  multipoles
-        for  kappa = -maxKappa:maxKappa
-            if  kappa == 0    continue    end
-            jc = AngularMomentum.kappa_j(kappa);   lc = Basics.subshell_l(Subshell(101,kappa))
-            if  iseven(lc)   symc = LevelSymmetry( jc, Basics.plus )   else   symc = LevelSymmetry( jc, Basics.minus ) end
-            # Determine whether a non-zero amplitude is possible for the given multipole
-            if  AngularMomentum.isAllowedMultipole(symf, multipole, symc)
-                # Generate continuum orbital for given energy and kappa
-                cOrbital, phase, normFactor = Continuum.generateOrbitalLocalPotential(energy, 
-                                                                        Subshell(101,kappa), potential, contSettings)
-                if multipole in  [E1, E2]  localGauge = gauge  elseif  multipole in  [M1, M2]  localGauge = Basics.Magnetic   end
-                amplitude = InteractionStrength.MabEmissionJohnsony(multipole, localGauge, omega, fOrbital, cOrbital, grid) / 
-                            Defaults.getDefaults("alpha")
-                @show amplitude,  symc,  localGauge, multipole
-                ## amplitude = InteractionStrength.MbaEmissionCheng(multipole, gauge, omega, fOrbital, cOrbital, grid) 
-                csa = csa + conj(amplitude) * amplitude
-            end
-        end          
-    end
-    #
-    ## cs = 160. * pi^3 * Defaults.getDefaults("alpha")^2 * omega / energy * abs(cs) / (Basics.twice(jf) +1)
-    ## cs = 8 * pi^3 * Defaults.getDefaults("alpha")^3 / omega * abs(cs)
-    cs = 8 * pi^3 * Defaults.getDefaults("alpha")^3 * omega / (Basics.twice(jf) +1) / 2. / energy * abs(csa)
-    csBarn = Defaults.convertUnits("cross section: from atomic to barn", cs)
-    
-    println("***** RR cross section for energy = $(energy_eV) eV is $csa a.u.   $csBarn  barn")
-    
-    return( cs )
-end
+`PhotoRecombination.computeCrossSectionForMultipoles(multipoles::Array{EmMultipole,1},
+                                                           line::PhotoRecombination.Line)`
+    ... computes the photo-recombination cross section from the amplitudes of the given line, restricted to the given multipoles; a
+        cs::EmProperty is returned.
 
+        No gauge branching is needed: abs2 of an EmPropertyC is an EmProperty, so the sum stays gauge-paired by construction, and a magnetic
+        amplitude -- equal components -- enters both gauge sums by itself.
 
-"""
-`PhotoRecombination.computeCrossSectionForMultipoles(multipoles::Array{EmMultipole,1}, line::PhotoRecombination.Line)`  
-    ... to compute the cross section from the channel amplitudes of a given line; only the amplitudes
-        for the given multipoles are taken into account; an cs::EmProperty is returned.
+        The summation is INCOHERENT over the multipoles as well as over the channels. A coherent multipole sum would be a physics change and
+        is deliberately not made here.
 """
 function computeCrossSectionForMultipoles(multipoles::Array{EmMultipole,1}, line::PhotoRecombination.Line)
-    csC = 0.;    csB = 0.
-    for channel  in  line.channels
-        if  !(channel.multipole  in  multipoles)     continue                 end
-        amplitude = channel.amplitude
-        if       channel.gauge == Basics.Coulomb     csC = csC + abs(amplitude)^2
-        elseif   channel.gauge == Basics.Babushkin   csB = csB + abs(amplitude)^2
-        elseif   channel.gauge == Basics.Magnetic    csB = csB + abs(amplitude)^2;   csC = csC + abs(amplitude)^2
-        end
+    cs = EmProperty(0., 0.)
+    for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+        if  !(ma.multipole  in  multipoles)     continue    end
+        cs = cs + abs2(ma.amplitude)
     end
-    ## csFactor     = 8 * pi^3 * Defaults.getDefaults("alpha") * line.photonEnergy / (Basics.twice(line.finalLevel.J)+1) /
-    ##                2. / line.electronEnergy
-    ## crossSection = EmProperty(csFactor * csC, csFactor * csB)
-    csFactor     = 8 * pi^3 * Defaults.getDefaults("alpha")^3 * line.photonEnergy / (Basics.twice(line.finalLevel.J)+1) 
-    crossSection = 1.0 /line.betaGamma2 * EmProperty(csFactor * csC, csFactor * csB)
-    
-    return( crossSection )
+    csFactor = 8 * pi^3 * Defaults.getDefaults("alpha")^3 * line.photonEnergy / (Basics.twice(line.finalLevel.J)+1)
+    return( 1.0 / line.betaGamma2 * (csFactor * cs) )
 end
 
 
 """
-`PhotoRecombination.computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                                        settings::PhotoRecombination.Settings; output::Bool=true)` 
-    ... to compute the photo recombination transition amplitudes and all properties as requested by the given settings. 
-        A list of lines::Array{PhotoRecombination.Lines} is returned.
+`PhotoRecombination.computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model,
+                                       grid::Radial.Grid, settings::PhotoRecombination.Settings; output::Bool=true)`
+    ... computes the photo-recombination amplitudes and all requested properties for the lines between the levels of the two given
+        multiplets and for every electron energy of the settings; this is the standard entry point of this module. A list of
+        lines::Array{PhotoRecombination.Line,1} is returned if output=true, and nothing otherwise.
 """
-function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid, 
-                        settings::PhotoRecombination.Settings; output::Bool=true)
+function computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                            settings::PhotoRecombination.Settings; output::Bool=true)
     println("")
     printstyled("PhotoRecombination.computeLines(): The computation of photo-recombination properties starts now ... \n", color=:light_green)
-    printstyled("--------------------------------------------------------------------------------------------------- \n", color=:light_green)
+    printstyled("-------------------------------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
-    # Check the consistency of the initial- and final-state multiplets
     PhotoRecombination.checkConsistentMultiplets(finalMultiplet, initialMultiplet)
-    #
+    PhotoRecombination.checkPartialWavesAreAdmitted(settings)
+
     lines = PhotoRecombination.determineLines(finalMultiplet, initialMultiplet, settings)
-    # Display all selected lines before the computations start
     if  settings.printBefore    PhotoRecombination.displayLines(stdout, lines)    end
-    # Determine maximum energy and check for consistency of the grid
     maxEnergy = 0.;   for  line in lines   maxEnergy = max(maxEnergy, line.electronEnergy)   end
     nrContinuum = Continuum.gridConsistency(maxEnergy, grid)
-    # Calculate all amplitudes and requested properties
-    newLines = PhotoRecombination.Line[]
-    for  line in lines
-        newLine = PhotoRecombination.computeAmplitudesProperties(line, nm, grid, nrContinuum, settings) 
-        push!( newLines, newLine)
+    # Both are constants of the whole computation and are READ-ONLY below, so they are safely shared.
+    nuclearPot = Nuclear.nuclearPotential(nm, grid)
+    primitives = Bsplines.generatePrimitives(grid)
+    newLines = Vector{PhotoRecombination.Line}(undef, length(lines))
+    Threads.@threads for  i  in  eachindex(lines)
+        newLines[i] = PhotoRecombination.computeAmplitudesProperties(lines[i], nm, grid, nrContinuum, settings;
+                                                                           nuclearPot=nuclearPot, primitives=primitives)
     end
-    # Print all results to screen
     PhotoRecombination.displayResults(stdout, newLines, settings)
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary   PhotoRecombination.displayResults(iostream, newLines, settings)    end
-    #
-    if    output    return( lines )
-    else            return( nothing )
-    end
-end
 
-
-"""
-`PhotoRecombination.computeLinesWithContinuumOrbital(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, 
-                                                        grid::Radial.Grid, cOrbitals::Dict{Subshell, Orbital}, energyGrid::Radial.GridGL, 
-                                                        settings::PhotoRecombination.Settings; output::Bool=true)` 
-    ... to compute the photo recombination transition amplitudes and all properties as requested by the given settings but with the
-        given continuum orbitals cOrbitals and for the (free-) electronEnergies. A error message is issued if these energies are not
-        the same a given by the settings. The continuum orbital with electronEnergies[i] has the principal quantum number 100+i.
-        A list of lines::Array{PhotoRecombination.Lines} is returned.
-"""
-function  computeLinesWithContinuumOrbital(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model, 
-                                            grid::Radial.Grid, cOrbitals::Dict{Subshell, Orbital}, energyGrid::Radial.GridGL, 
-                                            settings::PhotoRecombination.Settings; output::Bool=true)
-    # Check the consistency of the initial- and final-state multiplets
-    PhotoRecombination.checkConsistentMultiplets(finalMultiplet, initialMultiplet);     ie = 0
-    #
-    lines = PhotoRecombination.determineLines(finalMultiplet, initialMultiplet, settings)
-    # Display all selected lines before the computations start
-    if  settings.printBefore    PhotoRecombination.displayLines(stdout, lines)    end
-    # Determine maximum energy and check for consistency of the grid
-    newLines = PhotoRecombination.Line[]
-    for  (i,line)  in  enumerate(lines)
-        if  rem(i,500) == 0    println("> PhotoRecombination line $i:  ... calculated ")    end
-        # Calculate the individual channels with the given orbitals
-        newChannels = PhotoRecombination.Channel[];    csC = 0.;    csB = 0.
-        for channel in line.channels
-            newfLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, line.finalLevel.basis.subshells)
-            newiLevel  = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, newfLevel.basis.subshells)
-            en         = line.electronEnergy
-            # Find index of en in energyGrid.t with given accuracy; terminate if nothing is found
-            ie = 0;     
-            for  it = 1:length(energyGrid.t)   if   abs( (energyGrid.t[it]-en)/en ) < 0.0001   ie = it;   break   end   end
-            if  ie == 0   stop("a")     end
-            cSubsh     = Subshell(100+ie, channel.kappa)
-            newfLevel  = Basics.generateLevelWithExtraSubshell(cSubsh, newfLevel)
-            cOrbital   = cOrbitals[cSubsh];      phase = 0.
-            newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.symmetry, newiLevel)
-            newChannel = PhotoRecombination.Channel(channel.multipole, channel.gauge, channel.kappa, channel.symmetry, phase, 0.)
-            amplitude  = PhotoRecombination.amplitude("photorecombination", channel, line.photonEnergy, newfLevel, newcLevel, grid)
-            push!( newChannels, PhotoRecombination.Channel(newChannel.multipole, newChannel.gauge, newChannel.kappa, newChannel.symmetry, 
-                                                            newChannel.phase, amplitude) )
-            if       channel.gauge == Basics.Coulomb     csC = csC + abs(amplitude)^2
-            elseif   channel.gauge == Basics.Babushkin   csB = csB + abs(amplitude)^2
-            elseif   channel.gauge == Basics.Magnetic    csB = csB + abs(amplitude)^2;   csC = csC + abs(amplitude)^2
-            end
-        end
-        csFactor     = 8 * pi^3 * Defaults.getDefaults("alpha")^3 * line.photonEnergy / (Basics.twice(line.finalLevel.J)+1) 
-        crossSection = 1.0 /line.betaGamma2 * EmProperty(csFactor * csC, csFactor * csB)
-        newLine      = PhotoRecombination.Line( line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy, line.betaGamma2, 
-                                                energyGrid.wt[ie], crossSection, newChannels)
-        push!( newLines, newLine)
-    end
-    # Print all results to screen
-    PhotoRecombination.displayResults(stdout, newLines, settings)
-    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
-    if  printSummary   PhotoRecombination.displayResults(iostream, newLines, settings)    end
-    #
     if    output    return( newLines )
     else            return( nothing )
     end
@@ -464,100 +442,100 @@ end
 
 
 """
-`PhotoRecombination.compareCrossSectionEmpirical(energies::Array{Float64,1}, Z::Float64)`  
-    ... to evaluate and compare different (non-relativistic) shell-resolved and total cross section for the 
-        RR of a free electron with energy into initially bare ions with nuclear charge Z; an cs::Float64 is returned.
-"""
-function compareCrossSectionEmpirical(energies::Array{Float64,1}, Z::Float64)
-    csStobbe = Float64[];    csKramers = Float64[];     csKramersTotal = Float64[]
-    
-    nx = 110
-    println(" ")
-    println("  Comparison of different semi-empirical RR cross sections:        Z = $Z      ... all in [a.u.]")
-    println("  Note Kramers(total) and Bell(total) valid only for eta >> 1.")
-    println("  ", TableStrings.hLine(nx))
-    sa =  "  Energy         eta             Stobbe(1s)      Kramers(1s)     Kramers(1..50)  Kramers(total)  Bell(total) "
-    println(sa);    println("  ", TableStrings.hLine(nx)) 
-    #
-    for  energy in energies
-        sa =  "  " * @sprintf("%.4e", energy) * "     "
-        wa = sqrt( Z^2 / 2. / energy);                                              sa = sa * @sprintf("%.4e", wa) * "      "
-        wa = PhotoRecombination.crossSectionStobbe(energy, Z);             push!(csStobbe, wa);        sa = sa * @sprintf("%.4e", wa) * "      "
-        wa = PhotoRecombination.crossSectionKramers(energy, Z, (1,1));     push!(csKramers, wa);       sa = sa * @sprintf("%.4e", wa) * "      "
-        wa = PhotoRecombination.crossSectionKramers(energy, Z, (1,50));                                sa = sa * @sprintf("%.4e", wa) * "      "
-        wa = PhotoRecombination.crossSectionKramersTotal(energy, Z);       push!(csKramersTotal, wa);  sa = sa * @sprintf("%.4e", wa) * "      "
-        wa = PhotoRecombination.crossSectionBellTotal(energy, Z);                                      sa = sa * @sprintf("%.4e", wa) * "      "
-        println(sa)
-    end
-    # 
-    println("  ", TableStrings.hLine(nx)) 
+`PhotoRecombination.computeLinesWithContinuumOrbital(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
+        nm::Nuclear.Model, grid::Radial.Grid, cOrbitals::Dict{Subshell, Orbital}, cPhases::Dict{Subshell, Float64},
+        energyGrid::Radial.GridGL, settings::PhotoRecombination.Settings; output::Bool=true)`
+    ... computes the photo-recombination lines from continuum orbitals that have been generated beforehand and are handed over in cOrbitals,
+        which avoids regenerating them per line; this is the driver used by Cascade.computeSteps(::Cascade.RadiativeRecombinationScheme,
+        ...). A list of lines::Array{PhotoRecombination.Line,1} is returned if output=true, and nothing otherwise. The continuum orbital is
+        looked up once per partial wave, so that the energy-grid index search runs once per partial wave as well.
 
-    return( nothing )
+        The scattering phase of each partial wave is taken from cPhases, which must be keyed on the same continuum subshells as cOrbitals;
+        Cascade.computeContinuumOrbitals produces both together. The phase cancels in the cross section, which is an incoherent sum of
+        abs2, but NOT in the anisotropy parameters, where amplitudes of different kappa interfere.
+
+        ONE LIMITATION distinguishes this driver from PhotoRecombination.computeLines: the cross section is summed inline over ALL
+        multipoles rather than through PhotoRecombination.computeCrossSectionForMultipoles, so that settings.multipoles does NOT restrict
+        it here.
+"""
+function computeLinesWithContinuumOrbital(finalMultiplet::Multiplet, initialMultiplet::Multiplet, nm::Nuclear.Model,
+                                                grid::Radial.Grid, cOrbitals::Dict{Subshell, Orbital}, cPhases::Dict{Subshell, Float64},
+                                                energyGrid::Radial.GridGL, settings::PhotoRecombination.Settings; output::Bool=true)
+    PhotoRecombination.checkConsistentMultiplets(finalMultiplet, initialMultiplet);     ie = 0
+    PhotoRecombination.checkPartialWavesAreAdmitted(settings)
+
+    lines = PhotoRecombination.determineLines(finalMultiplet, initialMultiplet, settings)
+    if  settings.printBefore    PhotoRecombination.displayLines(stdout, lines)    end
+    newLines = PhotoRecombination.Line[]
+    for  (i,line)  in  enumerate(lines)
+        if  rem(i,500) == 0    println("> PhotoRecombination line $i:  ... calculated ")    end
+        redFLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, line.finalLevel.basis.subshells)
+        newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, redFLevel.basis.subshells)
+        en        = line.electronEnergy
+        # Find index of en in energyGrid.t with given accuracy; terminate if nothing is found
+        ie = 0
+        for  it = 1:length(energyGrid.t)   if   abs( (energyGrid.t[it]-en)/en ) < 0.0001   ie = it;   break   end   end
+        if  ie == 0   stop("a")     end
+
+        newPartialWaves = PhotoRecombination.PartialWave[];    cs = EmProperty(0., 0.)
+        for  pw in line.partialWaves
+            cSubsh    = Subshell(100+ie, pw.kappa)
+            newfLevel = Basics.generateLevelWithExtraSubshell(cSubsh, redFLevel)
+            cOrbital  = cOrbitals[cSubsh];      phase = cPhases[cSubsh]
+            newChannels = PhotoRecombination.Channel[]
+            for  ch in pw.channels
+                newcLevel = Basics.generateLevelWithExtraElectron(cOrbital, ch.symmetry, newiLevel)
+                newAmps   = MultipoleAmplitude[]
+                for  ma in ch.amplitudes
+                    mp = ma.multipole
+                    if  string(mp)[1] == 'E'
+                        ampC = PhotoRecombination.amplitude("photorecombination", mp, Basics.Coulomb, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                        ampB = PhotoRecombination.amplitude("photorecombination", mp, Basics.Babushkin, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                        amp  = EmPropertyC(ampC, ampB)
+                    else
+                        ampM = PhotoRecombination.amplitude("photorecombination", mp, Basics.Magnetic, pw.kappa, phase, line.photonEnergy, newfLevel, newcLevel, grid)
+                        amp  = EmPropertyC(ampM)
+                    end
+                    cs = cs + abs2(amp)                     # over ALL multipoles, as the flat version does
+                    push!(newAmps, MultipoleAmplitude(mp, amp))
+                end
+                push!(newChannels, PhotoRecombination.Channel(ch.symmetry, newAmps))
+            end
+            push!(newPartialWaves, PhotoRecombination.PartialWave(pw.kappa, en, phase, newChannels))
+        end
+        csFactor     = 8 * pi^3 * Defaults.getDefaults("alpha")^3 * line.photonEnergy / (Basics.twice(line.finalLevel.J)+1)
+        crossSection = 1.0 / line.betaGamma2 * (csFactor * cs)
+        push!( newLines, PhotoRecombination.Line(line.initialLevel, line.finalLevel, line.electronEnergy,
+                                                       line.photonEnergy, line.betaGamma2, energyGrid.wt[ie],
+                                                       crossSection, newPartialWaves) )
+    end
+    PhotoRecombination.displayResults(stdout, newLines, settings)
+    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
+    if  printSummary   PhotoRecombination.displayResults(iostream, newLines, settings)    end
+
+    if    output    return( newLines )
+    else            return( nothing )
+    end
 end
 
 
 """
-`PhotoRecombination.comparePlasmaRateEmpirical(temps::Array{Float64,1}, Z::Float64)`  
-    ... to evaluate and compare different plasma rate coefficients for the capture of a Maxwellian-distributed
-        free electron with temperature Te in temps into initially bare ions with nuclear charge Z; nothing is returned.
-"""
-function comparePlasmaRateEmpirical(temps::Array{Float64,1}, Z::Float64)
-    alphaKotelnikov = Float64[];    alphaKotelnikov1s = Float64[];    alphaSeaton = Float64[];    alphaPartialSeaton = Float64[];    
-    factor  = Defaults.convertUnits("length: from atomic to fm", 1.0)^3 * 1.0e-39 * 
-                Defaults.convertUnits("rate: from atomic to 1/s", 1.0) 
-    
-    nx = 170
-    println(" ")
-    println("  Comparison of different semi-empirical RR plasma rate coefficieints:    Z = $Z ")
-    println("  alpha(Seaton) valid for 2Te/Z^2 << 1.")
-    println(" ")
-    println("  ", TableStrings.hLine(nx))
-    sa =  "  Temperature  Temperature     2Te/Z^2   " *
-            "    Seaton        Seaton      Kotelnikov    Kotelnikov  Kotelnikov(1s) Kotelnikov(1s) partial Seaton(2*) partial Seaton(2*)   " *
-        "\n     [a.u.]        [K]                   " *
-            "    [a.u.]       [cm^3/s]       [a.u.]       [cm^3/s]       [a.u.]        [cm^3/s]        [a.u.]            [cm^3/s]     "
-    println(sa);    println("  ", TableStrings.hLine(nx)) 
-    #
-    for  temp in temps
-        sa =  "  " * @sprintf("%.4e", temp)                                                                            * "   "
-        wa = Defaults.convertUnits("temperature: from atomic to Kelvin", temp);         sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = 2*temp / Z^2;                                                              sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = plasmaRateSeaton(temp, Z);                 push!(alphaSeaton, wa);         sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = wa * factor;                                                               sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = plasmaRateKotelnikov(temp, Z);             push!(alphaKotelnikov, wa);     sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = wa * factor;                                                               sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = plasmaRateKotelnikov_1s(temp, Z);          push!(alphaKotelnikov1s, wa);   sa = sa * @sprintf("%.4e", wa) * "    "
-        wa = wa * factor;                                                               sa = sa * @sprintf("%.4e", wa) * "       "
-        wa = plasmaRatePartialSeaton(temp, Z, 2);       push!(alphaPartialSeaton, wa);  sa = sa * @sprintf("%.4e", wa) * "       "
-        wa = wa * factor;                                                               sa = sa * @sprintf("%.4e", wa) * "    "
-        println(sa)
-    end
-    # 
-    println("  ", TableStrings.hLine(nx)) 
-
-    return( nothing )
-end
-
-
-
-"""
-`PhotoRecombination.crossSectionStobbe(energy::Float64, Z::Float64)`  
-    ... to evaluate the (non-relativistic) Stobbe cross section for the RR of a free electron with energy into the 1s state of 
+`PhotoRecombination.crossSectionBellTotal(energy::Float64, Z::Float64)`  
+    ... to evaluate the (non-relativistic) total Bell & Bell cross section for the RR of a free electron with energy into any shell of
         initially bare ions with nuclear charge Z; an cs::Float64 is returned.
 """
-function crossSectionStobbe(energy::Float64, Z::Float64)
-    eta = sqrt( Z^2 / 2. / energy)
-    cs  = 2^8 * pi^2 * Defaults.getDefaults("alpha")^3 / 3.
-    cs  = cs * eta^6 * exp(-4 * eta * atan(1/eta)) / (1 - exp(-2 * pi * eta)) / (eta^2 + 1)^2
+function crossSectionBellTotal(energy::Float64, Z::Float64)
+    eta = sqrt( Z^2 / 2. / energy);     wa = 32 * pi * Defaults.getDefaults("alpha")^3 / 3. / sqrt(3.)
+    cs = log(eta) + 0.1492 + 0.5250 / eta^(2/3)
+    cs  = wa * eta^2 * cs
     return( cs )
 end
 
 
-
 """
 `PhotoRecombination.crossSectionKramers(energy::Float64, Z::Float64, nLowUp::Tuple{Int64,Int64})`  
-    ... to evaluate the (non-relativistic) Kramers cross section for the RR of a free electron with energy into all shells with
-        n = n_Low ... n_Up of initially bare ions with nuclear charge Z; an cs::Float64 is returned.
+    ... to evaluate the (non-relativistic) Kramers cross section for the RR of a free electron with energy into all shells with n = n_Low
+        ... n_Up of initially bare ions with nuclear charge Z; an cs::Float64 is returned.
 """
 function crossSectionKramers(energy::Float64, Z::Float64, nLowUp::Tuple{Int64,Int64})
     eta = sqrt( Z^2 / 2. / energy);     wa = 32 * pi * Defaults.getDefaults("alpha")^3 / 3. / sqrt(3.)
@@ -568,8 +546,8 @@ end
 
 """
 `PhotoRecombination.crossSectionKramersTotal(energy::Float64, Z::Float64)`  
-    ... to evaluate the (non-relativistic) Kramers cross section for the RR of a free electron with energy into any shell
-        of initially bare ions with nuclear charge Z; an cs::Float64 is returned.
+    ... to evaluate the (non-relativistic) Kramers cross section for the RR of a free electron with energy into any shell of initially bare
+        ions with nuclear charge Z; an cs::Float64 is returned.
 """
 function crossSectionKramersTotal(energy::Float64, Z::Float64)
     eta = sqrt( Z^2 / 2. / energy);     wa = 16 * pi * Defaults.getDefaults("alpha")^3 / 3. / sqrt(3.)
@@ -579,101 +557,118 @@ end
 
 
 """
-`PhotoRecombination.crossSectionBellTotal(energy::Float64, Z::Float64)`  
-    ... to evaluate the (non-relativistic) total Bell & Bell cross section for the RR of a free electron with energy 
-        into any shell of initially bare ions with nuclear charge Z; an cs::Float64 is returned.
+`PhotoRecombination.crossSectionStobbe(energy::Float64, Z::Float64)`  
+    ... to evaluate the (non-relativistic) Stobbe cross section for the RR of a free electron with energy into the 1s state of initially
+        bare ions with nuclear charge Z; an cs::Float64 is returned.
 """
-function crossSectionBellTotal(energy::Float64, Z::Float64)
-    eta = sqrt( Z^2 / 2. / energy);     wa = 32 * pi * Defaults.getDefaults("alpha")^3 / 3. / sqrt(3.)
-    cs = log(eta) + 0.1492 + 0.5250 / eta^(2/3)
-    cs  = wa * eta^2 * cs
+function crossSectionStobbe(energy::Float64, Z::Float64)
+    eta = sqrt( Z^2 / 2. / energy)
+    cs  = 2^8 * pi^2 * Defaults.getDefaults("alpha")^3 / 3.
+    cs  = cs * eta^6 * exp(-4 * eta * atan(1/eta)) / (1 - exp(-2 * pi * eta)) / (eta^2 + 1)^2
     return( cs )
 end
 
 
-
 """
-`PhotoRecombination.determineChannels(finalLevel::Level, initialLevel::Level, settings::PhotoRecombination.Settings)`  
-    ... to determine a list of RecChannel for a transitions from the initial to final level and by taking into account 
-        the particular settings of for this computation; an Array{PhotoRecombination.Channel,1} is returned.
+`PhotoRecombination.determineChannels(finalLevel::Level, initialLevel::Level, settings::PhotoRecombination.Settings)`
+    ... determines the partial waves of the incoming electron and, within each of them, the scattering channels of the given transition. The
+        total symmetry is reached from the FINAL (recombined) level by AngularMomentum.allowedMultipoleSymmetries(symf, mp), and the free
+        electron is then coupled to the INITIAL ion by allowedKappaSymmetries(symi, symt); every kappa with abs(kappa) > settings.maxKappa
+        is discarded. The distinct pairs (kappa, symt) are collected first and every multipole that reaches such a pair is attached to it,
+        so that the gauge is not iterated over at all. An Array{PhotoRecombination.PartialWave,1} is returned, with all amplitudes still
+        zero.
 """
 function determineChannels(finalLevel::Level, initialLevel::Level, settings::PhotoRecombination.Settings)
-    channels = PhotoRecombination.Channel[];   
-    symi = LevelSymmetry(initialLevel.J, initialLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity) 
+    symi = LevelSymmetry(initialLevel.J, initialLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity)
+    # (1) Collect, for every physical pair (kappa, symt), the multipoles that can reach it.
+    mpsFor = Dict{Tuple{Int64,LevelSymmetry}, Array{EmMultipole,1}}()
+    order  = Tuple{Int64,LevelSymmetry}[]                    # to keep a reproducible sequence
     for  mp in settings.multipoles
-        for  gauge in settings.gauges
-            symList = AngularMomentum.allowedMultipoleSymmetries(symf, mp)
-            for  symt in symList
-                kappaList = AngularMomentum.allowedKappaSymmetries(symi, symt)
-                for  kappa in kappaList
-                    # Include further restrictions if appropriate
-                    if  abs(kappa) > settings.maxKappa      continue    end
-                    if     string(mp)[1] == 'E'  &&   gauge == Basics.UseCoulomb      
-                        push!(channels, PhotoRecombination.Channel(mp, Basics.Coulomb,   kappa, symt, 0., Complex(0.)) )
-                    elseif string(mp)[1] == 'E'  &&   gauge == Basics.UseBabushkin    
-                        push!(channels, PhotoRecombination.Channel(mp, Basics.Babushkin, kappa, symt, 0., Complex(0.)) )  
-                    elseif string(mp)[1] == 'M'                                
-                        push!(channels, PhotoRecombination.Channel(mp, Basics.Magnetic,  kappa, symt, 0., Complex(0.)) ) 
-                    end 
+        for  symt in AngularMomentum.allowedMultipoleSymmetries(symf, mp)
+            for  kappa in AngularMomentum.allowedKappaSymmetries(symi, symt)
+                if  abs(kappa) > settings.maxKappa      continue    end
+                key = (kappa, symt)
+                if  haskey(mpsFor, key)   push!(mpsFor[key], mp)
+                else                      mpsFor[key] = EmMultipole[mp];   push!(order, key)
                 end
             end
         end
     end
-    return( channels )  
+    # (2) Group the pairs by kappa: one partial wave per kappa, carrying the symmetries it serves.
+    kappas = Int64[];   for (kappa, symt) in order    if !(kappa in kappas)   push!(kappas, kappa)   end    end
+    partialWaves = PartialWave[]
+    for  kappa in kappas
+        channels = Channel[]
+        for  (ka, symt) in order
+            ka == kappa   ||   continue
+            amps = MultipoleAmplitude[]
+            for  mp in mpsFor[(ka, symt)]
+                push!(amps, MultipoleAmplitude(mp, EmPropertyC(Complex(0.), Complex(0.))))
+            end
+            push!(channels, Channel(symt, amps))
+        end
+        push!(partialWaves, PartialWave(kappa, 0., 0., channels))
+    end
+
+    return( partialWaves )
 end
 
 
 """
-`PhotoRecombination.determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::PhotoRecombination.Settings)`  
-    ... to determine a list of PhotoRecombination.Line's for transitions between levels from the initial- and final-state 
-        multiplets, and by taking into account the particular selections and settings for this computation; 
-        an Array{PhotoRecombination.Line,1} is returned. Apart from the level specification, all physical properties are set 
-        to zero during the initialization process.
+`PhotoRecombination.determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
+                                         settings::PhotoRecombination.Settings)`
+    ... selects the photo-recombination lines to be computed by forming all pairs of an initial and a final level that pass the line
+        selection, once for every electron energy requested in the settings; the photon energy and the kinematic factor beta^2 gamma^2
+        follow from that energy. An Array{PhotoRecombination.Line,1} is returned, with all amplitudes still zero.
 """
-function  determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::PhotoRecombination.Settings)
+function determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, settings::PhotoRecombination.Settings)
     lines = PhotoRecombination.Line[]
     for  iLevel  in  initialMultiplet.levels
         for  fLevel  in  finalMultiplet.levels
             if  Basics.selectLevelPair(iLevel, fLevel, settings.lineSelection)
-                #
+
                 electronEnergies = Float64[]
-                if  settings.useIonEnergies 
+                if  settings.useIonEnergies
                     for en in settings.ionEnergies
                         # E^(electron) [keV] = E^(projectile) [MeV/u] / 1.8228885
                         en_au = 1000. / 1.8228885 * Defaults.convertUnits("energy: from eV to atomic", en);      push!(electronEnergies, en_au)
                     end
                 else
-                    for en in settings.electronEnergies 
+                    for en in settings.electronEnergies
                         en_au = Defaults.convertUnits("energy: to atomic", en);      push!(electronEnergies, en_au)
                     end
-                    betaGamma2 = 1.0
                 end
-                #
+
                 for  en in electronEnergies
                     betaGamma2 = 1.0
-                    if  true ## settings.useIonEnergies 
-                        wc         = Defaults.getDefaults("speed of light: c")
-                        Gamma      = 1.0 + en / wc^2
-                        beta       = sqrt( 1.0 - 1.0/Gamma^2)
-                        betaGamma2 = beta^2 * Gamma^2
-                    end
-                    #
-                    if  en < 0    continue   end 
-                    omega    = en + iLevel.energy - fLevel.energy
-                    channels = PhotoRecombination.determineChannels(fLevel, iLevel, settings) 
-                    push!( lines, PhotoRecombination.Line(iLevel, fLevel, en, omega, betaGamma2, 0., EmProperty(0., 0.), channels) )
+                    wc         = Defaults.getDefaults("speed of light: c")
+                    Gamma      = 1.0 + en / wc^2
+                    beta       = sqrt( 1.0 - 1.0/Gamma^2)
+                    betaGamma2 = beta^2 * Gamma^2
+
+                    if  en < 0    continue   end
+                    omega        = en + iLevel.energy - fLevel.energy
+                    partialWaves = PhotoRecombination.determineChannels(fLevel, iLevel, settings)
+                    push!( lines, PhotoRecombination.Line(iLevel, fLevel, en, omega, betaGamma2, 0.,
+                                                                EmProperty(0., 0.), partialWaves) )
                 end
             end
         end
     end
+
     return( lines )
 end
 
 
+#################################################################################################################################
+#################################################################################################################################
+
 """
-`PhotoRecombination.displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})`  
-    ... to display a list of lines and channels that have been selected due to the prior settings. A neat table of all selected 
-        transitions and energies is printed but nothing is returned otherwise.
+`PhotoRecombination.displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})`
+    ... lists the photo-recombination lines that have been selected, together with the electron and photon energies and the multipoles,
+        gauges and partial waves that will be computed for each of them. One row is printed per (multipole, gauge), an expansion made here
+        because a single amplitude holds both gauges: the gauge is a property of this table, not of the partial wave. A neat table is
+        printed to stream; nothing::Nothing is returned.
 """
 function  displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})
     nx = 181
@@ -695,7 +690,7 @@ function  displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})
     sa = sa * TableStrings.flushleft(57, "List of multipoles, gauges, kappas and total symmetries"; na=4)  
     sb = sb * TableStrings.flushleft(57, "partial (multipole, gauge, total J^P)                  "; na=4)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #   
+
     for  line in lines
         sa  = "  ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
                         fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
@@ -706,10 +701,17 @@ function  displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})
         sa = sa * @sprintf("%.4e", Defaults.convertUnits("energy: from atomic", line.electronEnergy)) * "   "
         sa = sa * @sprintf("%.4e", Defaults.convertUnits("energy: from atomic", line.photonEnergy))   * "    "
         sa = sa * @sprintf("%.2e", line.betaGamma2)                                                   * "  "
+        # The table shows one row per (multipole, GAUGE), which the amplitudes no longer carry as a label: an electric multipole is one
+        # amplitude holding two gauges, a magnetic one has no gauge freedom. Expanding it here keeps this table exactly as it always was;
+        # the gauge is a property of the PRESENTATION, not of the channel.
         kappaMultipoleSymmetryList = Tuple{Int64,EmMultipole,EmGauge,LevelSymmetry}[]
-        for  i in 1:length(line.channels)
-            push!( kappaMultipoleSymmetryList, (line.channels[i].kappa, line.channels[i].multipole, line.channels[i].gauge, 
-                                                line.channels[i].symmetry) )
+        for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+            if  string(ma.multipole)[1] == 'E'
+                push!( kappaMultipoleSymmetryList, (pw.kappa, ma.multipole, Basics.Coulomb,   ch.symmetry) )
+                push!( kappaMultipoleSymmetryList, (pw.kappa, ma.multipole, Basics.Babushkin, ch.symmetry) )
+            else
+                push!( kappaMultipoleSymmetryList, (pw.kappa, ma.multipole, Basics.Magnetic,  ch.symmetry) )
+            end
         end
         wa = TableStrings.kappaMultipoleSymmetryTupels(85, kappaMultipoleSymmetryList)
         if  length(wa) > 0  sb = sa * wa[1]   else    sb = sa    end;    println(stream,  sb )  
@@ -718,15 +720,51 @@ function  displayLines(stream::IO, lines::Array{PhotoRecombination.Line,1})
         end
     end
     println(stream, "  ", TableStrings.hLine(nx), "\n")
-    #
+
     return( nothing )
 end
 
 
 """
-`PhotoRecombination.displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, settings::PhotoRecombination.Settings)`  
-    ... to list all results, energies, cross sections, etc. of the selected lines. A neat table is printed but nothing is 
-        returned otherwise.
+`PhotoRecombination.displayRateCoefficients(stream::IO, isym::LevelSymmetry, temperatures::Array{Float64,1}, alphaRR::Array{EmProperty,1})`  
+    ... lists the radiative-recombination rate coefficients of the given level symmetry for all selected temperatures, in both gauges.
+        A neat table is printed to stream; nothing::Nothing is returned.
+"""
+function  displayRateCoefficients(stream::IO, isym::LevelSymmetry, temperatures::Array{Float64,1}, alphaRR::Array{EmProperty,1})
+
+    ntemps = length(temperatures)
+    nx = 54 + 17 * min(ntemps, 7)
+    println(stream, " ")
+    println(stream, "  Rate coefficients [cm^3/s] for initial level with symmetry J^P = $isym:")
+    println(stream, " ")
+    println(stream, "  ", TableStrings.hLine(nx))
+    sa = sb = "                                   "
+    for  nt = 1:min(ntemps, 7)
+        sa = sa * TableStrings.center(14, "T = " * @sprintf("%.2e", temperatures[nt]); na=3);       
+        sb = sb * TableStrings.center(14, "[K]"; na=3)
+    end
+    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
+
+    println(stream, "  ")
+    sa = "  alpha^RR (T, i; Coulomb gauge):    " 
+    sb = "  alpha^RR (T, i; Babushkin gauge):  " 
+    for  nt = 1:min(ntemps, 7) 
+        sa = sa * @sprintf("%.4e", alphaRR[nt].Coulomb)    * "       "
+        sb = sb * @sprintf("%.4e", alphaRR[nt].Babushkin)  * "       "
+    end
+    println(stream, sa);    println(stream, sb)
+    println(stream, "  ", TableStrings.hLine(nx))
+
+    return( nothing )
+end
+
+
+"""
+`PhotoRecombination.displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, settings::PhotoRecombination.Settings)`
+    ... lists the photo-recombination cross sections in both gauges and, whenever the settings ask for them, the anisotropy parameters
+        beta_nu of the emitted photons and the total cross sections. Each anisotropy parameter is obtained from a single call to
+        PhotoRecombination.computeAnisotropyParameter, which returns both gauges at once. A neat table is printed to stream;
+        nothing::Nothing is returned.
 """
 function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, settings::PhotoRecombination.Settings)
     if  settings.useIonEnergies   nx = 170    else  nx = 146   end
@@ -754,7 +792,7 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
     sb = sb * TableStrings.center(30, TableStrings.inUnits("cross section") * "          " * 
                                             TableStrings.inUnits("cross section"); na=3)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #   
+
     for  line in lines
         sa  = " ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
                         fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
@@ -771,8 +809,8 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
         end
         sa = sa * @sprintf("%.2e", line.betaGamma2)                                                   * "   "
         multipoles = EmMultipole[]
-        for  ch in line.channels
-            multipoles = push!( multipoles, ch.multipole)
+        for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+            multipoles = push!( multipoles, ma.multipole)
         end
         multipoles = unique(multipoles);   mpString = TableStrings.multipoleList(multipoles) * "                              "
         sa = sa * TableStrings.flushleft(16, mpString[1:16];  na=2)
@@ -781,8 +819,8 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
         println(stream, sa)
     end
     println(stream, "  ", TableStrings.hLine(nx))
-    #
-    #
+
+
     if  settings.calcTotalCs 
         nx = 143
         println(stream, " ")
@@ -803,7 +841,7 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
         sb = sb * TableStrings.center(57, TableStrings.inUnits("cross section") * "          " * 
                                             TableStrings.inUnits("cross section");  na=4)
         println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-        #
+
         index = Int64[];    eEnergy = Float64[]
         for  line in lines
             if  line.initialLevel.index  in  index  &&  line.electronEnergy  in  eEnergy   continue  end
@@ -816,8 +854,8 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
             sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.photonEnergy))   * "    "
             sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.electronEnergy)) * "    "
             multipoles = EmMultipole[]
-            for  ch in line.channels
-                multipoles = push!( multipoles, ch.multipole)
+            for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+                multipoles = push!( multipoles, ma.multipole)
             end
             multipoles = unique(multipoles);   mpString = TableStrings.multipoleList(multipoles) * "                              "
             sa = sa * TableStrings.flushleft(26, mpString[1:26];  na=3)
@@ -832,8 +870,8 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
         end
         println(stream, "  ", TableStrings.hLine(nx))
     end
-    #
-    #
+
+
     if  settings.calcAnisotropy  
         nx = 133
         println(stream, " ")
@@ -852,7 +890,7 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
         sa = sa * TableStrings.center(10, "Multipoles"; na=5);                         sb = sb * TableStrings.hBlank(15)
         sa = sa * TableStrings.flushleft(57, "beta's"; na=4)  
         println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-        #   
+
         for  line in lines
             sa  = " ";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
                             fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
@@ -863,76 +901,58 @@ function  displayResults(stream::IO, lines::Array{PhotoRecombination.Line,1}, se
             sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.photonEnergy))   * "    "
             sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.electronEnergy)) * "    "
             multipoles = EmMultipole[]
-            for  ch in line.channels
-                multipoles = push!( multipoles, ch.multipole)
+            for  pw in line.partialWaves,  ch in pw.channels,  ma in ch.amplitudes
+                multipoles = push!( multipoles, ma.multipole)
             end
             multipoles = unique(multipoles);   mpString = TableStrings.multipoleList(multipoles) * "          "
             sa = sa * TableStrings.flushleft(11, mpString[1:10];  na=3)
-            be = PhotoRecombination.computeAnisotropyParameter(1, Basics.Coulomb,   line);   sa = sa * @sprintf("%.4e", be.re) * " (1, C);  "
-            be = PhotoRecombination.computeAnisotropyParameter(1, Basics.Babushkin, line);   sa = sa * @sprintf("%.4e", be.re) * " (1, B);  "
+            be = PhotoRecombination.computeAnisotropyParameter(1, line)
+            sa = sa * @sprintf("%.4e", real(be.Coulomb))   * " (1, C);  "
+            sa = sa * @sprintf("%.4e", real(be.Babushkin)) * " (1, B);  "
             println(stream, sa);   sa = TableStrings.hBlank(102)
-            be = PhotoRecombination.computeAnisotropyParameter(2, Basics.Coulomb,   line);   sa = sa * @sprintf("%.4e", be.re) * " (2, C);  "
-            be = PhotoRecombination.computeAnisotropyParameter(2, Basics.Babushkin, line);   sa = sa * @sprintf("%.4e", be.re) * " (2, B);  "
+            be = PhotoRecombination.computeAnisotropyParameter(2, line)
+            sa = sa * @sprintf("%.4e", real(be.Coulomb))   * " (2, C);  "
+            sa = sa * @sprintf("%.4e", real(be.Babushkin)) * " (2, B);  "
             println(stream, sa);   sa = TableStrings.hBlank(102)
-            be = PhotoRecombination.computeAnisotropyParameter(3, Basics.Coulomb,   line);   sa = sa * @sprintf("%.4e", be.re) * " (3, C);  "
-            be = PhotoRecombination.computeAnisotropyParameter(3, Basics.Babushkin, line);   sa = sa * @sprintf("%.4e", be.re) * " (3, B);  "
+            be = PhotoRecombination.computeAnisotropyParameter(3, line)
+            sa = sa * @sprintf("%.4e", real(be.Coulomb))   * " (3, C);  "
+            sa = sa * @sprintf("%.4e", real(be.Babushkin)) * " (3, B);  "
             println(stream, sa);   sa = TableStrings.hBlank(102)
-            be = PhotoRecombination.computeAnisotropyParameter(4, Basics.Coulomb,   line);   sa = sa * @sprintf("%.4e", be.re) * " (4, C);  "
-            be = PhotoRecombination.computeAnisotropyParameter(4, Basics.Babushkin, line);   sa = sa * @sprintf("%.4e", be.re) * " (4, B);  "
+            be = PhotoRecombination.computeAnisotropyParameter(4, line)
+            sa = sa * @sprintf("%.4e", real(be.Coulomb))   * " (4, C);  "
+            sa = sa * @sprintf("%.4e", real(be.Babushkin)) * " (4, B);  "
             println(stream, sa);   sa = TableStrings.hBlank(102)
         end
         println(stream, "  ", TableStrings.hLine(nx))
     end
-    #
-    #
+
+
     if  settings.calcTensors   
         println(stream, " ")
         println(stream, "  Reduced statistical tensors of the recombined ion ... not yet implemented !!")
         println(stream, " ")
     end
-    #
-    return( nothing )
-end
 
+    # HOW FAR THE TWO GAUGES AGREE, printed beside the results they qualify;  the same measure and thresholds
+    # PhotoEmission applies, through Basics.gaugeConsistency.  The indicator is free here: the quantity is
+    # already held in both gauges, so this only reads what has been computed.
+    rows = Tuple{String,Float64,EmProperty}[]
+    for  line  in  lines
+        label = TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index) * "  " *
+                TableStrings.symmetries_if(LevelSymmetry(line.initialLevel.J, line.initialLevel.parity),
+                                           LevelSymmetry(line.finalLevel.J, line.finalLevel.parity))
+        push!( rows, (label, Defaults.convertUnits("energy: from atomic", line.photonEnergy), line.crossSection) )
+    end
+    Basics.displayGaugeConsistency(stream, rows; caption="radiative-recombination cross sections")
 
-"""
-`PhotoRecombination.displayRateCoefficients(stream::IO, isym::LevelSymmetry, temperatures::Array{Float64,1}, alphaRR::Array{EmProperty,1})`  
-    ... to print all rate coefficients for the selected temperatures in neat tables, 
-        though nothing is returned otherwise.
-"""
-function  displayRateCoefficients(stream::IO, isym::LevelSymmetry, temperatures::Array{Float64,1}, alphaRR::Array{EmProperty,1})
-    #
-    ntemps = length(temperatures)
-    nx = 54 + 17 * min(ntemps, 7)
-    println(stream, " ")
-    println(stream, "  Rate coefficients [cm^3/s] for initial level with symmetry J^P = $isym:")
-    println(stream, " ")
-    println(stream, "  ", TableStrings.hLine(nx))
-    sa = sb = "                                   "
-    for  nt = 1:min(ntemps, 7)
-        sa = sa * TableStrings.center(14, "T = " * @sprintf("%.2e", temperatures[nt]); na=3);       
-        sb = sb * TableStrings.center(14, "[K]"; na=3)
-    end
-    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
-    #   
-    println(stream, "  ")
-    sa = "  alpha^RR (T, i; Coulomb gauge):    " 
-    sb = "  alpha^RR (T, i; Babushkin gauge):  " 
-    for  nt = 1:min(ntemps, 7) 
-        sa = sa * @sprintf("%.4e", alphaRR[nt].Coulomb)    * "       "
-        sb = sb * @sprintf("%.4e", alphaRR[nt].Babushkin)  * "       "
-    end
-    println(stream, sa);    println(stream, sb)
-    println(stream, "  ", TableStrings.hLine(nx))
-    #
     return( nothing )
 end
 
 
 """
 `PhotoRecombination.plasmaRateKotelnikov(Te::Float64, Z::Float64)`  
-    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron
-        energies and an initially bare ions with nuclear charge Z; an alpha::Float64 is returned.
+    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron energies and an initially
+        bare ions with nuclear charge Z; an alpha::Float64 is returned.
 """
 function plasmaRateKotelnikov(Te::Float64, Z::Float64)
     wx    = 2*Te / Z^2
@@ -945,9 +965,8 @@ end
 
 """
 `PhotoRecombination.plasmaRateKotelnikov_1s(Te::Float64, Z::Float64)`  
-    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron
-        energies and an initially bare ions with nuclear charge Z; here only the capture into 1s is taken into account.
-        An alpha::Float64 is returned.
+    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron energies and an initially
+        bare ions with nuclear charge Z; here only the capture into 1s is taken into account. An alpha::Float64 is returned.
 """
 function plasmaRateKotelnikov_1s(Te::Float64, Z::Float64)
     wx    = 2*Te / Z^2
@@ -959,9 +978,8 @@ end
 
 """
 `PhotoRecombination.plasmaRatePartialSeaton(Te::Float64, Z::Float64, n::Int64)`  
-    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron
-        energies and an initially bare ions with nuclear charge Z.
-        An alpha::Float64 is returned.
+    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron energies and an initially
+        bare ions with nuclear charge Z. An alpha::Float64 is returned.
 """
 function plasmaRatePartialSeaton(Te::Float64, Z::Float64, n::Int64)
     wx    = Z^2 / (2*n^2 * Te)
@@ -974,14 +992,13 @@ end
 
 """
 `PhotoRecombination.plasmaRateSeaton(Te::Float64, Z::Float64)`  
-    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron
-        energies and an initially bare ions with nuclear charge Z; this formula is valid for 2*Te / Z^2 << 1.
-        An alpha::Float64 is returned.
+    ... to evaluate the RR plasma rate coefficient at temperature Te and for a Maxwellian distribution of electron energies and an initially
+        bare ions with nuclear charge Z; this formula is valid for 2*Te / Z^2 << 1. An alpha::Float64 is returned.
 """
 function plasmaRateSeaton(Te::Float64, Z::Float64)
     wx    = 2*Te / Z^2
     alpha = 32 * sqrt(pi) * Defaults.getDefaults("alpha")^3 * Z / (3. * sqrt(3.))
-    alpha = alpha * sqrt(1/wx) * (log(1/wx) + 0.8576 + 0.9380 * (1/wx)^(-1/3))  
+    alpha = alpha * sqrt(1/wx) * (log(1/wx) + 0.8576 + 0.9380 * (1/wx)^(-1/3))
     return( alpha )
 end
 

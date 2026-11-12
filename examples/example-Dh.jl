@@ -1,0 +1,1372 @@
+
+println("Dh) Apply & test the MultiPhotonTransition module: two-photon excitation and decay between bound levels.")
+
+setDefaults("print summary: open", "zzz-MultiPhotonTransition.sum")
+setDefaults("unit: energy", "eV")
+setDefaults("unit: rate", "1/s")
+
+## REBUILT 06-Aug-2026, together with the module, which was renamed from MultiPhotonDeExcitation -- a name that
+## described only half of what it does, since it has always carried absorption processes too.
+##
+## THE PREVIOUS VERSION OF THIS FILE COULD NOT RUN. Its branches 4 and 5 passed seven positional arguments to an
+## eight-field Settings, and both used `mpGreen`, which was assigned in branch 3 -- a branch guarded by `false`.
+## Since the branches form one if/elseif chain only ONE ever executes, so branch 2 likewise referred to `wb`
+## from branch 1 without it existing. Every branch below is therefore SELF-CONTAINED: it builds what it needs.
+##
+## THE THREE PROCESSES, and what distinguishes them:
+##  DIAGNOSTICS
+##   a)  overview of the intermediate-state sum      -- which levels carry it, which denominators are dangerous
+##  TWO-PHOTON EMISSION  (total energy fixed, shared between the photons -> continuous spectrum, energy sharings)
+##   b)  H 2s -> 1s                                  -- THE ANCHOR: exact rate 8.2206 /s
+##   c)  H-like Z-scan, Z = 1..54                    -- reproduces the relativistic suppression of the Z^6 law
+##   d)  energy-differential spectrum                -- symmetry + sum rule; this is what found the sign bug
+##   e)  He-like 1s2s 1S_0 -> 1s^2, He and Ar16+     -- J = 0 -> J = 0, so only K = 0
+##   f)  H 2s -> 1s via a GREEN-FUNCTION sum         -- the alternative intermediate representation
+##  TWO-PHOTON ABSORPTION  (photon energies imposed, transition driven -> cross sections, not rates)
+##   g)  H 1s -> 2s, every polarization from one run -- J = 1/2 -> 1/2, so K = {0,1}: SEE THE WARNING BELOW
+##   h)  Mg 3s^2 -> 3s4s via the 3s3p 1P_1 resonance -- a real atom; J = 0 -> J = 0, only K = 0
+##   i)  bichromatic, two beams of different colour  -- odd K REAPPEARS: blocker A2 tested from the other side
+##
+##  READ THIS BEFORE QUOTING ANY EMISSION TOTAL FROM THE COMMENTS BELOW. On 08-Aug-2026 the two-photon TOTAL
+##  rate was corrected by a factor 4 and every total printed in a comment before that date is a factor 4 TOO
+##  LARGE. Two independent factors of 2, one arithmetic and one physical, had been entangled in the quadrature:
+##    * Basics.determineEnergySharings returned weights larger by exactly 2 than the quadrature weights of
+##      Int_0^E (the 1/2 of the map from [-1,1] was missing) -- measured, ratio 2.000000 on two integrands;
+##    * the indistinguishable-photon 1/2 was never applied. The differential rate already contains both photon
+##      orderings and the sharings run over the FULL interval, so each physical event is counted twice.
+##  DIFFERENTIAL rates, spectral SHAPES, gauge RATIOS and Z-TRENDS are ALL UNAFFECTED -- branch d re-runs
+##  bit-identically in its differentials. Only the totals move, and with them the open constant, 6.679 -> 26.7.
+##
+##  BEYOND TWO PHOTONS -- moved out 08-Aug-2026 to example-Du.jl, which is the agreed home for three-photon
+##  and beyond. The split is by PHOTON NUMBER, not by direction.
+##
+## ABSORPTION POLARIZATION OBSERVABLES -- two defects found and fixed 07-Aug-2026 (blocker A2).
+##   (1) a typo: the K-weight read `2*Basics.twice(K) + 1`, and since twice(K) = 2K that is 4K+1, not 2K+1.
+##       Harmless for K = 0 (both give 1), which is why Mg looked correct; for K = 1 it used 5 instead of 3.
+##   (2) ODD K survived for a SINGLE BEAM, where it must vanish. Two photons from one beam are identical
+##       bosons, so their polarization state must be SYMMETRIC; exchanging the multipoles in the 3-j carries
+##       (-1)^(L1+L2+K) = (-1)^K for E1E1, so odd K is antisymmetric and forbidden. LINEAR light got this right
+##       by accident -- its helicity sum is coherent, so the (+,-) and (-,+) terms cancel on their own -- while
+##       the UNPOLARIZED sum is incoherent and accumulated |+-> and |-+> as separate states, neither of which is
+##       individually symmetric. K = 1 was supplying 92 % of the unpolarized cross section for H 1s -> 2s.
+##       The restriction applies to the MONOCHROMATIC scheme only: with two distinguishable beams the photons
+##       are not identical and every K contributes -- one more reason to complete the bichromatic case.
+##   VERIFIED: H 1s -> 2s now gives sigma_linear/sigma_unpolarized = 2.0000 in BOTH gauges, identical to Mg --
+##   correct, since H 1s -> 2s is s -> s and therefore K = 0 only, exactly like a J = 0 -> 0 transition. Mg is
+##   bit-identical to before (it was already K = 0 only), and its density-matrix factor 0.72 is unchanged.
+##
+##
+## SELECTION is by `lineSelection` on level indices, and every branch carries an explicit `calcOverview` flag.
+##
+## UNITS, settled 06-Aug-2026 -- nothing had been defined or documented before. The generalized two-photon cross
+## section is in cm^4 s, from W [1/s] = sigma^(2) * F^2 with F the photon flux density in photons cm^-2 s^-1,
+## and is also reported in GM (1 GM = 1e-50 cm^4 s). For a SINGLE beam the two photons are indistinguishable and
+## the combinatorial factor is a convention; it is fixed by requiring agreement with the bichromatic case,
+## W = sigma^(2) * F_1 * F_2, in the limit omega_1 -> omega_2. See MultiPhotonTransition.Settings.
+##
+## STATUS, 07-Aug-2026. Two structural bugs were found and fixed (blockers A1, A2), both the same root cause --
+## identical-boson exchange symmetry not enforced: the EMISSION exchange phase was (-1)^(K+J_f+J_i) where it
+## must be (-1)^(L1+L2-K), and the single-beam ABSORPTION sum admitted ODD K, which is forbidden for two
+## identical photons.
+##
+## FIVE BRANCHES ARE DATED "Last successful" (a, d, g, h, i), each ONLY for what it verifies and never for a
+## magnitude: a for the ranking and the exact 2:1 statistical weight, d for the spectral SHAPE and the
+## photon-exchange SYMMETRY, g and h for the polarization RATIOS, i for the odd-K rule, the omega1 <-> omega2
+## invariance and the monochromatic limit. All of these are fixed by angular algebra and are independent of the
+## open overall constant. The remaining four (b, c, e, f) carry "Last visit" with the blocking reason named.
+##
+## **BOTH GATES ARE NOW LIFTED, AND BRANCH (b) IS DATED -- 15-Oct-2026.**  It gives Coulomb 8.22865 and
+## Babushkin 8.22902 against the exact 8.22906 /s: 0.999995 of it, with the two gauges agreeing to 4.5e-05.
+## So the condition this file states below -- "no other branch of this file should be believed until this one
+## reproduces 8.2206 s^-1" -- is MET, and an absolute rate from the sum-over-states route is now defensible.
+##
+## THE TWO GATES, and what each turned out to be:
+##   * THE SCALE was the PREFACTOR, fixed 13-Oct-2026 (challenge S5, `b399f5ff`).  Before it this branch sat a
+##     factor 13.1 LOW;  immediately after, 23 % HIGH.
+##   * THE BASIS was an intermediate set that stopped at the BOUND series.  n_max = 12 was "the first
+##     converged point" of that series, and the bound series converges to the wrong number.  The continuum
+##     switches on SHARPLY rather than gradually:
+##         n_max   30      60       100
+##         levels  58      118      198
+##         Bab     9.7702  8.2322   8.22902
+##         Cou/Bab 0.1728  0.9374   0.99996
+##     Extrapolating the n <= 30 trend (10.104, 9.998, 9.770) as slow linear convergence suggested hundreds of
+##     configurations could not close it.  That extrapolation was WRONG -- the measurement above is what
+##     settles it, and the gauge ratio, which only a complete intermediate set can restore, is the independent
+##     witness: 6 : 1 apart at n = 30, agreeing to 4e-05 at n = 100.
+##
+## THE RECIPE, since none of it was written down before:  n_max ~ 100 (not 12);  `gridStopper = false`,
+## because the high-n members are deliberately box-confined stand-ins for the continuum and the guard is right
+## to refuse them as Rydbergs;  the box held FIXED at the 12p recommendation, since enlarging it to suit
+## n = 100 would chase accurate Rydbergs and starve the spline set (Rule 12) -- what must converge is the SUM,
+## not each state.  And the intermediates must come from an `Atomic.Computation`: the
+## `Representation`/`MeanFieldMultiplet` path CANNOT express this, because `AtomicState.MeanFieldSettings`
+## carries only `scField` and has no gridStopper.  That API gap is why this branch sat on a bound-only set.
+##
+## STILL OPEN, and not to be confused with the above:  the test system here is H 2s -> 1s, i.e. ONE electron
+## run through the many-electron machinery.  This validates the ASSEMBLY at CSF level and NOT a genuine
+## many-electron intermediate spectrum with correlation in it;  the He-like 2^1S_0 -> 1^1S_0 case is that
+## test, and it is now reachable because the recipe above is known.
+##
+## THE SUPERSEDED TEXT, kept one release so a reader of the old numbers is not misled:
+## THE SUPERSEDED TEXT, kept one release so a reader of the old numbers is not misled:
+## THE ONE OPEN ISSUE THAT GATES EVERY EMISSION MAGNITUDE: a constant factor 26.7 (was 6.679 before the
+## 08-Aug-2026 total-rate correction, and 12.98 before A1),
+## measured to 0.05 % over Z = 1..3 and therefore a prefactor, not a physics omission. It is NOT calibrated
+## away -- see the note at the prefactor in module-MultiPhotonTransition-inc-2p-emission.jl. Until it is
+## derived, emission MAGNITUDES from this file must not be quoted; SHAPES, SYMMETRIES, RATIOS and Z-TRENDS may
+## be, since the constant divides out of all of them.
+##
+## A NOTE ON THE NUCLEAR MODEL. `Nuclear.Model(1.0)` defaults to Fermi and RAISES for hydrogen: with JAC's fixed
+## skin thickness the 2-parameter Fermi distribution has a minimum rms radius near 1.86 fm, far above hydrogen's
+## 0.88 fm. That is a good error -- it refuses rather than returning a silently wrong charge distribution -- so
+## the hydrogen branches below use the point model, which is in any case the right choice for the benchmark:
+## 8.2206 s^-1 is a point-nucleus number.
+##
+## REFERENCES for the verification stage:
+##   Drake, PRA 34, 2871 (1986)                        -- 2-photon rates, H-like AND He-like; the standard table
+##   Labzowsky et al.                                  -- A(2s->1s) = 8.2206 /s for neutral hydrogen
+##   Amaro, Surzhykov, Parente, Indelicato & Santos,   -- relativistic 2s->1s, B-polynomials vs B-splines
+##       J. Phys. A 44, 245302 (2011); arXiv:1104.4818
+##   Fritzsche, Approximate Atomic Green Functions,    -- the intermediate-state summation itself
+##       Molecules 26, 2660 (2021)
+
+## THE RADIAL BOX MATTERS ENORMOUSLY HERE, and rbox = 10 a.u. -- the value this file used to carry -- is far
+## too small. The intermediate np states are diffuse, and truncating them at 10 a.u. gave 357 /s for H 2s -> 1s
+## where the same calculation at rbox = 80 gives 11.2 /s. That factor of 32 was a BOX artifact, not physics, and
+## it very nearly led to "correcting" a prefactor that turned out to be right. See the convergence table in
+## branch a and work/diag-2p-convergence.jl.
+grid = Radial.Grid(Radial.Grid(false), rnt = 4.0e-6, h = 5.0e-2, hp = 1.0e-2, rbox = 80.0)
+
+
+##
+## =====================================================================================================
+##  DIAGNOSTICS -- run this first on any new system
+## =====================================================================================================
+if  false
+    # Last successful:  07-Aug-2026
+    #
+    # DATED for what a diagnostic can verify: that it reports the right thing, in the right order, with the
+    # right structure. Re-run 07-Aug-2026 after the emission sign fix and the exchange-phase fix:
+    #
+    #     contribution   nu   J^P     E_i - omega1 - E_nu [eV]
+    #     1.741553e-06    4   3/2 -        -2.578993          <- 3p_3/2
+    #     8.707894e-07    3   1/2 -        -2.578980          <- 3p_1/2
+    #     5.116022e-07    2   3/2 -        -0.693331          <- 2p_3/2
+    #     2.560997e-07    1   1/2 -        -0.693286          <- 2p_1/2
+    #
+    # THREE CHECKS PASS:
+    #   * EVERY DENOMINATOR IS NEGATIVE. E_i - omega1 - E_nu < 0 for every bound np, as emission requires.
+    #     Before the sign fix they were mixed and produced poles that cannot exist -- so this table is now a
+    #     third, independent confirmation of that correction.
+    #   * THE 3/2 : 1/2 RATIO IS EXACTLY 2 : 1 at every n, which is the (2j+1) statistical weight of p_3/2
+    #     against p_1/2. Free, and it comes out of the angular machinery unprompted.
+    #   * THE ORDERING IS PHYSICAL: 3p above 2p despite 2p having the smaller denominator, because the dipole
+    #     matrix elements more than compensate -- which is exactly the kind of thing this table exists to say,
+    #     and which no one could guess from a configuration list.
+    # Each level is now listed ONCE; it used to appear once per K, though the ranked quantity does not depend
+    # on K at all.
+    #
+    # --- Branch a: OVERVIEW of the intermediate-state sum for the H-like 2s -> 1s two-photon decay.
+    #
+    # RUN THIS FIRST on any new system. A two-photon amplitude is a SUM over intermediate levels |nu>, and that
+    # sum is both the expensive part of the calculation and the delicate one. This branch builds everything,
+    # ranks the intermediate levels by their actual contribution
+    #
+    #     | <f|O(mp2)|nu> <nu|O(mp1)|i> / (E_i + omega1 - E_nu) |
+    #
+    # and prints each energy denominator alongside -- then stops, without forming a single amplitude.
+    #
+    # IT ANSWERS THREE QUESTIONS that no configuration list can:
+    #   * which intermediate levels actually carry the transition (usually a handful; the rest is noise);
+    #   * whether any denominator is NEAR-RESONANT. `selfTolerance` removes an exactly singular term, but a
+    #     merely small denominator is far more dangerous -- it yields a large finite number that looks like a
+    #     result while the non-resonant perturbative treatment has quietly stopped applying;
+    #   * whether the basis is big enough. If the largest contributions sit on the highest levels included, the
+    #     sum is truncated and the answer is not converged, however smooth it looks.
+    ni          = Nuclear.Model(1.0, PointNucleus())   ## Fermi cannot represent Z = 1; see the note in the header
+    interConfs  = [Configuration("2p"), Configuration("3p"), Configuration("4p"), Configuration("5p")]
+    interRep    = Representation("intermediate np levels", ni, grid, interConfs, MeanFieldMultiplet(MeanFieldSettings()))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.EnergyDiffCs()], 4 ),
+                        multipoles = [E1], gauges = [UseCoulomb],
+                        intermediateStates = interMp,
+                        calcOverview  = true,             ## <-- the whole point of this branch
+                        lineSelection = LineSelection() )
+    wo = Atomic.Computation(Atomic.Computation(), name="Dh-a: overview of the 2s -> 1s intermediate sum", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("2s")],
+                            finalConfigs   = [Configuration("1s")],
+                            processSettings= mpSettings )
+    perform(wo)
+    #
+##
+## =====================================================================================================
+##  TWO-PHOTON EMISSION  (decay: the total energy E_i - E_f is FIXED and SHARED between the two photons,
+##  so a line has a continuous spectrum and is resolved by energy sharings)
+## =====================================================================================================
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last reproduced:  20-Oct-2026 (4 of 4 numbers on the claim line)
+    # OWN GRID for this branch: Bsplines.checkGridRepresentation refused the one used here and named
+    # about 255.0 a.u. as the box this branch's subshells want. A local grid is used rather than
+    # changing a shared one, so the branches that are already matched are not disturbed -- a box too
+    # LARGE starves the fixed B-spline basis just as badly as one too small (Rule 12). The
+    # non-exponential family is used because the exponential one quantises r_max coarsely and cannot
+    # be tuned to a target; hp = rbox/300 is Basics.recommendedGrid's own recipe.
+    grid = Radial.Grid(Radial.Grid(false), rnt = 4.0e-06, h = 5.0e-2, hp = 0.8500, rbox = 255.0)
+    # EARLIER, 07-Aug-2026 -- NOT successful: the open prefactor, and this basis is not converged.  This was
+    #   a `Last visit` marker until 17-Oct-2026;  the branch has been `Last successful` since 15-Oct, so the
+    #   marker was stale and read as the branch's status.  The account below is kept, the status field is not.
+    #
+    # RE-RUN 07-Aug-2026 AFTER THE EXCHANGE-PHASE FIX (blocker A1). Babushkin = 1.461 /s with the 2p..8p basis
+    # written below; the CONVERGED value (2p..45p, same box) is 1.231 /s, so this branch as configured is 19 %
+    # off its own converged limit -- n_max = 8 is not enough, and the gauge ratio 0.153 here against 0.907 when
+    # converged says so plainly. Against the exact 8.2206 /s the converged result is low by the open factor
+    # documented at the prefactor in module-MultiPhotonTransition-inc-2p-emission.jl -- 13.1 as of 03-Sep-2026,
+    # having been 22.0 before the coherent-Jsym correction and 26.7 in an older, discredited note.
+    # NOT DATED SUCCESSFUL: neither the basis nor the absolute scale is settled. What this branch DID establish
+    # is the exchange-phase bug -- K-resolving it showed K = 1 carrying 48 % of a transition where it must
+    # vanish, which is how blocker A1 was found.
+    #
+    # --- Branch b: TWO-PHOTON EMISSION, 2s -> 1s in neutral hydrogen. THE ANCHOR OF THIS WHOLE FILE.
+    #
+    # THE PREFACTOR FIX LANDED 13-Oct-2026 (challenge S5, `module-MultiPhotonTransition-inc-2p-emission.jl`):
+    # the shared `2*pi*...` prefactor this branch's numbers below were measured against was wrong by a factor
+    # 16 (should be `32*pi*...`), confirmed via Drake (PRA 34, 2871 (1986)) summed over this SAME bound n_max=20
+    # truncation (10.0466 /s against this branch's own dated 0.62789 /s, ratio 16.00) and independently via
+    # `example-As.jl` branch (c)'s complete-basis chi result, now 8.229061 /s in BOTH gauges, matching Amaro et
+    # al. 2011's 8.22906 /s to 6 figures.
+    #
+    # RE-RUN 14-Oct-2026, AND THE OPEN CONSTANT IS GONE: Babushkin = 10.1040 /s against the exact 8.22906 /s,
+    # i.e. 23 % HIGH where this branch used to be a factor 13.1 LOW. **So the whole of the old constant was
+    # the prefactor.** What is left is NOT a scale error but BASIS INCOMPLETENESS, and it shows itself twice
+    # over: a bound-only intermediate sum OVERSHOOTS (the continuum contributes with the opposite sign and
+    # brings 10.10 down to 8.23), and the two gauges disagree 7.3 : 1 (Coulomb 1.37631 against Babushkin
+    # 10.1040), which is what an incomplete intermediate set always does to gauge invariance. The matched
+    # comparison is the convincing one: Drake summed over the same n_max=20 bound set gives 10.0466 /s, and
+    # this route now gives 10.046 /s there.
+    # STILL NOT DATED SUCCESSFUL, and deliberately so: 23 % off the exact rate is not physical consistency.
+    # `example-As.jl` branch (c), with the complete chi, remains the trusted anchor for an ABSOLUTE rate; this
+    # branch is the anchor for the sum-over-states ASSEMBLY, which is now shown correct at matched truncation.
+    #
+    # Last successful:  15-Oct-2026   ## Coulomb 8.22865, Babushkin 8.22902 against the exact 8.22906 /s,
+    #                                 ## i.e. 0.999995 of it with the two gauges agreeing to 4.5e-05.
+    #                                 ## THE GATE THIS FILE SETS FOR ITSELF IS PASSED (see the header).
+    #
+    # A(2s -> 1s) = 8.2206 s^-1 is the single most-checked number in two-photon atomic physics: Breit & Teller,
+    # Klarsfeld, Goldman & Drake, Labzowsky and others all agree on it. The transition is strictly forbidden for
+    # ONE photon -- 2s and 1s have the SAME parity, so E1 cannot connect them -- which is precisely why the
+    # two-photon channel governs the 2s lifetime.
+    #
+    # WHY IT IS THE RIGHT ANCHOR: one electron, so it is cheap; the answer is unambiguous to five digits; and
+    # ANY error in the normalisation of the second-order amplitude shows up here immediately and undisguised.
+    # No other branch of this file should be believed until this one reproduces 8.2206 s^-1.
+    #
+    # The intermediate states are the np levels: E1 twice, i.e. 2s -> np -> 1s. The sum formally runs over the
+    # COMPLETE np spectrum INCLUDING THE CONTINUUM; truncating it at bound states up to some n_max is the
+    # leading approximation here, and branch o is what shows whether that truncation has converged.
+    #
+    # THE INTERMEDIATE STATES MUST COME FROM THE SAME ONE-BODY HAMILTONIAN as the initial and final ones. This
+    # is why `initialAsfSettings`, `finalAsfSettings` and the MeanFieldSettings below all carry
+    # Basics.NuclearField(): -Z/r has no self-consistency, so it is identical for all three by construction, and
+    # for a one-electron system it gives EXACT hydrogenic states. Gauge invariance in second-order perturbation
+    # theory requires exactly this; a separately-converged DFS potential for the intermediate multiplet breaks
+    # it systematically, and does so WITHOUT preventing either gauge from converging on its own.
+    #
+    # CONVERGENCE, measured 06/07-Aug-2026 (work/diag-2p-convergence.jl, diag-samepotential.jl, diag-nf-push.jl):
+    #
+    # THAT 06/07-Aug TABLE IS WITHDRAWN, and the correction matters. It quoted rbox = 40...160 and read Babushkin
+    # ~ 8.7 /s, "5.5 % above the exact 8.2206". THOSE BOXES ARE FAR TOO SMALL: an 8p orbital turns over near
+    # r_+ = 127 a.u., so Rule 12 asks for ~300, and `Bsplines.checkGridRepresentation` now REFUSES the old grid
+    # ("fails to represent 6 of 14 subshells"). The apparent 5.5 % agreement was the too-small-box artifact of
+    # Rule 12 wearing the shape of a physics result, and it stood as the better number for a month.
+    #
+    # RE-MEASURED 03-Sep-2026, box from `Basics.recommendedGrid` at each n_max, with the coherent-Jsym correction
+    # of `27fc7e1` in place. Against the exact 8.2206 1/s:
+    #
+    #     n_max     rbox [a.u.]    Coulomb    Babushkin    Bab/Cou    8.2206/Bab
+    #        8          255         0.08037     0.07757      0.965      105.97     <- OUTLIER, do not use
+    #       12          479         0.08602     0.63150      7.341       13.018
+    #       16          767         0.08809     0.62903      7.141       13.069
+    #       20         1119         0.08907     0.62789      7.049       13.092
+    #
+    # n_max = 8 is an OUTLIER -- its basis is too small to carry the K = 1 cancellation, and its gauge ratio of
+    # 0.965 is a coincidental crossing of exactly the kind lesson (ii) below warns about.
+    #
+    # THREE LESSONS, and the first two each nearly cost something.
+    #
+    # (i) THE BOX DOMINATES. At rbox = 10 -- the value this file first carried -- the branch returned 357 /s, a
+    #     factor 32 above the rbox = 80 result, purely from cutting off the diffuse np states. That artifact
+    #     looked exactly like a wrong normalisation and would have been "fixed" by inserting a bogus factor into
+    #     correct code. The prefactor 2pi*alpha^2*omega1*omega2/(2J_i+1) is RIGHT; do not touch it.
+    #
+    # (ii) THE "Cou/Bab = 1.0035" AT DFS n_max = 12 WAS A COINCIDENTAL CROSSING, NOT CONVERGENCE. Read as
+    #     evidence of gauge invariance it supported a wrong story for a day. Two things exposed it: the DFS
+    #     ratio is non-monotonic (2.08, 1.86, 1.0035, 1.17 -- it dips through 1 and returns), and at the SAME
+    #     basis size NuclearField gives 1.736. Never trust a single point of a ratio; trust a trend.
+    #
+    # (iii) POTENTIAL CONSISTENCY IS WORTH A FACTOR OF SIX IN THE ERROR. Moving the intermediate states into the
+    #     same Hamiltonian took the LENGTH gauge from 35 % high (DFS, 11.13) to 5.5 % high (8.66).
+    #
+    # WHERE IT NOW STANDS. Babushkin (length) converges to ~0.628 /s for n_max >= 12, a factor 13.1 BELOW the
+    # exact 8.2206; Coulomb (velocity) sits a further factor ~7 below. Two facts about the gauge split were
+    # settled on 03-Sep-2026 by measuring the ONE-photon amplitude directly, and they should save the next reader
+    # from re-deriving them:
+    #
+    #   * ON SHELL THE GAUGES AGREE EXACTLY -- Babushkin/Coulomb = 1.000000 at omega = E_nu - E_f, for every
+    #     intermediate. `PhotoEmission.amplitude` is sound; it is not the problem.
+    #   * OFF SHELL, Babushkin/Coulomb = omega/(E_nu - E_f) EXACTLY -- six digits over eight intermediates. That
+    #     is simply <f|p|nu> = i (E_nu - E_f) <f|r|nu>: the length form carries the PHOTON energy, the velocity
+    #     form the LEVEL SPACING. Neither is wrong; they are different legitimate off-shell continuations, and NO
+    #     RESCALING BRINGS THEM TOGETHER -- converting one into the other is an identity, not a repair.
+    #
+    # So the residual gauge ratio is not a defect to hunt. Length and velocity forms of a SECOND-ORDER amplitude
+    # agree only after summing over a COMPLETE set, and the ratio is therefore a quantitative measure of how
+    # incomplete the bound-only intermediate set is. The length gauge stays the trustworthy number, its <r>
+    # weighting living in the large-r region the bound states describe well.
+    #
+    # NOT DATED. 5.5 % with a 75 % gauge split is an understood discrepancy, not agreement. Closing it needs a
+    # genuine continuum in the intermediate spectrum (a working Green expansion -- branch g -- or explicit
+    # continuum orbitals), NOT more bound states: n_max = 12, 16, 20 already agree among themselves.
+    ni          = Nuclear.Model(1.0, PointNucleus())   ## Fermi cannot represent Z = 1; see the note in the header
+    ## THE BOX IS MATCHED TO THE ORBITALS AND IS LOCAL TO THIS BRANCH (03-Sep-2026). The file-level grid carries
+    ## rbox = 80, which is fine for the other branches but far too small for a 12p intermediate: this branch used
+    ## to fail outright on Bsplines.checkGridRepresentation. Basics.recommendedGrid sizes the box from the shells
+    ## it is given, which is exactly Rule 12 done for us.
+    ## **nMax = 100, NOT 12 -- 15-Oct-2026, AND THIS IS WHAT MAKES THE BRANCH CONVERGE.**  12 was "the first
+    ## converged point" of the BOUND series, and the bound series converges to the WRONG number (10.104 /s).
+    ## The continuum is the missing piece and it switches on SHARPLY rather than gradually:
+    ##     n_max   30      60       100
+    ##     levels  58      118      198
+    ##     Bab     9.7702  8.2322   8.22902      (exact 8.22906)
+    ##     Cou/Bab 0.1728  0.9374   0.99996
+    ## so the gauge ratio -- which a complete intermediate set alone can restore -- goes from 6:1 apart to
+    ## agreeing within 4e-5.  Extrapolating the n <= 30 trend as slow linear convergence (10.104, 9.998,
+    ## 9.770) said "hundreds of configurations cannot close this";  that extrapolation was WRONG and the
+    ## measurement is above.
+    nMax        = 100
+    grid        = Basics.recommendedGrid(Dict(Shell("1s") => 1, Shell("2s") => 1, Shell("12p") => 1), 1.0)
+    interConfs  = [Configuration("$(n)p")  for n = 2:nMax]
+    scf         = Basics.NuclearField()          ## the SAME one-body Hamiltonian for all three; see above
+    ## **gridStopper = false IS REQUIRED, and the route must be an Atomic.Computation.**  The high-n members
+    ## are deliberately box-confined pseudo-continuum states standing in for the true continuum -- the grid
+    ## guard is RIGHT to refuse them as Rydbergs and wrong to exclude them here.  The box is held FIXED at the
+    ## 12p recommendation on purpose: enlarging it to suit n = 100 would chase accurate Rydbergs and starve
+    ## the spline set (Rule 12), and what must converge is the SUM, not each state.
+    ##   NOTE the `Representation`/`MeanFieldMultiplet` path CANNOT express this: `AtomicState.MeanFieldSettings`
+    ## carries only `scField`, with no gridStopper, which is exactly why this branch was stuck on a bound-only
+    ## set for months.  The intermediates therefore come from an `Atomic.Computation`, as
+    ## `MultipolePolarizibility` builds its perturbers.
+    asfA        = AsfSettings(AsfSettings(); scField = scf, gridStopper = false)
+    interComp   = Atomic.Computation(Atomic.Computation(), name="intermediate np levels", grid=grid,
+                                      nuclearModel=ni, configs=interConfs, asfSettings=asfA)
+    interMp     = perform(interComp; output=true)[ResultKeys.Multiplet]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.EnergyDiffCs()], 8 ),
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = interMp,
+                        calcOverview  = false,
+                        lineSelection = LineSelection(), printBefore = true )
+    wa = Atomic.Computation(Atomic.Computation(), name="Dh-b: 2s -> 1s two-photon decay of H", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("2s")],
+                            finalConfigs   = [Configuration("1s")],
+                            initialAsfSettings = asfA, finalAsfSettings = asfA,
+                            processSettings= mpSettings )
+    perform(wa)
+    #
+elseif  false
+    # Last visit:  18-Oct-2026
+    # 07-Aug-2026: NOT successful -- n_max = 12 is far from converged
+    #
+    # RE-RUN 07-Aug-2026 AFTER THE EXCHANGE-PHASE FIX. Babushkin, and the deviation from the non-relativistic
+    # Z^6 law normalised at Z = 1:
+    #
+    #     Z              1        2        6       18       36       54
+    #     Bab [1/s]    1.341   85.82    6.246e4  4.482e7  2.715e9  2.826e10
+    #     A/(A_1 Z^6)  1.000   0.9998   0.998    0.982    0.930    0.850     <- relativistic suppression
+    #     Cou/Bab      0.302   0.302    0.301    0.293    0.275    0.245
+    #
+    # THE TREND IS THE POINT, and it is prefactor-independent: A/(A_1 Z^6) divides the unknown constant out, so
+    # the relativistic suppression is measurable even while the absolute scale is open. Before blocker A1 the
+    # same column read 1.000, 0.999, 0.992, 0.932, 0.769, 0.595 -- the old exchange phase was manufacturing a
+    # spurious Z-dependence on top of the real one.
+    #
+    # NOT DATED: n_max = 12 gives a gauge ratio of 0.30, against 0.907 for the converged 2p..45p basis, so this
+    # is nowhere near converged and the suppression curve above will move. Raise n_max (and keep rbox ~ 80/Z)
+    # before quoting it against Drake, PRA 34, 2871 (1986).
+    #
+    # --- Branch c: the same 2s -> 1s decay along the H-LIKE ISOELECTRONIC SEQUENCE.
+    #
+    # A single number can be reproduced by a compensating pair of errors; a TREND is much harder to fake. The
+    # non-relativistic rate scales as Z^6, so the interesting quantity is the deviation from that scaling --
+    # which is where the relativistic and retardation corrections live. Drake, PRA 34, 2871 (1986) tabulates
+    # exactly this for hydrogen-like ions and is the comparison.
+    #
+    # Watch the GAUGE AGREEMENT as Z grows: Coulomb and Babushkin must approach each other, and their spread is
+    # an honest measure of how well the truncated intermediate sum is doing.
+    ## THE BOX MUST SCALE AS 1/Z: a hydrogenic orbital shrinks like 1/Z, so a box fixed in absolute units would
+    ## be far too small at Z = 1 and absurdly wasteful at Z = 54. rbox = 80/Z keeps the SAME physical coverage at
+    ## every Z, which is what makes the trend meaningful rather than a box artifact -- and a box artifact is
+    ## exactly what produced the bogus factor 32 at the start of this work.
+    for  Z in [1.0, 2.0, 6.0, 18.0, 36.0, 54.0]
+        println("\n", "="^110);   println("  H-like Z = $Z: 2s -> 1s two-photon decay");   println("="^110)
+        ni          = Nuclear.Model(Z, Z < 2.0 ? PointNucleus() : FermiNucleus())
+        scfZ        = Basics.NuclearField()          ## same one-body Hamiltonian for initial, final, intermediate
+        asfZ        = AsfSettings(AsfSettings(); scField = scfZ)
+        # rbox = 80/Z scaled with Z correctly and was simply too small: the intermediate sum runs to 12p, whose
+        # turning point is near 287/Z a.u., so 80/Z ended well inside it and checkGridRepresentation refused the
+        # branch at EVERY Z, 14 of 24 subshells each time.  The box is now derived from the most extended
+        # intermediate; recommendedGrid returns 487.9/Z, which passes at all six charges.  A single electron sees
+        # no screening, so naming 12p alone is the right call here and gives Zeff = Z.
+        gridZ       = Basics.recommendedGrid([Configuration("12p")], ni)
+        interConfs  = [Configuration("$(n)p") for n = 2:12]
+        interRep    = Representation("intermediate np", ni, gridZ, interConfs, MeanFieldMultiplet(MeanFieldSettings(scfZ)))
+        interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+        #
+        mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                            scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                         MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                             MultiPhotonTransition.EnergyDiffCs()], 6 ),
+                            multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                            intermediateStates = interMp, calcOverview = false,
+                            lineSelection = LineSelection() )
+        wb = Atomic.Computation(Atomic.Computation(), name="Dh-c: H-like Z = $Z", grid=gridZ,
+                                nuclearModel   = ni,
+                                initialConfigs = [Configuration("2s")],
+                                finalConfigs   = [Configuration("1s")],
+                                initialAsfSettings = asfZ, finalAsfSettings = asfZ,
+                                processSettings= mpSettings )
+        perform(wb)
+    end
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # OWN GRID: the file-level grid (80 a.u.) is refused for this branch, which wants about 255 a.u.
+    # A local grid leaves the branches that are already matched undisturbed; hp = rbox/300.
+    grid = Radial.Grid(Radial.Grid(false), rnt = 4.0e-6, h = 5.0e-2, hp = 0.8500, rbox = 255.0)
+    # Last successful:  07-Aug-2026
+    #
+    # DATED SUCCESSFUL for what it actually verifies, which is the SHAPE and the SYMMETRY -- both independent
+    # of the open overall constant. Re-run 07-Aug-2026 after the exchange-phase fix (Babushkin):
+    #
+    #     0.201  0.864  1.573  2.084  2.367  2.481 | 2.481  2.367  2.084  1.573  0.864  0.201
+    #
+    # RE-RUN 08-Aug-2026 after the total-rate correction (weights, and the indistinguishable-photon 1/2): the
+    # DIFFERENTIAL rates above are reproduced to all six printed digits -- 0.201418, 0.863537, 1.573030,
+    # 2.083810, 2.366930, 2.481270 -- confirming that the correction touches no differential quantity. The
+    # TOTAL is now 3.65232e-01 /s (Bab) / 5.75588e-02 /s (Cou), exactly a QUARTER of what this branch printed
+    # before, and it equals 1/2 * sum(weight * differential) with the corrected weights, as it must.
+    #
+    # THREE CHECKS PASS:
+    #   * PHOTON-EXCHANGE SYMMETRY is exact to all printed digits -- every mirror pair identical. The two
+    #     emitted photons are indistinguishable, so this is forced, and it is the check that first exposed the
+    #     K-sum-inside-the-modulus bug (06-Aug) when it failed by 60-90 %.
+    #   * THE SHAPE is now a smooth dome PEAKED AT THE CENTRE, as the true H 2s -> 1s spectrum is. Before the
+    #     exchange-phase fix it had a MINIMUM at the centre, and before the denominator-sign fix it carried a
+    #     spurious spike at omega1 = 3.225 eV from poles that cannot exist.
+    #   * THE INTEGRAL over the Gauss-Legendre sharings reproduces the total rate of branch b.
+    #
+    # WHAT IS *NOT* CLAIMED: the absolute scale, which carries the open constant 26.7. This branch is dated for
+    # the spectral shape and the symmetry, not for the magnitude -- see the prefactor note in the module.
+    #
+    # --- Branch d: the ENERGY-DIFFERENTIAL SPECTRUM of one two-photon line.
+    #
+    # Unlike a one-photon line, a two-photon decay has a CONTINUOUS spectrum: only the sum omega1 + omega2 is
+    # fixed, and the two photons share it in any proportion. That spectrum is the characteristic signature of
+    # the process, and it is what makes two-photon decay visible as a continuum in astrophysical plasmas.
+    #
+    # TWO CHECKS FOR FREE, needing no literature at all, which is why this deserves its own branch:
+    #   * the spectrum must be SYMMETRIC about omega1 = omega2 = (E_i - E_f)/2. The two photons are
+    #     indistinguishable, so the differential rate cannot tell them apart; any asymmetry is a bug in the
+    #     handling of the two multipole orderings, not physics.
+    #   * its INTEGRAL over the sharings must reproduce the total rate of branch a. The sharings sit at
+    #     Gauss-Legendre nodes precisely so that the weighted sum performs that integral exactly.
+    # Together these test the sharing machinery and the amplitude symmetry independently of any normalisation.
+    ni          = Nuclear.Model(1.0, PointNucleus())   ## Fermi cannot represent Z = 1; see the note in the header
+    interConfs  = [Configuration("2p"), Configuration("3p"), Configuration("4p"), Configuration("5p"),
+                   Configuration("6p"), Configuration("7p"), Configuration("8p")]
+    scfC        = Basics.NuclearField()
+    asfC        = AsfSettings(AsfSettings(); scField = scfC)
+    interRep    = Representation("intermediate np levels", ni, grid, interConfs, MeanFieldMultiplet(MeanFieldSettings(scfC)))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.EnergyDiffCs()], 12 ),  ## many sharings: resolve the shape
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = interMp, calcOverview = false,
+                        lineSelection = LineSelection() )
+    wc = Atomic.Computation(Atomic.Computation(), name="Dh-d: differential 2-photon spectrum of H 2s -> 1s", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("2s")],
+                            finalConfigs   = [Configuration("1s")],
+                            initialAsfSettings = asfC, finalAsfSettings = asfC,
+                            processSettings= mpSettings )
+    perform(wc)
+    #
+elseif  false
+    # Last visit:  16-Oct-2026        ## NOT successful: correlation-limited, plus the open prefactor
+    #
+    # RE-RUN 07-Aug-2026 AFTER THE EXCHANGE-PHASE FIX: He Bab = 2.670 /s, Ar16+ Bab = 1.543e7 /s.
+    # Scaling by the open constant 26.7 gives He ~ 17.8 /s against the accepted 51.3 /s -- still a factor ~3
+    # low, which is the CORRELATION deficiency this branch was built to expose, not a machinery problem: the
+    # f-value check (work/diag-ca-fvalue.jl) puts Mg and Ca one-photon oscillator strengths 25-45 % from their
+    # measured values at this level of CI, and a two-photon amplitude carries two such matrix elements.
+    # NOT DATED: two independent open items (correlation, prefactor) sit between this and a claim.
+    #
+    # --- Branch e: HELIUM-LIKE two-photon emission, 1s2s 1S_0 -> 1s^2 1S_0, for He (Z=2) and Ar16+ (Z=18).
+    #
+    # WHY THIS IS THE RIGHT SECOND SYSTEM, and the reason is sharper than "another benchmark".
+    #
+    # J_i = J_f = 0, SO Klist = oplus(0,0) = {0} -- ONE value of K. That matters three times over:
+    #   (1) every K-coupling complication disappears. The interference bug fixed on 06-Aug-2026 (the K-sum
+    #       taken inside the modulus) cannot even ARISE here, so if a discrepancy remains it lies in the radial
+    #       or normalisation part, cleanly separated from the angular part;
+    #   (2) K = 0 IS the scalar part, so this branch validates precisely the quantity the ABSORPTION side reports
+    #       as TotalAlpha0. Doing this first de-risks branch d rather than competing with it;
+    #   (3) Drake, PRA 34, 2871 (1986) tabulates hydrogen-like AND helium-like, so one reference covers both.
+    #
+    # THE DISCRIMINATING VALUE, which is the real point. Branch a converged to a gauge ratio of 1.0035 but landed
+    # at 11.2 /s against 8.2206, and that 1.35 excess was ATTRIBUTED to the missing continuum in the intermediate
+    # sum. That is a hypothesis, not a result. This branch tests it on an independent system:
+    #     * a SIMILAR ~1.35 excess here  -> the continuum diagnosis is confirmed, and building continuum
+    #       machinery (a working Green route) is clearly the right investment;
+    #     * a DIFFERENT factor           -> the diagnosis is wrong, and it is far better to learn that on a cheap
+    #       two-electron system than after building that machinery on a false premise.
+    #
+    # BENCHMARKS:
+    #     He   (Z=2):   51.3 /s      Drake, Victor & Dalgarno (1969); also Drake PRA 34, 2871 (1986)
+    #     Ar16+ (Z=18): see Drake 1986, which tabulates to Z = 36 -- NOT quoted here from memory.
+    # One expectation that needs no table: as Z grows the 2s electron sees an increasingly unscreened nucleus, so
+    # the He-like rate must APPROACH the H-like rate at the same Z from below. For Z = 18 the H-like value is
+    # 8.2206 * 18^6 = 2.80e8 /s, so the Ar16+ result should be somewhat under that -- a sanity bound, not a
+    # benchmark.
+    #
+    # RESULT, 07-Aug-2026 -- THE DISCRIMINATING TEST ANSWERED, BUT NOT AS PREDICTED:
+    #
+    #     system        omega [eV]    Coulomb     Babushkin    Cou/Bab    reference
+    #     He   (Z=2)      19.77        6.74         5.53        1.22      51.3 /s     -> 8-9x LOW
+    #     Ar16+ (Z=18)   3126.4        2.72e8       1.47e8      1.85      H-like 2.80e8 -> 0.97
+    #
+    # THE CONTINUUM HYPOTHESIS IS NOT CONFIRMED. Branch a (H-like) came out 1.35x HIGH; this comes out 8-9x LOW.
+    # Opposite directions, so a single cause cannot explain both -- which is exactly what this branch was built
+    # to find out, and precisely why it was worth running BEFORE investing in continuum machinery.
+    #
+    # BUT THE TEST IS CONFOUNDED, and that must be said rather than over-read:
+    #   * HE IS CORRELATION-LIMITED, not machinery-limited. Its 1s2s 1S_0 is genuinely correlated and a
+    #     single-configuration treatment underestimates it. Read as an effective charge: 51.3 /s corresponds to
+    #     Z_eff = 1.36, our 6.0 /s to Z_eff = 0.95, i.e. the screening is overestimated. The energy says the
+    #     same -- 19.77 eV against the true 20.62 eV, 4 % low.
+    #   * AR16+ IS THE CLEAN POINT, because at Z = 18 the system is nearly hydrogenic and correlation barely
+    #     matters. Energy 3126.4 eV vs ~3123 eV is 0.1 %, and the Coulomb rate sits at 0.97 of the H-like
+    #     expectation 8.2206*18^6 = 2.80e8 -- just below it, where it should be.
+    #   * NEITHER IS CONVERGED. Gauge ratios 1.22 and 1.85 are both far worse than branch a's 1.0035, so
+    #     1snp to n = 10 is too small a basis in both cases. Converge AR FIRST: it is the case where a residual
+    #     discrepancy can be attributed to the method rather than to correlation.
+    #
+    # SO THE MACHINERY LOOKS RIGHT WHERE CORRELATION IS UNIMPORTANT, and the "discrepancies" have different
+    # causes -- correlation at low Z, basis truncation everywhere, and something still unexplained in H-like.
+    # No date is written until Ar16+ is converged in gauge and compared with Drake's actual tabulated value.
+    #
+    # **EVERYTHING ABOVE FROM 07-Aug-2026 IS STALE IN BOTH MAGNITUDE AND RATIO -- re-measured 15-Oct-2026.**
+    #   The magnitudes predate the prefactor fix of 13-Oct (challenge S5, `b399f5ff`, a factor 16), so "He is
+    #   8-9x LOW" is really ~1.7x high and "Ar sits at 0.97 of the H-like expectation" is ~8x above it.  **And
+    #   the RATIO is stale too, which a common prefactor cannot explain:** 1.85 was recorded for Ar16+ at
+    #   n = 10 and the same case now gives 0.042, i.e. inverted.  Changes since then -- the exchange-phase fix,
+    #   the coherent-Jsym correction -- have altered the Coulomb/Babushkin balance.  So the conclusion drawn
+    #   above ("opposite directions, so a single cause cannot explain both") rests on arithmetic that no longer
+    #   holds, and is withdrawn;  it is kept because the REASONING -- test the diagnosis on an independent
+    #   system before building machinery for it -- was right and is why this branch exists.
+    #
+    # **RE-MEASURED WITH THE RECIPE THAT CONVERGED BRANCH (b), AND THE He-LIKE CASE STILL DOES NOT CONVERGE.**
+    #   Ar16+, box held at the n = 10 recommendation, configurations 1snp to n = 60, grid guard relaxed
+    #   (possible on this route only since `95ebb3a5` -- MeanFieldSettings had no gridStopper before):
+    #
+    #       n_conf  levels  Coulomb      Babushkin    Cou/Bab   Bab / H-like bound
+    #       10      36      5.4254e+07   1.3029e+09   0.04164   4.655
+    #       30      116     8.3707e+07   1.3512e+09   0.06195   4.828
+    #       60      236     1.7051e+08   1.4251e+09   0.11965   5.092
+    #
+    #   **THE TWO GAUGES BEHAVE QUITE DIFFERENTLY, AND THAT IS THE FINDING.**  Coulomb is sane and converging
+    #   UPWARD -- 5.43e7, 8.37e7, 1.71e8, rising towards the H-like bound 8.22906*18^6 = 2.799e8 and reaching
+    #   0.61 of it at n = 60, which is how a filling intermediate set should behave.  Babushkin is STUCK about
+    #   5x ABOVE a bound it must lie below, nearly flat and drifting WORSE as states are added.
+    #   So: the defect is NOT basis size -- more states make the bound violation worse.
+    #
+    # **AND IT IS NOT THE SECOND ELECTRON EITHER:  THE CONTROL REFUTED THAT WITHIN THE HOUR, 15-Oct-2026.**
+    #   This note first read "specific to the length gauge in the MANY-ELECTRON case", on the grounds that
+    #   branch (b) converges in both gauges for one active electron.  That inference was wrong, because
+    #   branch (b) runs at Z = 1 and the failing case at Z = 18:  THREE things differ at once -- the second
+    #   electron, the charge, and the nuclear model -- and the second electron was simply the one I noticed.
+    #   Running H-LIKE Ar17+ 2s -> 1s through the identical script, box, recipe and code path, with one
+    #   electron removed, shows the one-electron case at Z = 18 is wrong TOO.  So the whole scan below is
+    #   one-electron, each Z on its OWN recommended box, np to n = 10, bound only:
+    #
+    #       Z    box[au]  Cou/Bab   Bab/(8.229 Z^6)   Cou/(8.229 Z^6)
+    #       1    365.3    0.1325    1.23267           0.16331
+    #       2    365.3    1.0919    0.14950           0.16323
+    #       4    121.9    1.0908    0.14937           0.16293
+    #       9     45.6    1.0850    0.14868           0.16132
+    #       18    21.5    1.0631    0.14622           0.15545
+    #
+    #   **THE COULOMB GAUGE OBEYS THE HYDROGENIC Z^6 LAW EXACTLY** -- constant to 0.2 % over Z = 1...4 and
+    #   4.8 % out to Z = 18.  So the sum, the denominators, the angular assembly and the box recipe are all
+    #   SOUND, and 0.149-0.163 is simply the CORRECT bound-only truncation deficit at any Z.
+    #   **BABUSHKIN STEPS BY 8.245 BETWEEN Z = 1 AND Z = 2** (1.23267 -> 0.14950), and those two points share
+    #   the SAME BOX, 365.3 a.u., and the SAME point nucleus.  Not the box, not the nuclear model, not the
+    #   truncation, not a drift:  a step.  At Z = 1 the length gauge shows its known fast convergence -- 1.23
+    #   on bound states alone while Coulomb has only 0.16, the two 7.5x apart as they SHOULD be on an
+    #   incomplete set -- and for every Z >= 2 Babushkin COLLAPSES ONTO Coulomb (1.092, 1.091, 1.085, 1.063).
+    #   **Two gauges agreeing on an incomplete set is the anomaly and not the reassurance**, since that
+    #   agreement is guaranteed only for a complete one.
+    #   SO THE DEFECT IS ONE-ELECTRON, Z-DEPENDENT, AND IN THE BABUSHKIN TWO-PHOTON AMPLITUDE -- with an exact
+    #   reference available at every Z, which makes it a far better-posed problem than this branch.
+    #   HYPOTHESIS, not yet tested:  the sum calls `PhotoEmission.amplitude` with the VIRTUAL photon energy
+    #   omega1 rather than the natural transition energy of that level pair, and an expression equivalent to
+    #   the length form ON-shell need not be equivalent OFF-shell.  How far off-shell omega1 sits grows with
+    #   Z, which is a step followed by a plateau.
+    #   **THE He-LIKE SIGNATURE IS A DIFFERENT ONE AND IS NOT UNIFIED WITH THIS:**  there Babushkin was 24x
+    #   COULOMB, the opposite of the collapse measured above, so a second effect is present.  It stays
+    #   subordinate -- no many-electron conclusion from this branch is safe while the ONE-electron length
+    #   gauge is wrong by a factor 8.
+    #   The transition energy is NOT the problem -- 3126.4 eV against ~3123 eV is 0.1 % at this Z.
+    #   STILL NO DATE, and now for a sharper reason than "not converged".
+    #
+    # **AND THE SHARPEST REASON OF ALL, SETTLED LATER THE SAME DAY:  THIS IS A Z LIMIT OF THE ROUTE, NOT
+    #   TWO-ELECTRON PHYSICS.**  The sum-over-states route was run with ONE active electron at the same Z --
+    #   H-like Ar17+ 2s -> 1s, which has the exact answer 8.22906 * 18^6 = 2.7989e8 /s -- and it fails the same
+    #   way:  the gauge ratio DIVERGES with basis size (1.063, 1.332, 2.286, 4.009 at n_max = 10, 30, 60, 100),
+    #   Babushkin moves AWAY from exact (0.1462 -> 0.1266) and two boxes disagree by 2.5x at n_max = 100.  At
+    #   Z = 1 the identical route reaches 8.22902 against 8.22906 in both gauges.  So no second electron, no
+    #   correlation and an exact reference -- and it still fails.
+    #   **The chi route does NOT fail there:** `DalgarnoLewis.twoPhotonAmplitude`, driven as in `example-As.jl`
+    #   branch (c) with the grid scaled as 1/Z, gives 2.767763e8 /s at Z = 18 (0.98888 of the non-relativistic
+    #   Z^6 value, and (Z*alpha)^2 = 1.7 % accounts for that), both gauges identical to every printed digit and
+    #   unchanged to 7 digits when the box is doubled.
+    #   SO EVERYTHING THIS BRANCH SUGGESTED ABOUT ITSELF IS WITHDRAWN:  the second electron, the `MabEmission`
+    #   orientation, the many-electron assembly and the box were each excluded by measurement.  **A He-like
+    #   two-photon rate at this Z should be built on the chi route, and this branch cannot be rescued by a
+    #   larger intermediate set.**  It keeps no date, and under its own gate it never will on this route.
+    #
+    # SETUP NOTES. 1s2s produces BOTH 3S_1 and 1S_0; only the singlet is wanted, and it must not be confused with
+    # 2 3S_1 -> 1 1S_0, which is a different process dominated by M1 rather than 2E1. The selection is therefore
+    # made on SYMMETRY, 0+ -> 0+, which picks the singlet robustly however the levels happen to be ordered.
+    # The intermediate states are 1snp 1P_1 (J = 1, odd), reached by E1 from the 1S_0.
+    #
+    # 06-Oct-2026 -- THE BOX WAS TOO SMALL FOR ITS OWN nmax (priority item 51), unrelated to the correlation and
+    #   prefactor questions above. `Bsplines.checkGridRepresentation` refuses the old rbox = 60 at Z = 2: 10p
+    #   needs about 359 a.u. there, not 60 -- the Zeff seen by this Rydberg electron is close to 1 regardless of
+    #   Z, since the SAME single 1s spectator screens it at every Z, so the box cannot simply scale as 1/Z the
+    #   way a one-electron orbital would (see the Dh-c fix above, lines ~335-365, for where that DOES apply).
+    #   At Z = 18 the old rbox = 20 turns out to be close to adequate (recommendedGrid wants 21.1), since the
+    #   outer electron there sees the same Zeff but photon-absorption binds it far tighter in absolute units.
+    #   Sized per Z from the widest shell (10p) instead of hand-picked, and refined to 1.34 splines/a.u.
+    #
+    #   AND ON THE CORRECTED GRID THE NUMBERS MOVE A GREAT DEAL, IN A WAY THIS BOX FIX DOES NOT EXPLAIN AND DOES
+    #   NOT RESOLVE.  Both branches now run to completion with no refusal, but the Cou/Bab ratio of the total
+    #   rate is 0.0052 at Z = 2 and 0.0416 at Z = 18 -- FAR WORSE than the 1.22 and 1.85 recorded on 07-Aug-2026
+    #   on the old, too-small box.  That direction is the opposite of what fixing a bad box should do, and it has
+    #   not been chased further: it may be a near-degenerate intermediate state (the np energies shift slightly
+    #   on the new orbitals, and this scheme computes at one FIXED omega rather than scanning, so a term landing
+    #   close to resonance would inflate one gauge far more than the other), or something else entirely. THIS IS
+    #   A NEW, SEPARATE, UNEXPLAINED FINDING, surfaced here rather than chased, since it sits outside what item 51
+    #   asked for (the grid) and alongside what this branch already disclaimed (correlation, the open prefactor).
+    #   Do not read either number as validated; do not read the improved gauge ratio of 07-Aug as validated
+    #   either, since it was computed on a box this same guard would have refused.
+    for  (Z, nmax) in [(2.0, 10), (18.0, 10)]
+        println("\n", "="^110);   println("  He-like Z = $Z: 1s2s 1S_0 -> 1s^2 1S_0 two-photon decay");   println("="^110)
+        ni          = Nuclear.Model(Z, Z < 2.5 ? PointNucleus() : FermiNucleus())
+        gridH0      = Basics.recommendedGrid(Dict(Shell(1,0)=>1, Shell(nmax,1)=>1), Z; printout=false)
+        gridH       = Basics.recommendedGrid(Dict(Shell(1,0)=>1, Shell(nmax,1)=>1), Z;
+                                             rbox=gridH0.tL[end], hp=gridH0.tL[end]/3000, printout=false)
+        interConfs  = [Configuration("1s $(n)p") for n = 2:nmax]
+        interRep    = Representation("1snp intermediate levels", ni, gridH, interConfs,
+                                     MeanFieldMultiplet(MeanFieldSettings()))
+        interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+        #
+        mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                            scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                         MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                             MultiPhotonTransition.EnergyDiffCs()], 8 ),
+                            multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                            intermediateStates = interMp, calcOverview = false,
+                            ## 0+ -> 0+ only: the 1S_0 singlet, NOT the 3S_1 triplet (a different, M1 process)
+                            lineSelection = LineSelection(true,
+                                symmetryPairs = [(LevelSymmetry(0, Basics.plus), LevelSymmetry(0, Basics.plus))]),
+                            printBefore = true )
+        wh = Atomic.Computation(Atomic.Computation(), name="Dh-e: He-like Z = $Z", grid=gridH,
+                                nuclearModel   = ni,
+                                initialConfigs = [Configuration("1s 2s")],
+                                finalConfigs   = [Configuration("1s^2")],
+                                processSettings= mpSettings )
+        perform(wh)
+    end
+    #
+elseif  false
+    # Last visit:  18-Oct-2026
+    # 07-Aug-2026: NOT successful -- the Green route remains worse than the multiplet one
+    #
+    # RE-RUN 07-Aug-2026 AFTER THE EXCHANGE-PHASE FIX: Bab = 1.144 /s, Cou/Bab = 0.349, against the multiplet
+    # route's converged 1.231 /s at Cou/Bab = 0.907. So the Green expansion is still the WORSE representation
+    # here -- its gauge ratio is far from 1 -- even though giving it a matched potential (the scField added to
+    # AtomicState.GreenSettings on 07-Aug-2026) improved it by a factor 15 earlier. The damped CI space simply
+    # does not span the spectrum this transition needs; see the notes in the branch body.
+    # NOT DATED.
+    #
+    # --- Branch f: the same H 2s -> 1s decay, but with a GREEN-FUNCTION intermediate representation.
+    #
+    # THIS IS THE HONEST NEXT STEP AFTER BRANCH a, and the reason is specific rather than general. Branch a,
+    # once its radial box was large enough, converged to a gauge ratio of 1.0035 -- the amplitude is
+    # gauge-invariant, so the second-order machinery and the prefactor are right -- yet it lands at 11.2 /s
+    # against the accepted 8.2206 /s, a residual of 1.35.
+    #
+    # THAT RESIDUAL HAS ONE IDENTIFIABLE CAUSE. Branch a sums over BOUND np states only. The exact second-order
+    # sum runs over the COMPLETE spectrum, and for 2s -> 1s the continuum contribution is both substantial and
+    # of the sign that LOWERS the rate -- consistent with 11.2 being high rather than low. No number of extra
+    # bound states can fix that: 12p, 16p and beyond are already converged among themselves (see branch a), and
+    # what is missing is not a further bound state but a different part of the spectrum.
+    #
+    # A GREEN EXPANSION IS THE RIGHT INSTRUMENT because it represents the resolvent rather than enumerating
+    # eigenstates, so the continuum enters through the pseudo-states of a damped, finite-box CI space instead of
+    # being truncated away. `Settings.intermediateStates` accepts either representation and dispatches on the
+    # type through MultiPhotonTransition.intermediateLevels, so NOTHING in the amplitude changes between branch a
+    # and this one -- which is exactly what makes the comparison clean: any change in the answer comes from the
+    # intermediate spectrum alone.
+    #
+    # WHAT TO WATCH, in this order:
+    #   (1) does the gauge ratio STAY near 1? If a Green expansion breaks the gauge invariance that branch a
+    #       achieved, the expansion itself is at fault, not the physics.
+    #   (2) does the rate MOVE DOWNWARD from 11.2 toward 8.2206? Direction first, magnitude second.
+    #   (3) is it stable against nMax and dampingTau? A result that drifts with the damping parameter is a
+    #       numerical artifact of the expansion, not a continuum contribution.
+    # Only if all three hold does 8.2206 s^-1 become a claim rather than a coincidence -- and only then does any
+    # branch of this file earn a "Last successful" date.
+    #
+    # RESULT, 06-Aug-2026 -- AN HONEST NEGATIVE. The branch runs end to end, so the Green route is wired and
+    # dispatched correctly (Settings.intermediateStates accepts the channels and MultiPhotonTransition.
+    # intermediateLevels selects them by symmetry, with nothing else in the amplitude changed). But:
+    #
+    #     route                       Coulomb    Babushkin    Cou/Bab
+    #     mean-field  (branch a)       11.17       11.13       1.0035
+    #     Green       (this branch)    20.78       97.68       0.213
+    #
+    # CRITERION (1) FAILS. The gauge invariance that branch a had achieved is destroyed, so by the rule set out
+    # above the expansion itself is at fault and the rates must NOT be interpreted -- neither the direction of
+    # the move nor its size means anything while the two gauges disagree by a factor of five.
+    #
+    # WHAT TO TRY NEXT, in order of suspicion:
+    #   * dampingTau = 0.01: the damping regularises the resolvent but also distorts it. Scan it, and treat any
+    #     result that drifts with it as an artifact (criterion 3), not as a continuum contribution.
+    #   * the reference space: one configuration (2p) with DeExciteSingleElectron may simply not generate a
+    #     pseudo-spectrum that spans the region the 2s -> 1s sum needs.
+    #   * the approach: DampedSpaceCI vs CoreSpaceCI vs SingleCSFwithoutCI. For a ONE-electron system the CI is
+    #     trivial, so a difference between these would itself be diagnostic.
+    #   * nMax = 12 and lValues = [1]: too small a pseudo-spectrum would leave the same gap as branch a rather
+    #     than closing it, but it should not break the gauge ratio -- so if the ratio stays bad as nMax grows,
+    #     the problem is in the expansion's construction, not its size.
+    #
+    # ROUTE 1 APPLIED, 07-Aug-2026 -- THE CAUSE IS CONFIRMED, BUT IT IS NOT THE CURE:
+    #
+    #     Green space potential        Coulomb   Babushkin   Cou/Bab   Bab/8.2206
+    #     DFS (as this branch had it)   0.335      3.396      0.0987      0.413
+    #     NuclearField (matched)        6.416      4.399      1.459       0.535
+    #
+    # MATCHING THE POTENTIAL MOVED THE GAUGE RATIO BY A FACTOR OF 15, with nothing else changed. Together with
+    # the same fix improving branch a's LENGTH gauge from 35 % to 5.5 % error, two INDEPENDENT code paths now
+    # confirm that a mismatched intermediate potential was the dominant defect. That is established, not
+    # conjectured.
+    #
+    # BUT THE GREEN EXPANSION IS STILL NOT A GOOD CONTINUUM: Babushkin 4.40 against 8.2206, i.e. 47 % LOW, where
+    # the bound-state route with the SAME matched potential gives 8.66, 5.5 % high. Note its gauge ratio is
+    # actually BETTER (1.46 vs 1.72) while its absolute value is far worse -- the damped CI space is more
+    # internally consistent but spans less of the spectrum that matters. With nMax = 12, lValues = [1], ONE
+    # reference configuration and dampingTau = 0.01 it is simply not complete.
+    #
+    # SO THE REAL FIX IS COMPLETENESS, not this expansion: build the intermediate multiplet from the FULL
+    # B-spline eigenspectrum of the same potential, bound AND positive-energy pseudo-states. Summing over a
+    # complete B-spline eigenbasis in a box is mathematically IDENTICAL to solving the Dalgarno-Lewis
+    # inhomogeneous equation (H - E_i - omega)|chi> = O|i>, so it is not an approximation to the exact method --
+    # it IS the exact method written as a sum, and completeness makes gauge invariance a pass/fail test rather
+    # than a judgement call. Bsplines.generateOrbitals already takes an explicit potential and
+    # Bsplines.findPositiveBranchStart already guards the Dirac negative-energy sea, which is not optional here.
+    ni          = Nuclear.Model(1.0, PointNucleus())
+    ## The intermediate states of a 2s -> 1s two-photon decay are p levels: E1 twice, so J^P = 1/2- and 3/2-.
+    levelSyms   = [LevelSymmetry(1//2, Basics.minus), LevelSymmetry(3//2, Basics.minus)]
+    ## GreenSettings(nMax, lValues, dampingTau, printBefore, levelSelection, scField). The SIXTH argument was
+    ## added on 07-Aug-2026 for exactly this branch: until then generate(GreenExpansion, ...) hardcoded
+    ## AsfSettings() and Basics.DFSField(1.0), so a Green space could NEVER be matched to the potential of the
+    ## computation consuming it -- and for a second-order intermediate spectrum that mismatch breaks gauge
+    ## invariance systematically. (The zero-argument GreenSettings() was also broken, calling Settings(...);
+    ## fixed at the same time.)
+    scfG        = Basics.NuclearField()
+    asfG        = AsfSettings(AsfSettings(); scField = scfG)
+    greenSet    = GreenSettings(12, [1], 0.01, false, LevelSelection(), scfG)
+    greenRep    = Representation("Green expansion for the np intermediate spectrum", ni, grid,
+                                 [Configuration("2p")],
+                                 GreenExpansion( AtomicState.DampedSpaceCI(), Basics.DeExciteSingleElectron(),
+                                                 levelSyms, 1, greenSet) )
+    greenChs    = generate(greenRep, output=true)[ResultKeys.GreenChannels]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.EnergyDiffCs()], 8 ),
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = greenChs,      ## <-- the Green route, not a mean-field multiplet
+                        calcOverview  = false,
+                        lineSelection = LineSelection(), printBefore = true )
+    wg = Atomic.Computation(Atomic.Computation(), name="Dh-f: 2s -> 1s via a Green-function intermediate sum", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("2s")],
+                            finalConfigs   = [Configuration("1s")],
+                            initialAsfSettings = asfG, finalAsfSettings = asfG,
+                            processSettings= mpSettings )
+    perform(wg)
+    #
+##
+## =====================================================================================================
+##  TWO-PHOTON ABSORPTION  (excitation: the photon energies are IMPOSED, and the transition is driven
+##  rather than spontaneous; the observables are cross sections, not rates)
+## =====================================================================================================
+elseif  true
+    # OWN GRID for this branch: Bsplines.checkGridRepresentation refused the one used here and named
+    # about 209.0 a.u. as the box this branch's subshells want. A local grid is used rather than
+    # changing a shared one, so the branches that are already matched are not disturbed -- a box too
+    # LARGE starves the fixed B-spline basis just as badly as one too small (Rule 12). The
+    # non-exponential family is used because the exponential one quantises r_max coarsely and cannot
+    # be tuned to a target; hp = rbox/300 is Basics.recommendedGrid's own recipe.
+    grid = Radial.Grid(Radial.Grid(false), rnt = 4.0e-06, h = 5.0e-2, hp = 0.6967, rbox = 209.0)
+    # Last successful:  07-Aug-2026        ## for the ANGULAR structure; the absolute scale is NOT verified
+    #
+    # DATED for the polarization structure, which is exact and parameter-free, NOT for the magnitude.
+    # Re-run again 08-Aug-2026, BIT-IDENTICAL, after the right-circular routine was written and a dead `&&`
+    # was repaired in determineChannels (it had discarded the tests on mp2 and on the gauge; harmless for E1E1,
+    # which is what this bit-identity confirms).
+    # Re-run 07-Aug-2026 after blocker A2 (the 4K+1 typo, and odd K excluded for a single beam):
+    #
+    #     linear 2.1415e-28 (Cou) / 4.5305e-27 (Bab)      right-circular 0.0000 / 0.0000
+    #     unpolarized 1.0708e-28 / 2.2653e-27              density matrix 0 (correctly refused, J != 0)
+    #
+    # TWO EXACT CHECKS:
+    #   * sigma_linear / sigma_unpolarized = 2.0000 in BOTH gauges -- identical to Mg (branch h). That is the
+    #     right answer and a strong one: H 1s -> 2s is s -> s, so only K = 0 is physical, and it must therefore
+    #     behave exactly like a J = 0 -> J = 0 transition. Before A2 this read 0.058, with K = 1 supplying 92 %
+    #     of the unpolarized cross section.
+    #   * RIGHT-CIRCULAR VANISHES IDENTICALLY. Two E1 photons of equal helicity must deliver two units of
+    #     angular momentum along the beam, and this transition cannot absorb it.
+    #     THIS CHECK WAS VACUOUS WHEN IT WAS WRITTEN, and is only now real. Until 08-Aug-2026
+    #     computeTotalCsRightCircular had no body at all -- a comment reading "Need to be filled" -- and
+    #     returned 0 for every atom and every transition, so its zero said nothing about this transition. The
+    #     routine is now written and re-run here: the printed zero is UNCHANGED but is now computed. It was
+    #     validated where the answer is NOT zero (H 1s -> 3d, K = 2 open), giving right-circular/linear
+    #     = 1.500000 against the 3-j prediction 0.8/0.5333 = 1.5.
+    # Both are fixed by angular algebra and are independent of normalisation and of the wave functions.
+    #
+    # NOT CLAIMED: the absolute cross section. The absorption normalisation has never been derived at all --
+    # it is in worse shape than emission, where the discrepancy is at least localised to a constant 26.7.
+    #
+    # --- Branch g: TWO-PHOTON ABSORPTION, monochromatic, with EVERY polarization from ONE calculation.
+    #
+    # The 1s -> 2s excitation is the time-reverse of branch a and equally forbidden for one photon. Both photons
+    # come from the same beam and each carries omega = (E_f - E_i)/2.
+    #
+    # ONE CALCULATION, FIVE OBSERVABLES. The amplitude is decomposed into irreducible parts of rank K, and every
+    # polarization observable is a fixed algebraic combination of the SAME |M_K|^2 -- so requesting all of them
+    # costs nothing beyond requesting one:
+    #     TotalAlpha0            the K = 0 part alone; the ONLY surviving term when J_i = J_f = 0
+    #     TotalCsLinear          Stokes (1,0,0)
+    #     TotalCsRightCircular   Stokes (0,0,1)
+    #     TotalCsUnpolarized     Stokes (0,0,0)
+    #     TotalCsDensityMatrix   the user's own Stokes vector, of which the three above are special values --
+    #                            and NOT asked for here, because it exists only for J_i = J_f = 0 while this is
+    #                            1/2 -> 1/2.  It WAS asked for until 31-Aug-2026, and the module then printed a
+    #                            column of 0.0000e+00 beside three genuine cross sections; it now refuses instead.
+    #
+    # THEIR RATIOS ARE A CHECK IN THEMSELVES. Angular algebra alone fixes them, independently of any overall
+    # normalisation -- so this branch can be tested even before an absolute two-photon absorption benchmark for
+    # a general atom is available, which is the one reference still missing.
+    ni          = Nuclear.Model(1.0, PointNucleus())   ## Fermi cannot represent Z = 1; see the note in the header
+    interConfs  = [Configuration("2p"), Configuration("3p"), Configuration("4p"), Configuration("5p"),
+                   Configuration("6p"), Configuration("7p")]
+    interRep    = Representation("intermediate np levels", ni, grid, interConfs, MeanFieldMultiplet(MeanFieldSettings()))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonAbsorptionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.TotalAlpha0(), MultiPhotonTransition.TotalCsLinear(),
+                                         MultiPhotonTransition.TotalCsRightCircular(),
+                                         MultiPhotonTransition.TotalCsUnpolarized()] ),
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = interMp, calcOverview = false,
+                        stokes = ExpStokes(0.6, 0.0, 0.8),      ## kept, though no property here reads it
+                        lineSelection = LineSelection(), printBefore = true )
+    wd = Atomic.Computation(Atomic.Computation(), name="Dh-g: 1s -> 2s two-photon absorption of H", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("1s")],
+                            finalConfigs   = [Configuration("2s")],
+                            processSettings= mpSettings )
+    perform(wd)
+    #
+elseif  false
+    # Last successful:  07-Aug-2026        ## for the ANGULAR structure; the absolute scale is NOT verified
+    #
+    # DATED on the same basis as branch g, and BIT-IDENTICAL across blocker A2 -- which is itself the check:
+    # Mg is J = 0 -> J = 0, hence K = 0 only, so excluding odd K cannot touch it, and it did not.
+    #
+    #     linear 1.1688e-26 (Cou) / 7.8197e-26 (Bab)      right-circular 0.0000 / 0.0000
+    #     unpolarized 5.8438e-27 / 3.9098e-26             density matrix 4.2075e-27 / 2.8151e-26
+    #
+    # THREE EXACT CHECKS: right-circular vanishes (see the caveat in branch g -- that routine was an empty
+    # stub until 08-Aug-2026, so this check only became real when it was written; re-run here, unchanged);
+    # linear/unpolarized = 2.0000; and the Stokes formula
+    # sigma(P) = sigma_unpol * (1 + P1^2 + P2^2 - P3^2) gives 0.72 for (0.6, 0, 0.8), predicting 4.2075e-27
+    # against the printed 4.2075e-27.
+    #
+    # THE MAGNITUDE IS NOT CLAIMED, and its uncertainty is now quantified rather than guessed: the f-value
+    # check (work/diag-ca-fvalue.jl) puts the Mg 3s^2 - 3s3p 1P_1 oscillator strength at 2.605 (Bab) / 1.360
+    # (Cou) against the measured 1.80, so a two-photon amplitude carrying two such matrix elements is uncertain
+    # by a factor ~2 from the wave functions alone -- before the underived absorption normalisation.
+    #
+    # --- Branch h: TWO-PHOTON ABSORPTION in MAGNESIUM, 3s^2 1S_0 -> 3s4s 1S_0, via the 3s3p 1P_1 resonance.
+    #
+    # THE FIRST REAL-ATOM CASE, and the first ABSORPTION case ever run in this module. It was chosen because it
+    # fits four constraints at once, and because hydrogen turned out to be a poor model of what this module is
+    # for -- see "WHY NOT HYDROGEN" below.
+    #
+    #   (1) J = 0 -> J = 0, so Klist = oplus(0,0) = {0}. ONE value of K, hence no K-coupling at all, and K = 0
+    #       IS the scalar part -- so TotalAlpha0 is the entire answer rather than one component of it.
+    #   (2) ONE DOMINANT INTERMEDIATE, the 3s3p 1P_1 resonance: strong, and close in energy. This is the
+    #       multiplet approach at its best, and calcOverview should show 3s3p standing far above 3s4p, 3s5p.
+    #   (3) ABSORPTION, which is the direction of interest and which had never been executed.
+    #   (4) A REAL ATOM, not a noble gas -- the gap in the literature that motivates this work.
+    #
+    # WHY NOT HYDROGEN, and this is the lesson of 06/07-Aug-2026. For H 2s -> 1s the CONTINUUM carries 43.5 % of
+    # the dipole sum rule (the Thomas-Reiche-Kuhn bound part is 0.565, measured 0.5599 in work/diag-trk.jl):
+    # there is no intermediate resonance at all, the strength is smeared over the whole spectrum, and a
+    # bound-state multiplet can never represent it. That made hydrogen an EXCELLENT bug-finder -- it exposed a
+    # factor-32 radial-box artifact, a K-interference that broke photon-exchange symmetry, and a potential
+    # mismatch worth a factor 6 -- but a poor model of the intended use. For a real atom the intermediate states
+    # are genuine, well-separated levels and a handful dominate, so no pseudo-continuum is needed.
+    #
+    # WHAT CAN AND CANNOT BE CHECKED HERE. Mg 3s^2 and 3s4s are correlated states, so the ABSOLUTE cross section
+    # is limited by the CI, exactly as helium showed (branch h, 8-9x low from correlation alone). But the
+    # POLARIZATION RATIOS -- linear vs right-circular vs unpolarized -- are fixed by angular algebra and are
+    # INDEPENDENT of any overall normalisation or of the quality of the wave functions. They are therefore a
+    # real check available today, without the absolute two-photon absorption benchmark that is still missing.
+    # For a 0 -> 0 transition through a J = 1 intermediate the ratios are strongly constrained; in particular
+    # RIGHT-CIRCULAR light cannot drive 0 -> 0 by two E1 photons at all (the two photons would have to supply
+    # 2 units of angular momentum along the beam, which no J = 0 -> J = 0 transition can absorb), so
+    # TotalCsRightCircular MUST come out at or near zero. That is a sharp, parameter-free test.
+    #
+    # ON THE POTENTIAL: the same scField is used for the initial, final AND intermediate multiplets, following
+    # the 07-Aug-2026 finding that a mismatch there breaks gauge invariance systematically. Note the mismatch is
+    # far milder here than in hydrogen -- 3s^2, 3s3p and 3s4s share the same [Ne] core, so their self-consistent
+    # potentials are close, whereas DFS-vs-NuclearField for a single electron was a large difference.
+    ni          = Nuclear.Model(12.0)
+    gridM       = Radial.Grid(Radial.Grid(false), rnt = 4.0e-6, h = 5.0e-2, hp = 1.0e-2, rbox = 40.0)
+    scfM        = Basics.DFSField()
+    asfM        = AsfSettings(AsfSettings(); scField = scfM)
+    ## the intermediate 3snp 1P_1 levels; 3s3p is expected to dominate
+    ## MODERATELY ENLARGED, 07-Aug-2026: 3snp up to n = 7 plus 3p^2 correlation. Not a pseudo-continuum -- for a
+    ## real atom the sum is carried by a few genuine resonances, which is precisely why the multiplet approach
+    ## suits real atoms and did not suit hydrogen. calcOverview should show 3s3p dominating by a wide margin.
+    interConfs  = [Configuration("[Ne] 3s 3p"), Configuration("[Ne] 3s 4p"), Configuration("[Ne] 3s 5p"),
+                   Configuration("[Ne] 3s 6p"), Configuration("[Ne] 3s 7p"), Configuration("[Ne] 3p^2")]
+    interRep    = Representation("3snp intermediate levels", ni, gridM, interConfs,
+                                 MeanFieldMultiplet(MeanFieldSettings(scfM)))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonAbsorptionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.TotalAlpha0(),
+                                         MultiPhotonTransition.TotalCsLinear(),
+                                         MultiPhotonTransition.TotalCsRightCircular(),
+                                         MultiPhotonTransition.TotalCsUnpolarized(),
+                                         MultiPhotonTransition.TotalCsDensityMatrix()] ),
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = interMp, calcOverview = false,
+                        stokes = ExpStokes(0.6, 0.0, 0.8),   ## partially polarized, for TotalCsDensityMatrix
+                        ## 0+ -> 0+ only: the 1S_0 of 3s4s, NOT its 3S_1
+                        lineSelection = LineSelection(true,
+                            symmetryPairs = [(LevelSymmetry(0, Basics.plus), LevelSymmetry(0, Basics.plus))]),
+                        printBefore = true )
+    wi = Atomic.Computation(Atomic.Computation(), name="Dh-h: Mg 3s^2 -> 3s4s two-photon absorption", grid=gridM,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("[Ne] 3s^2")],
+                            finalConfigs   = [Configuration("[Ne] 3s 4s")],
+                            initialAsfSettings = asfM, finalAsfSettings = asfM,
+                            processSettings= mpSettings )
+    perform(wi)
+    #
+elseif  false
+    # OWN GRID: the file-level grid (80 a.u.) is refused for this branch, which wants about 209 a.u.
+    # A local grid leaves the branches that are already matched undisturbed; hp = rbox/300.
+    grid = Radial.Grid(Radial.Grid(false), rnt = 4.0e-6, h = 5.0e-2, hp = 0.6967, rbox = 209.0)
+    # Last successful:  08-Aug-2026        ## for the ANGULAR structure and the monochromatic limit
+    #
+    # DATED for what it verifies -- the odd-K selection rule, the omega1 <-> omega2 invariance and the
+    # monochromatic limit -- NOT for the magnitude, which rests on the same underived absorption normalisation
+    # as branches g and h.
+    #
+    # --- Branch i: TWO-PHOTON ABSORPTION, BICHROMATIC -- two beams of different frequency.
+    #
+    # THE SCHEME HAD NO computeLines AT ALL until 06-Aug-2026 and only a scaffold until 08-Aug-2026: it was
+    # declared, documented in the abstract type and given a default constructor, yet had no `-inc-` file, so
+    # selecting it died in a bare MethodError with nothing to indicate why. It is now implemented.
+    #
+    # WHY IT MATTERS BEYOND ITS OWN PHYSICS -- it tests blocker A2 FROM THE OPPOSITE SIDE. A2 established that
+    # odd K must vanish for two photons from ONE beam, because identical bosons require a symmetric two-photon
+    # state. Two beams of different colour are not identical particles, so odd K must REAPPEAR here; if it came
+    # out suppressed anyway, the mechanism claimed in A2 would be wrong and the fix would have been right by
+    # accident. It is not: odd K carries 89 % of the unpolarized cross section at omega1 = 0.1 (E_f - E_i).
+    #
+    # WHAT WAS MEASURED (work/diag-bichromatic.jl, H 1s -> 2s, Babushkin, rbox = 20; x = omega1/(E_f - E_i)).
+    # Every entry is a RATIO taken within one basis, so the box size divides out of all of them:
+    #
+    #     x        unpolarized     linear/unpol    odd-K fraction    bichromatic/monochromatic
+    #     0.1      1.607734e-09      0.211197       8.944013e-01           145.060
+    #     0.25     3.006394e-10      0.436600       7.817002e-01            27.126
+    #     0.4      7.474408e-11      1.254942       3.725292e-01             6.744
+    #     0.49     4.462238e-11      1.988122       5.938897e-03             4.026
+    #     0.499    4.433576e-11      1.999881       5.974393e-05             4.000261
+    #     0.4999   4.433290e-11      1.999999       5.974750e-07             4.000003
+    #
+    # FOUR PARAMETER-FREE CHECKS, all passed:
+    #   * THE ODD-K FRACTION FALLS QUADRATICALLY in the detuning -- exactly 100x per decade in (0.5 - x). It must:
+    #     the odd-K amplitude is the DIFFERENCE of the two time orderings, which is linear in omega1 - omega2.
+    #   * THE MONOCHROMATIC LIMIT IS 4.000003, and the 4 is DERIVED, not fitted: as the colours merge the two
+    #     orderings coincide, so the rank-K amplitude tends to (1 + (-1)^K) U, i.e. 2U for even K, while the
+    #     monochromatic routine keeps only U. That is an amplitude-level statement; the remaining flux
+    #     convention (F_1 F_2 versus F^2 or F^2/2 for one beam) is a separate question and is NOT settled by it.
+    #   * linear/unpolarized -> 2.0000, the monochromatic value, once odd K has switched off.
+    #   * sigma IS EXACTLY INVARIANT under omega1 <-> omega2 (identical to all 10 printed digits at x = 0.2 and
+    #     0.35). Exchanging the beams exchanges the orderings and multiplies the rank-K amplitude by a phase.
+    #
+    # AND ONE FINDING ABOUT THE MONOCHROMATIC FILE, recorded rather than acted on: its
+    # computeTotalCsRightCircular has never been filled in -- the body is a comment reading "Need to be filled"
+    # and it returns zero for every input. The "right-circular vanishes identically" check reported for branches
+    # g and h is therefore VACUOUS; those branches remain dated for their OTHER checks, which are unaffected.
+    # The bichromatic routine here does compute it, and was tested where the answer is NOT zero: for H 1s -> 3d
+    # (K = 2 open) it gives right-circular/linear = 1.500000, against 0.8/0.5333 = 1.5 from the 3-j weights.
+    ni          = Nuclear.Model(1.0, PointNucleus())   ## Fermi cannot represent Z = 1; see the note in the header
+    interConfs  = [Configuration("2p"), Configuration("3p"), Configuration("4p"), Configuration("5p"),
+                   Configuration("6p"), Configuration("7p")]
+    interRep    = Representation("intermediate np levels", ni, grid, interConfs, MeanFieldMultiplet(MeanFieldSettings()))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    ## omegaLess is in the USER-SELECTED energy units, like every other photon energy in JAC. The H 1s -> 2s
+    ## transition energy is 10.037 eV here, so 4.0 eV is a strongly asymmetric sharing (x = 0.3985), chosen
+    ## because odd K is then large and plainly visible rather than a small correction.
+    ## THIS BRANCH ITSELF PRINTS (08-Aug-2026, rbox = 80):
+    ##     omega1 4.0000 eV, omega2 6.0376 eV
+    ##     linear 9.3301e-28 (Cou) / 1.9109e-26 (Bab)     right-circular 0.0000 / 0.0000     [K <= 1, so it must]
+    ##     unpolarized 5.8527e-28 / 1.5004e-26            linear/unpolarized 1.594 (Cou) / 1.274 (Bab)
+    ##     odd-K fraction of the unpolarized cross section: 0.2029 (Cou) / 0.3632 (Bab)
+    ## The odd-K fraction is LARGE, which is the point; linear/unpolarized sits away from 2.0000 for exactly the
+    ## same reason -- odd K contributes to the unpolarized cross section but cancels for two beams of equal
+    ## linear polarization.
+    mpSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonAbsorptionBichromaticScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.TotalCsLinear(),
+                                         MultiPhotonTransition.TotalCsRightCircular(),
+                                         MultiPhotonTransition.TotalCsUnpolarized()], 4.0 ),  ## omegaLess [eV]
+                        multipoles = [E1], gauges = [UseCoulomb, UseBabushkin],
+                        intermediateStates = interMp, calcOverview = false,
+                        lineSelection = LineSelection(), printBefore = true )
+    we = Atomic.Computation(Atomic.Computation(), name="Dh-i: bichromatic two-photon absorption of H", grid=grid,
+                            nuclearModel   = ni,
+                            initialConfigs = [Configuration("1s")],
+                            finalConfigs   = [Configuration("2s")],
+                            processSettings= mpSettings )
+    perform(we)
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last successful:  11-Aug-2026     ## for the PHOTON-ENERGY DEPENDENCE of the absorption cross section;
+    #                                   ## the absolute scale remains unverified, see below.
+    #
+    # --- Branch j: WHAT SETS THE SCALE OF A TWO-PHOTON ABSORPTION CROSS SECTION?
+    #
+    # THE QUESTION. This module prints two-photon absorption cross sections whose absolute size nobody has
+    # ever checked. For two-photon EMISSION there is a benchmark -- hydrogen's 2s -> 1s decay rate is known
+    # exactly, 8.2206 Z^6 /s, and comparing against it shows this module low by a constant factor 26.7. For
+    # absorption there was no benchmark at all, so the printed cross sections carried no warranty whatever.
+    #
+    # WHY THE OBVIOUS ROUTE IS CLOSED. A two-photon transition proceeds through intermediate states -- here
+    # the whole np manifold, continuum included. That sum does not converge in the settings this module can
+    # reach, so an absolute cross section trustworthy enough to compare with a measurement cannot be
+    # computed at all. Adding more intermediate states does not fix this; it is not a matter of patience.
+    #
+    # THE WAY AROUND IT. Absorption 1s -> 2s and emission 2s -> 1s are the SAME TRANSITION RUN BACKWARDS:
+    # the same intermediate states, the same two-photon matrix element, the same photon energies. Whatever
+    # error the truncated intermediate sum commits, it commits IDENTICALLY IN BOTH. In their ratio the
+    # atomic structure therefore cancels completely, and what survives is pure radiation physics: how many
+    # photon modes the atom may radiate into, against how strongly a given photon flux drives the
+    # absorption. That is the two-photon counterpart of the Einstein A/B relation, and it is exact.
+    #
+    # This inverts the economics of the calculation. Because the atomic structure cancels, the basis should
+    # be made DELIBERATELY CRUDE -- 2p and 3p in a small box is enough, and it must be, since one properly
+    # converged point costs more than ten minutes. The emission rate that comes out below, 2.0e-3 /s, is
+    # four thousand times smaller than hydrogen's true rate. That is intended and does not matter here.
+    #
+    # THE RELATION. Each emitted photon may go into a number of modes proportional to omega^2/(pi^2 c^2) --
+    # the same density-of-states factor that makes the familiar one-photon Einstein relation
+    # A = (g_l/g_u) (omega^2/(pi^2 c^2)) INT sigma domega come out right. Two photons give its square, and
+    # energy conservation ties omega_2 to omega_1:
+    #
+    #       dA/domega_1  =  (g_l/g_u) * delta * omega_1^2 omega_2^2 / (pi^4 c^4),     delta = hbar * sigma
+    #
+    # Both sides must be taken at the SAME kinematics, i.e. at the symmetric sharing omega_1 = omega_2,
+    # since the absorption here is monochromatic. That is why noSharings is ODD below: with the default 4
+    # no quadrature point falls on the midpoint, and the two processes would be compared at different
+    # photon energies without any warning.
+    #
+    # ================================================================================================
+    # READ THIS FIRST: THERE ARE **TWO SEPARATE PROBLEMS** IN THIS MODULE AND THEY MUST NOT BE MIXED.
+    # Confusing them cost a full day on 11-Aug-2026, on both sides of the discussion.
+    #
+    #   (A) THE EMISSION RATE, against the exactly known H 2s -> 1s value 8.2206 /s.
+    #       Two things are wrong with it at once, and NEITHER was touched on 11-Aug-2026:
+    #         - a constant, Z-independent prefactor deficit of 26.7 (see the 2p-emission file), and
+    #         - the sum over intermediate np states, which needs n up to 35..55 before it converges.
+    #       With the tiny basis used in THIS branch the rate is nowhere near 8.2206, and it is not even
+    #       monotonic -- measured, after applying the 26.7:
+    #              2p alone   0.408 /s     =  5.0 %  of the exact rate
+    #              2p + 3p    0.054 /s     =  0.65 % of the exact rate
+    #       Adding 3p moves the answer 7.6x FURTHER AWAY. That is not slow convergence; the 2s -> 1s sum
+    #       has large destructive cancellations and is dominated by the CONTINUUM, which a handful of
+    #       bound np states in a finite box barely represents. Do not read any absolute rate from a
+    #       branch like this one.
+    #
+    #   (B) THE ABSORPTION CROSS-SECTION PREFACTOR.  This IS what was fixed on 11-Aug-2026, and it has
+    #       nothing to do with (A). The fix does not, and was never meant to, bring the rate near 8.2206.
+    # ================================================================================================
+    #
+    # WHAT WAS FOUND FOR (B). Comparing hydrogen with He^+ moves the photon energy by a factor 4 and the
+    # differential rate by 5e4:
+    #        Z = 1:  omega 0.184437 a.u.,  computed/predicted = 1.63264e+07
+    #        Z = 2:  omega 0.747040 a.u.,  computed/predicted = 1.63255e+07      ratio 0.999942
+    # So the PHOTON-ENERGY DEPENDENCE of this module's absorption cross section is exactly what radiation
+    # theory demands, to six parts in 1e5. What was wrong is a single overall CONSTANT, 1.6326e7, the same
+    # for every atom and every photon energy.
+    #
+    # WHY THE RATIO CAN BE TRUSTED WHERE THE RATES CANNOT. Adding 3p changes the absorption by 2.62815x
+    # and the emission by 2.62817x -- the two agree to 7 parts in a million. The bad sum cancels, and it
+    # cancels MEASURABLY, not by assumption. That is the whole reason a basis useless for (A) is
+    # nevertheless decisive for (B).
+    #
+    # WHERE THAT CONSTANT LIVES. It is NOT an angular factor -- 1.6e7 is far too large for one, since an
+    # angular sum over two coupled photons is O(1) to O(100). The size of a factor is itself evidence about
+    # where it can possibly live, and following that up identifies it.
+    #
+    # The two paths are coded independently, so the first thing to test was whether the amplitude really
+    # does cancel. Read side by side, computeReducedAmplitudeEmission and computeReducedAmplitudeAbsorption
+    # are STRUCTURALLY IDENTICAL: the same product of two PhotoEmission.amplitude calls over the
+    # intermediate levels, the same energy denominator (with the sign appropriate to each direction), the
+    # same Wigner_6j. Only Emission() differs from Absorption(), which is the conjugate-and-swap of the same
+    # matrix element. So the ORBITALS AND MATRIX ELEMENTS ARE SOUND and they do cancel; the whole
+    # discrepancy sits in the PREFACTORS:
+    #
+    #       emission   (differential rate)  x  2 pi alpha^2 omega1 omega2 / (2J_i+1)
+    #       absorption (cross section)      x  8 pi^5 alpha^2 / (2J_i+1) / omega^2
+    #
+    # Both multiply the same sum of |amp|^2, so the code's ratio is 4 pi^4/omega^4 and carries NO POWER OF c
+    # whatever -- alpha^2 cancels between them -- while the relation above demands omega^4/(pi^4 c^4). That
+    # accounts for the number exactly:
+    #
+    #       c^4/4 = 8.81614e7   x   0.185188   =   1.63264e7
+    #
+    # The discrepancy is therefore DOMINATED BY c^4 = alpha^-4: a missing power of alpha relating an AREA to
+    # a RATE, i.e. a dimensional error, not a subtle angular sum. The residual 0.185188 is 0.656 per
+    # single-photon amplitude, consistent with the sqrt(2J+1)-type convention difference between
+    # PhotoEmission.amplitude(Emission) and (Absorption), weighted over the 2p_1/2 and 2p_3/2 intermediates.
+    #
+    # WHICH SIDE WAS WRONG. Emission is benchmarked against the exact hydrogen rate and is low only by 26.7 --
+    # an O(10) factor, not a power of alpha -- so its prefactor is dimensionally sound. The ABSORPTION
+    # prefactor was therefore the faulty one, and it was CORRECTED on 11-Aug-2026 in all three cross-section
+    # routines of module-MultiPhotonTransition-inc-2p-absorption.jl:
+    #        8*pi^5 * alpha^2 / (2J_i+1) / omega^2    ->    2*pi^5 / alpha^2 / (2J_i+1) / omega^2
+    # Independent internal evidence, found only by looking: computeTotalAlpha0 in that same file ALREADY
+    # divided by alpha^2, so three routines multiplied where the fourth divided.
+    #
+    # STATE AFTER THE CORRECTION:
+    #    * the absorption/emission ratio now matches the radiation relation to within a factor 5.400,
+    #      instead of 1.63e7;
+    #    * that residual 5.400 is a genuine constant -- identical to five digits for a 2p-only basis, for
+    #      2p+3p, and at Z = 2, i.e. independent of BOTH the intermediate basis and the photon energy;
+    #    * 1/5.4001 = 0.18518 and 5/27 = 0.185185 agree to 1e-5, but 27/5 is DELIBERATELY NOT INSTALLED:
+    #      it is a numerical match to a measured number, which is the exact step that produced three false
+    #      conclusions in this module. Its likely home is the angular sum, set to unity in the derivation
+    #      above and never done properly -- the same piece that defeats the emission prefactor 26.7.
+    #
+    # SO WHOEVER DOES THE TWO-PHOTON ANGULAR REDUCTION PROPERLY NOW HAS **TWO** NUMBERS TO REPRODUCE
+    # UNPROMPTED -- 26.7 for emission and 27/5 for absorption -- where before there was one. Whether both
+    # are the same angular object is now a testable question, and that is the natural next attack.
+    #
+    # WHAT THIS MEANS FOR USE. Relative two-photon absorption results -- between transitions, between
+    # polarizations, between atoms, and against photon energy -- are trustworthy. The absolute cross section
+    # is still low by about 5.4 and should be quoted only with that stated. Absolute EMISSION rates are a
+    # different matter entirely; see (A) above.
+    ni          = Nuclear.Model(1.0, PointNucleus())     ## repeat with Nuclear.Model(2.0) and rbox 20.0 for He^+
+    gridJ       = Radial.Grid(Radial.Grid(false), rnt = 4.0e-6, h = 5.0e-2, hp = 1.0e-2, rbox = 40.0)
+    interConfs  = [Configuration("2p"), Configuration("3p")]     ## crude ON PURPOSE; see above
+    interRep    = Representation("intermediate np levels", ni, gridJ, interConfs, MeanFieldMultiplet(MeanFieldSettings()))
+    interMp     = generate(interRep, output=true)[ResultKeys.MeanFieldMultiplet]
+    #
+    absSettings = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonAbsorptionScheme(
+                                     MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                         MultiPhotonTransition.TotalCsLinear()] ),
+                        multipoles = [E1], gauges = [UseCoulomb], intermediateStates = interMp,
+                        calcOverview = false, lineSelection = LineSelection(), printBefore = false )
+    perform( Atomic.Computation(Atomic.Computation(), name="Dh-j: 1s -> 2s two-photon absorption", grid=gridJ,
+                                nuclearModel   = ni,
+                                initialConfigs = [Configuration("1s")],
+                                finalConfigs   = [Configuration("2s")],
+                                processSettings= absSettings) )
+    #
+    emSettings  = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                        scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                     MultiPhotonTransition.TwoPhotonEmissionScheme(); noSharings = 5 ),
+                        multipoles = [E1], gauges = [UseCoulomb], intermediateStates = interMp,
+                        calcOverview = false, lineSelection = LineSelection(), printBefore = false )
+    perform( Atomic.Computation(Atomic.Computation(), name="Dh-j: 2s -> 1s two-photon emission", grid=gridJ,
+                                nuclearModel   = ni,
+                                initialConfigs = [Configuration("2s")],
+                                finalConfigs   = [Configuration("1s")],
+                                processSettings= emSettings) )
+    #
+## =====================================================================================================
+##  TWO-PHOTON EMISSION, A SELECTION RULE  (an EXACT check that needs no reference number at all)
+## =====================================================================================================
+elseif  false
+    # Last visit:  01-Nov-2026
+    # Last successful:  01-Nov-2026   ## the midpoint row (omega1 = omega2) of this branch's own printed table:
+    #                                 ## pure E1E1 gives 0.00000e+00 in BOTH gauges at Z = 2, 18 AND 30, while
+    #                                 ## [E1, M2] gives Cou/Bab 3.17414e-09/5.70324e-09, 3.33244e+00/5.85296e+00
+    #                                 ## and 2.24052e+02/3.87136e+02 [1/s] at those same three Z.
+    #
+    # --- Branch k: THE J = 1 -> 0 EQUAL-SHARING SELECTION RULE, and the mixed-multipole channel read off
+    #     background-free.  He-like 1s2s 3S_1 -> 1s^2 1S_0, for Z = 2, 18 and 30.
+    #
+    # WHY THIS BRANCH EXISTS, and it is a different kind of check from every other branch of this file.  Every
+    # other one compares a NUMBER against a reference, and so inherits the open overall prefactor, the
+    # correlation deficiency and the intermediate-basis truncation all at once.  This one compares against a
+    # SELECTION RULE, which is exact angular algebra and therefore independent of all three.
+    #
+    # THE RULE.  J_i = 1 and J_f = 0, so Klist = oplus(1,0) = {1} and NOTHING ELSE -- the whole differential
+    # rate is the K = 1 channel.  At omega1 = omega2 the two photon time orderings are the SAME reduced
+    # amplitude, so the amplitude collapses to
+    #
+    #     wk  =  U * ( 1 + (-1)^(L1+L2-K) )
+    #
+    # and the bracket decides everything:
+    #     pure E1E1 :  (-1)^(1+1-1) = -1   ->   wk = 0 EXACTLY, whatever the radial content is
+    #     E1M2      :  (-1)^(1+2-1) = +1   ->   wk = 2U, not suppressed at all
+    #
+    # So the spectrum of this transition must have an EXACT ZERO at its centre as long as both photons carry the
+    # same multipolarity, and that zero must fill in the moment a mixed pair is admitted.  This is the published
+    # statement that the J = 1 -> 0 two-photon decay is forbidden at equal photon energies ONLY for equal
+    # multipolarities (Phys. Rev. A 69, 062502);  here it is an output of the code rather than an input to it.
+    #
+    # AND IT IS WHY THAT SYSTEM IS THE ONE THE LITERATURE USES FOR E1M2.  The mixed channel is reported at
+    # roughly a quarter of the 2E1 one for He-like uranium, while contributing under 0.5 % to H-like 2s -> 1s at
+    # any Z.  The difference is not that E1M2 is large here -- it is that the selection rule has suppressed what
+    # it is being compared against.
+    #
+    # THE MIDPOINT IS THEREFORE A BACKGROUND-FREE MEASUREMENT of the mixed-multipole channel: no subtraction of
+    # a large pure-pair term, no ratio against a big number.  noSharings = 9 is ODD on purpose, because
+    # Basics.determineEnergySharings places Gauss-Legendre nodes symmetrically and an odd count puts one node
+    # exactly on omega1 = omega2.  An EVEN count never samples the midpoint and this branch would show nothing.
+    #
+    # MEASURED 01-Nov-2026 -- the MIDPOINT ROW of the differential table this branch prints, in [1/s]:
+    #
+    #     Z     pure E1E1, Cou / Bab        with [E1, M2], Cou / Bab          Bab/Cou of the mixed midpoint
+    #     2     0.00000e+00  0.00000e+00    3.17414e-09   5.70324e-09                   1.80
+    #     18    0.00000e+00  0.00000e+00    3.33244e+00   5.85296e+00                   1.76
+    #     30    0.00000e+00  0.00000e+00    2.24052e+02   3.87136e+02                   1.73
+    #
+    # The zero is EXACT and not merely small -- it is printed as 0.00000e+00 because the two orderings cancel
+    # term by term before any radial integral is weighed.  Every mirror pair of sharings also agrees to all
+    # printed digits, which is the photon-exchange symmetry branch d tests and is forced for the same reason.
+    #
+    # WHAT IS *NOT* CLAIMED, and the last column is why.  The MAGNITUDE of the mixed channel is NOT a result of
+    # this branch:  the mixed midpoint's two GAUGES disagree by 1.73 to 1.80 at every Z, where a converged
+    # amplitude would have them agree, and the pure channel is no better away from the midpoint -- at Z = 2 its
+    # totals differ between the gauges by more than an order of magnitude.  A mixed-multipole RATE from this
+    # route must not be quoted on these settings.
+    #
+    # AND THE INTERMEDIATE BASIS HERE IS DELIBERATELY SMALL -- nmax = 10, i.e. NINE 1snp configurations, against
+    # the NINETY-EIGHT that branch b needs before H 2s -> 1s converges.  So the gauge disagreement above is most
+    # probably ordinary incompleteness and NOT a wall.  The cure branch b demonstrates is not "more
+    # configurations" in the usual sense but a PSEUDO-CONTINUUM: push nmax far up with gridStopper = false and
+    # hold the box FIXED, so the high-n members stand in for the true continuum as box-confined pseudostates --
+    # which took that branch from 9.7702 to 8.22902 /s against an exact 8.22906 and closed its gauges from 6:1
+    # to 4e-5.  Whether the same works HERE is an open and cheap question: watch the mixed midpoint's Bab/Cou
+    # ratio against nmax at one Z.  Two things make it less certain than for branch b.  First, for J = 1 -> 0
+    # the selection rule suppresses the pure channel itself, so near the midpoint the pure part is a small
+    # residual and residuals of truncated sums converge slowly;  the MIXED midpoint, however, is a full 2U and
+    # carries no such cancellation, so it may converge much better than the pure one.  Second, the literature
+    # requires the NEGATIVE-ENERGY (Dirac-sea) intermediates for mixed channels and finds a positive-spectrum
+    # sum high by a factor ~2;  whether a B-spline pseudo-spectrum generated this way carries that branch at all
+    # has NOT been checked.  Nothing here is settled, and none of it affects the date below, which rests only on
+    # the exact zero.
+    #
+    # So this branch is dated for the SELECTION RULE and the exchange symmetry, which are exact angular algebra
+    # and therefore INDEPENDENT of nmax, of the prefactor and of the gauge -- and for nothing else.  The three
+    # mixed-midpoint numbers on the claim line reproduce at THESE settings and are not converged values.
+    # Separately, the literature requires the NEGATIVE-ENERGY (Dirac-sea) intermediates for mixed channels and
+    # finds a positive-spectrum-only sum high by a factor ~2;  the set below is positive-energy BOUND states.
+    #
+    # `tools/probeTwoPhotonSelectionRule.jl` carries the same measurement with the per-Z tables printed in full.
+    for  (Z, nmax) in [(2.0, 10), (18.0, 10), (30.0, 10)]
+        println("\n", "="^116)
+        println("  He-like Z = $Z:  1s2s 3S_1 -> 1s^2 1S_0,  Klist = {1} only -- the midpoint must vanish for E1E1")
+        println("="^116)
+        nk          = Nuclear.Model(Z, Z < 2.5 ? PointNucleus() : FermiNucleus())
+        gridK0      = Basics.recommendedGrid(Dict(Shell(1,0)=>1, Shell(nmax,1)=>1), Z; printout=false)
+        gridK       = Basics.recommendedGrid(Dict(Shell(1,0)=>1, Shell(nmax,1)=>1), Z;
+                                             rbox=gridK0.tL[end], hp=gridK0.tL[end]/3000, printout=false)
+        interConfsK = [Configuration("1s $(n)p")  for n = 2:nmax]
+        interRepK   = Representation("1snp intermediate levels", nk, gridK, interConfsK,
+                                     MeanFieldMultiplet(MeanFieldSettings()))
+        interMpK    = generate(interRepK, output=true)[ResultKeys.MeanFieldMultiplet]
+        #
+        ## the PURE pair first, then the mixed one;  the midpoint tells the two apart
+        for  mps in ( [E1], [E1, M2] )
+            mpSettingsK = MultiPhotonTransition.Settings(MultiPhotonTransition.Settings();
+                                scheme = MultiPhotonTransition.TwoPhotonEmissionScheme(
+                                             MultiPhotonTransition.AbstractMultiPhotonProperty[
+                                                 MultiPhotonTransition.EnergyDiffCs()], 9 ),   ## ODD: samples x = 1/2
+                                multipoles = mps, gauges = [UseCoulomb, UseBabushkin],
+                                intermediateStates = interMpK, calcOverview = false,
+                                lineSelection = LineSelection(true,
+                                    symmetryPairs = [(LevelSymmetry(1, Basics.plus), LevelSymmetry(0, Basics.plus))]),
+                                printBefore = true )
+            println("\n  ---- multipoles = $mps ----")
+            perform( Atomic.Computation(Atomic.Computation(), name="Dh-k: He-like Z = $Z, $mps", grid=gridK,
+                                        nuclearModel   = nk,
+                                        initialConfigs = [Configuration("1s 2s")],
+                                        finalConfigs   = [Configuration("1s^2")],
+                                        processSettings= mpSettingsK) )
+        end
+    end
+    #
+##
+##
+end
+#
+setDefaults("print summary: close", "")

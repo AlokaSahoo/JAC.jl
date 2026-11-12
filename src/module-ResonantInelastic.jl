@@ -3,6 +3,33 @@
 `module  JAC.ResonantInelastic`  
 ... a submodel of JAC that contains all methods for computing Resonant-Inelastic X-ray Scattering (RIXS) observables,
     based on initial, intermediate and final-state multiplets.
+
+    STATUS, 01-Sep-2026: TO BE RETIRED LATER -- BUT NOT NOW, AND NO EXAMPLE FILE IS TO BE PREPARED FOR IT.
+    The maintainer's decision, and both halves of it matter.
+
+    NOT NOW, because this module HAS BEEN USED RECENTLY IN AN APPLICATION and is the only working RIXS code in
+    JAC that answers its particular question. It is PATHWAY-shaped: it takes its intermediate levels from the
+    intermediateMultiplet that `Basics.perform` builds from `intermediateConfigs`, and reports each
+    initial -> intermediate -> final pathway separately, so it says WHICH resonance carries the signal. That is a
+    different question from the one a cross-section map answers, and it is the question one needs when assigning
+    a spectrum.
+
+    THE REPLACEMENT IS `module-PhotonScattering-inc-resonant.jl`, which is LINE-shaped by the decision of
+    21-Aug-2026: intermediates from `settings.gMultiplet` like every other second-order process, one result type,
+    one entry point, and `PhotonScattering.Settings` deliberately absent from the intermediateMultiplet list in
+    `module-BasicsAZ-inc-perform.jl`. It was written FROM SCRATCH and carries no code from here. Its examples are
+    `example-Pb.jl` and `example-Pc.jl`.
+
+    RETIREMENT IS CONDITIONAL ON THAT REPLACEMENT BEING SUFFICIENT, which it is not yet. The intention is to take
+    the application this module served and use it to make `PhotonScattering-inc-resonant` genuinely useful; only
+    once that application runs through the new code does this module go. **A successful replacement is the
+    condition -- not a tidy-up, not a duplicate-module argument.**
+
+    AND NO EXAMPLE IS TO BE WRITTEN FOR IT. `ResonantInelastic` appears in the priority list's count of modules
+    that produce numbers and have no example, and the natural reflex is to supply one. Do not: an example here
+    would entrench a duplicate that is meant to go, and the RIXS examples that a user should read are the P-line
+    ones already written against the replacement. This paragraph exists so that a later reader -- or a later
+    `/testExamples` sweep -- meets the decision instead of filing the gap again.
 """
 module ResonantInelastic
 
@@ -67,15 +94,15 @@ function Settings(set::ResonantInelastic.Settings;
     omegaInInterval::Union{Nothing,NamedTuple{(:lower, :upper), Tuple{Float64, Float64}} }=nothing,            
     omegaOutInterval::Union{Nothing,NamedTuple{(:lower, :upper), Tuple{Float64, Float64}} }=nothing)
     
-    if  multipoles          == nothing   multipolesx          = set.multipoles              else  multipolesx          = multipoles            end 
-    if  gauges              == nothing   gaugesx              = set.gauges                  else  gaugesx              = gauges                end 
-    if  calcRixsCI          == nothing   calcRixsCIx          = set.calcRixsCI              else  calcRixsCIx          = calcRixsCI            end 
-    if  printBefore         == nothing   printBeforex         = set.printBefore             else  printBeforex         = printBefore           end 
-    if  ciEnhancement       == nothing   ciEnhancementx       = set.ciEnhancement           else  ciEnhancementx       = ciEnhancement         end 
-    if  width               == nothing   widthx               = set.width                   else  widthx               = width                 end 
-    if  pathwaySelection    == nothing   pathwaySelectionx    = set.pathwaySelection        else  pathwaySelectionx    = pathwaySelection      end 
-    if  omegaInInterval     == nothing   omegaInIntervalx     = set.omegaInInterval         else  omegaInIntervalx     = omegaInInterval       end 
-    if  omegaOutInterval    == nothing   omegaOutIntervalx    = set.omegaOutInterval        else  omegaOutIntervalx    = omegaOutInterval      end 
+    if  isnothing(multipoles)            multipolesx          = set.multipoles              else  multipolesx          = multipoles            end 
+    if  isnothing(gauges)                gaugesx              = set.gauges                  else  gaugesx              = gauges                end 
+    if  isnothing(calcRixsCI)            calcRixsCIx          = set.calcRixsCI              else  calcRixsCIx          = calcRixsCI            end 
+    if  isnothing(printBefore)           printBeforex         = set.printBefore             else  printBeforex         = printBefore           end 
+    if  isnothing(ciEnhancement)         ciEnhancementx       = set.ciEnhancement           else  ciEnhancementx       = ciEnhancement         end 
+    if  isnothing(width)                 widthx               = set.width                   else  widthx               = width                 end 
+    if  isnothing(pathwaySelection)      pathwaySelectionx    = set.pathwaySelection        else  pathwaySelectionx    = pathwaySelection      end 
+    if  isnothing(omegaInInterval)       omegaInIntervalx     = set.omegaInInterval         else  omegaInIntervalx     = omegaInInterval       end 
+    if  isnothing(omegaOutInterval)      omegaOutIntervalx    = set.omegaOutInterval        else  omegaOutIntervalx    = omegaOutInterval      end 
     
     Settings( multipolesx, gaugesx, calcRixsCIx, printBeforex, ciEnhancementx, widthx, pathwaySelectionx, omegaInIntervalx, omegaOutIntervalx)
 end
@@ -108,8 +135,8 @@ end
     + intermediateGamma ::Float64                           ... Widths of the intermediate level
     + productF          ::EmProperty                        ... F (product of amplitudes is assumed to be real)
     + relativeCS        ::EmProperty                        ... relative CS = |F|^2
-    + excitationChannels::Array{PhotoEmission.Channel,1}    ... List of incoming channels.
-    + emissionChannels  ::Array{PhotoEmission.Channel,1}    ... List of outgoing RIXS channels.
+    + excitationChannels::Array{MultipoleAmplitude,1}       ... incoming amplitudes, one per multipole, both gauges.
+    + emissionChannels  ::Array{MultipoleAmplitude,1}       ... outgoing RIXS amplitudes, one per multipole, both gauges.
 """
 struct  Pathway
     initialLevel        ::Level
@@ -120,8 +147,8 @@ struct  Pathway
     intermediateGamma   ::Float64 
     productF            ::EmProperty 
     relativeCS          ::EmProperty
-    excitationChannels  ::Array{PhotoEmission.Channel,1}
-    emissionChannels    ::Array{PhotoEmission.Channel,1}
+    excitationChannels  ::Array{MultipoleAmplitude,1}
+    emissionChannels    ::Array{MultipoleAmplitude,1}
 end 
 
 
@@ -151,47 +178,71 @@ function  computeAmplitudesProperties(pathway::ResonantInelastic.Pathway, grid::
     ## println(">> pathway: $(pathway.initialLevel.index)--$(pathway.intermediateLevel.index)--$(pathway.finalLevel.index) ...")
     #
     Defaults.setDefaults("relativistic subshell list", pathway.intermediateLevel.basis.subshells; printout=false)
-    
     intermediateLevel = deepcopy(pathway.intermediateLevel)
-    if settings.calcRixsCI    intermediateLevel =  Basics.modifyLevelMixing(intermediateLevel, settings.ciEnhancement)   end 
+    initialLevel      = deepcopy(pathway.initialLevel)
+    
+    #  The particular application requires to decide, which levels need to be "mixed with enhanced factor"
+    
+    ## Interference in the RIXS out-channel (June 2025)
+    ## if settings.calcRixsCI    intermediateLevel =  Basics.modifyLevelMixing(intermediateLevel, settings.ciEnhancement)   end 
+    
+    ## RIXS signals with double excitations (Nov 2025)
+    if settings.calcRixsCI       initialLevel      =  Basics.modifyLevelMixing(initialLevel, settings.ciEnhancement)        end 
     
     # Compute the amplitudes of the excitation and emission channels separately
-    newExChannels = PhotoEmission.Channel[];    newEmChannels = PhotoEmission.Channel[]
-    for exChannel in pathway.excitationChannels
-        amplitude    = PhotoEmission.amplitude("emission", exChannel.multipole, exChannel.gauge, pathway.omegaIn, 
-                                               intermediateLevel, pathway.initialLevel, grid, display=false, printout=false)
-        newExChannel = PhotoEmission.Channel( exChannel.multipole, exChannel.gauge, amplitude)
-        push!( newExChannels, newExChannel)
+    newExChannels = MultipoleAmplitude[];    newEmChannels = MultipoleAmplitude[]
+    for  ma in pathway.excitationChannels
+        mp = ma.multipole
+        if  string(mp)[1] == 'E'
+            ampC = PhotoEmission.amplitude(Emission(), mp, Basics.Coulomb,   pathway.omegaIn,
+                                           intermediateLevel, initialLevel, grid, display=false, printout=false)
+            ampB = PhotoEmission.amplitude(Emission(), mp, Basics.Babushkin, pathway.omegaIn,
+                                           intermediateLevel, initialLevel, grid, display=false, printout=false)
+            amp  = EmPropertyC(ampC, ampB)
+        else
+            ampM = PhotoEmission.amplitude(Emission(), mp, Basics.Magnetic,  pathway.omegaIn,
+                                           intermediateLevel, initialLevel, grid, display=false, printout=false)
+            amp  = EmPropertyC(ampM)
+        end
+        push!( newExChannels, MultipoleAmplitude(mp, amp))
     end
-    
-    for emChannel in pathway.emissionChannels
-        amplitude    = PhotoEmission.amplitude("emission", emChannel.multipole, emChannel.gauge, pathway.omegaOut, 
-                                               intermediateLevel, pathway.finalLevel, grid, display=false, printout=false)
-        newEmChannel = PhotoEmission.Channel( emChannel.multipole, emChannel.gauge, amplitude)
-        push!( newEmChannels, newEmChannel)
+
+    for  ma in pathway.emissionChannels
+        mp = ma.multipole
+        if  string(mp)[1] == 'E'
+            ampC = PhotoEmission.amplitude(Emission(), mp, Basics.Coulomb,   pathway.omegaOut,
+                                           intermediateLevel, pathway.finalLevel, grid, display=false, printout=false)
+            ampB = PhotoEmission.amplitude(Emission(), mp, Basics.Babushkin, pathway.omegaOut,
+                                           intermediateLevel, pathway.finalLevel, grid, display=false, printout=false)
+            amp  = EmPropertyC(ampC, ampB)
+        else
+            ampM = PhotoEmission.amplitude(Emission(), mp, Basics.Magnetic,  pathway.omegaOut,
+                                           intermediateLevel, pathway.finalLevel, grid, display=false, printout=false)
+            amp  = EmPropertyC(ampM)
+        end
+        push!( newEmChannels, MultipoleAmplitude(mp, amp))
     end
 
     # Choose a proper width of the intermediate level from the settings
     width = Defaults.convertUnits("energy: to atomic", settings.width)
     
     # Combine the amplitudes of the proper gauges to form the relativeCS
-    ampCou = ampBab = ComplexF64(0.)
-    for exChannel in newExChannels
-        for emChannel in newEmChannels
-            if  exChannel.gauge == Basics.Coulomb  &&  emChannel.gauge == Basics.Babushkin     continue    end
-            if  emChannel.gauge == Basics.Coulomb  &&  exChannel.gauge == Basics.Babushkin     continue    end
-            if      exChannel.gauge == Basics.Coulomb    ||  emChannel.gauge == Basics.Coulomb
-                ampCou = ampCou + emChannel.amplitude * conj(exChannel.amplitude)
-            elseif  exChannel.gauge == Basics.Babushkin  ||  emChannel.gauge == Basics.Babushkin
-                ampBab = ampBab + emChannel.amplitude * conj(exChannel.amplitude)
-            else
-                ampCou = ampCou + emChannel.amplitude * conj(exChannel.amplitude)
-                ampBab = ampBab + emChannel.amplitude * conj(exChannel.amplitude)
-            end
+    ampCou = ampBab = ComplexF64(0.);    ampEx = ampEm = 0.
+    ## THE FIVE-LINE GAUGE RULE IS EXACTLY THE COMPONENTWISE PRODUCT.  It said: skip a mixed
+    ## Coulomb x Babushkin pair; send Coulomb x Coulomb to one sum and Babushkin x Babushkin to the other;
+    ## send anything involving a MAGNETIC multipole to both.  `em.amplitude * conj(ex.amplitude)` on two
+    ## EmPropertyC does all three by construction -- the components never meet, and a magnetic amplitude has
+    ## equal components and so lands in both.
+    amp = EmPropertyC(0.0im)
+    for  ex in newExChannels
+        for  em in newEmChannels
+            ampEx = ampEx + abs(ex.amplitude.Coulomb)   # Just to understand which part is always zero
+            ampEm = ampEm + abs(em.amplitude.Coulomb)   # Just to understand which part is always zero
+            amp   = amp + em.amplitude * conj(ex.amplitude)
         end
     end
+    ampCou = amp.Coulomb;    ampBab = amp.Babushkin
 
-    @show ampCou, ampBab
     productF   = EmProperty(    ampCou.re,     ampBab.re )
     relativeCS = EmProperty(abs(ampCou)^2, abs(ampBab)^2)
     pathway    = ResonantInelastic.Pathway( pathway.initialLevel, pathway.intermediateLevel, pathway.finalLevel, 
@@ -210,8 +261,8 @@ end
 function  computePathways(finalMultiplet::Multiplet, intermediateMultiplet::Multiplet, initialMultiplet::Multiplet, 
                           grid::Radial.Grid, settings::ResonantInelastic.Settings; output=true) 
     # Define a common subshell list for all three multiplets
-    subshellList = Basics.generate("subshells: ordered list for two bases", intermediateMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
-    subshellList = Basics.generate("subshells: ordered list for two bases", finalMultiplet.levels[1].basis, intermediateMultiplet.levels[1].basis)
+    subshellList = Basics.generate(OrderedSubshellList(), intermediateMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
+    subshellList = Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis, intermediateMultiplet.levels[1].basis)
     Defaults.setDefaults("relativistic subshell list", subshellList; printout=true)
     println("")
     printstyled("ResonantInelastic.computeLines(): The computation of the pathway properties starts now ... \n", color=:light_green)
@@ -246,46 +297,30 @@ end
         an Array{PhotoExcitation.Channel,1} is returned.
 """
 function determineExcitationChannels(intermediateLevel::Level, initialLevel::Level, settings::ResonantInelastic.Settings)
-    channels = PhotoEmission.Channel[];   
-    symi = LevelSymmetry(initialLevel.J, initialLevel.parity)
-    symn = LevelSymmetry(intermediateLevel.J, intermediateLevel.parity)
+    ## One entry per multipole, carrying both gauges; the gauge loop and its hasMagnetic guard are gone.
+    channels = MultipoleAmplitude[]
+    symi = LevelSymmetry(initialLevel.J, initialLevel.parity);    symn = LevelSymmetry(intermediateLevel.J, intermediateLevel.parity)
     for  mp in settings.multipoles
         if   AngularMomentum.isAllowedMultipole(symn, mp, symi)
-            hasMagnetic = false
-            for  gauge in settings.gauges
-                # Include further restrictions if appropriate
-                if     string(mp)[1] == 'E'  &&   gauge == UseCoulomb      push!(channels, PhotoEmission.Channel(mp, Basics.Coulomb,   0.) )
-                elseif string(mp)[1] == 'E'  &&   gauge == UseBabushkin    push!(channels, PhotoEmission.Channel(mp, Basics.Babushkin, 0.) )  
-                elseif string(mp)[1] == 'M'  &&   !(hasMagnetic)           push!(channels, PhotoEmission.Channel(mp, Basics.Magnetic,  0.) );
-                                                    hasMagnetic = true; 
-                end 
-            end
+            push!(channels, MultipoleAmplitude(mp, EmPropertyC(Complex(0.), Complex(0.))))
         end
     end
-    
     return( channels )  
 end
 
 
 """
 `ResonantInelastic.determineEmissionChannels(finalLevel::Level, intermediateLevel::Level, settings::ResonantInelastic.Settings)` 
-    ... to determine a list of PhotoEmission.Channel for the photon transitions from the intermediate and to a final level, and by 
-        taking into account the particular settings of for this computation; an Array{PhotoEmission.Channel,1} is returned.
+    ... to determine the photon multipoles for the transitions from the intermediate to a final level, taking the
+        particular settings into account; an Array{MultipoleAmplitude,1} is returned, with all amplitudes zero.
 """
 function determineEmissionChannels(finalLevel::Level, intermediateLevel::Level, settings::ResonantInelastic.Settings)
-    channels = PhotoEmission.Channel[];   
+    channels = MultipoleAmplitude[];   
     symn = LevelSymmetry(intermediateLevel.J, intermediateLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity) 
+    ## One entry per multipole, carrying both gauges; the gauge loop and its hasMagnetic guard are gone.
     for  mp in settings.multipoles
-        if   AngularMomentum.isAllowedMultipole(symn, mp, symf)
-            hasMagnetic = false
-            for  gauge in settings.gauges
-                # Include further restrictions if appropriate
-                if     string(mp)[1] == 'E'  &&   gauge == UseCoulomb      push!(channels, PhotoEmission.Channel(mp, Basics.Coulomb,   0.) )
-                elseif string(mp)[1] == 'E'  &&   gauge == UseBabushkin    push!(channels, PhotoEmission.Channel(mp, Basics.Babushkin, 0.) )  
-                elseif string(mp)[1] == 'M'  &&   !(hasMagnetic)           push!(channels, PhotoEmission.Channel(mp, Basics.Magnetic,  0.) );
-                                                    hasMagnetic = true; 
-                end 
-            end
+        if   AngularMomentum.isAllowedMultipole(symi, mp, symf)
+            push!(channels, MultipoleAmplitude(mp, EmPropertyC(Complex(0.), Complex(0.))))
         end
     end
 
@@ -363,13 +398,16 @@ function  displayPathways(stream::IO, pathways::Array{ResonantInelastic.Pathway,
         multipolesSymmetryList = Tuple{EmMultipole,LevelSymmetry,EmMultipole,EmGauge}[]
         for  exChannel in pathway.excitationChannels
             for  emChannel in pathway.emissionChannels
-                if  exChannel.gauge == Basics.Coulomb  &&  emChannel.gauge == Basics.Babushkin    continue    end
-                if  emChannel.gauge == Basics.Coulomb  &&  exChannel.gauge == Basics.Babushkin    continue    end
-                if      exChannel.gauge == Basics.Coulomb   ||  emChannel.gauge == Basics.Coulomb      gauge = Basics.Coulomb
-                elseif  exChannel.gauge == Basics.Babushkin ||  emChannel.gauge == Basics.Babushkin    gauge = Basics.Babushkin
-                else                                                                                   gauge = Basics.Magnetic
+                ## One row per surviving (multipole, multipole, GAUGE) combination.  Two electric multipoles
+                ## give a Coulomb and a Babushkin row; any magnetic partner gives a single Magnetic row.  The
+                ## mixed Coulomb x Babushkin pairs the flat form skipped simply never arise here.
+                exE = string(exChannel.multipole)[1] == 'E';   emE = string(emChannel.multipole)[1] == 'E'
+                if      exE && emE
+                    push!( multipolesSymmetryList, (exChannel.multipole, msym, emChannel.multipole, Basics.Coulomb) )
+                    push!( multipolesSymmetryList, (exChannel.multipole, msym, emChannel.multipole, Basics.Babushkin) )
+                else
+                    push!( multipolesSymmetryList, (exChannel.multipole, msym, emChannel.multipole, Basics.Magnetic) )
                 end
-                push!( multipolesSymmetryList, (exChannel.multipole, msym, emChannel.multipole, gauge) )
             end
         end
         wa = TableStrings.multipolesSymmetryTupels(105, multipolesSymmetryList)
@@ -392,10 +430,11 @@ end
         returned otherwise.
 """
 function  displayResults(stream::IO, pathways::Array{ResonantInelastic.Pathway,1},  settings::ResonantInelastic.Settings)
-    nx = 163
+    nx = 196
+    #
     println(stream, " ")
-    println(stream, "  RIXS energies, widths and relative F = Re (<f|Mout|m> <m|Min|i>) values" * 
-                    "  (without omega/Gamma-dependent denominator):")
+    println(stream, "  RIXS energies, widths, relative F = Re (<f|Mout|m> <m|Min|i>) values" * 
+                    "  and relative cross sections (without omega/Gamma-dependent denominator):")
     println(stream, " ")
     println(stream, "  ", TableStrings.hLine(nx))
     sa = "    ";   sb = "    "
@@ -405,8 +444,10 @@ function  displayResults(stream::IO, pathways::Array{ResonantInelastic.Pathway,1
     sb = sb * TableStrings.center(50, " omega_in     omega_out    in - out     width(m)  "; na=1)
     sa = sa * TableStrings.center(10, "Multipoles"; na=6)        
     sb = sb * TableStrings.center(10, "in;  out  "; na=5)
-    sa = sa * TableStrings.center(36, " relative |F|^2 "; na=2);   
-    sb = sb * TableStrings.center(36, "  Cou-- Re (<f|Mout|m> <m|Min|i>) --Bab"; na=2)
+    sa = sa * TableStrings.center(36, " relative |F|^2 "; na=3);   
+    sb = sb * TableStrings.center(36, "  Cou-Re (<f|Mout|m> <m|Min|i>)-Bab"; na=3)
+    sa = sa * TableStrings.center(36, " relative CS "; na=2);   
+    sb = sb * TableStrings.center(36, "  Cou-|<f|Mout|m>  <m|Min|i>|^2-Bab"; na=2)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
     #   
     for  pathway in pathways
@@ -425,9 +466,11 @@ function  displayResults(stream::IO, pathways::Array{ResonantInelastic.Pathway,1
         for  ch in pathway.excitationChannels   push!( exMultipoles, ch.multipole)   end;   exMultipoles = unique(exMultipoles)
         for  ch in pathway.emissionChannels     push!( emMultipoles, ch.multipole)   end;   emMultipoles = unique(emMultipoles)
         mpString = TableStrings.multipoleList(exMultipoles) * ";  " * TableStrings.multipoleList(emMultipoles) * "               "
-        sa = sa * TableStrings.flushleft(18, mpString[1:18];  na=1)
-        sa = sa * @sprintf("%.6e", pathway.productF.Coulomb)     * "          "
-        sa = sa * @sprintf("%.6e", pathway.productF.Babushkin)   * "  "
+        sa = sa * TableStrings.flushleft(18, mpString[1:18];  na=0)
+        sa = sa * @sprintf("% 2.6e", pathway.productF.Coulomb)     * "       "
+        sa = sa * @sprintf("% 2.6e", pathway.productF.Babushkin)   * "      "
+        sa = sa * @sprintf("% 2.6e", pathway.relativeCS.Coulomb)   * "       "
+        sa = sa * @sprintf("% 2.6e", pathway.relativeCS.Babushkin) * " "
         println(stream, sa)
     end
     println(stream, "  ", TableStrings.hLine(nx))

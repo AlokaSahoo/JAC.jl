@@ -51,19 +51,26 @@ end
                     
     ... constructor for modifying the given PhotoExcitation.Settings by 'overwriting' the previously selected parameters.
 """
-function Settings(set::BeamPhotoExcitation.Settings;    
-    beamType::Union{Missing,Array{EmMultipole,1}}=missing,          observable::Union{Missing,Array{UseGauge,1}}=missing,  
-    multipoles::Union{Missing,Array{EmMultipole,1}}=missing,        gauges::Union{Missing,Array{UseGauge,1}}=missing,  
-    printBefore::Union{Missing,Bool}=missing,                       lineSelection::Union{Missing,LineSelection}=missing, 
-    photonEnergyShift::Union{Missing,Float64}=missing)  
+function Settings(set::BeamPhotoExcitation.Settings;
+    beamType::Union{Nothing,Beam.AbstractBeamType}=nothing,         observable::Union{Nothing,Beam.AbstractObservable}=nothing,
+    multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,        gauges::Union{Nothing,Array{UseGauge,1}}=nothing,
+    printBefore::Union{Nothing,Bool}=nothing,                       lineSelection::Union{Nothing,LineSelection}=nothing,
+    photonEnergyShift::Union{Nothing,Float64}=nothing)
 
-    if  beamType            == missing   beamTypex            = set.beamType                else  beamTypex            = beamType              end 
-    if  observable          == missing   observablex          = set.observable              else  observablex          = observable            end 
-    if  multipoles          == missing   multipolesx          = set.multipoles              else  multipolesx          = multipoles            end 
-    if  gauges              == missing   gaugesx              = set.gauges                  else  gaugesx              = gauges                end 
-    if  printBefore         == missing   printBeforex         = set.printBefore             else  printBeforex         = printBefore           end 
-    if  lineSelection       == missing   lineSelectionx       = set.lineSelection           else  lineSelectionx       = lineSelection         end 
-    if  photonEnergyShift   == missing   photonEnergyShiftx   = set.photonEnergyShift       else  photonEnergyShiftx   = photonEnergyShift     end 
+    ## REWRITTEN 09-Aug-2026. This copy-constructor raised on EVERY call, and two of its keywords could not have
+    ## been used even so. It tested `x == missing`, which in Julia evaluates to `missing` rather than to a Bool,
+    ## so the `if` died with "non-boolean (Missing) used in boolean context" whatever the caller passed. And the
+    ## declared types of the first two keywords were copied from the next two: beamType was typed
+    ## Array{EmMultipole,1} and observable Array{UseGauge,1}, where the struct holds Beam.AbstractBeamType and
+    ## Beam.AbstractObservable. Now in the house pattern -- Union{Nothing,T}=nothing with isnothing() guards --
+    ## which is also what the reflective copy-constructor test in TestFrames expects.
+    if  isnothing(beamType)              beamTypex            = set.beamType                else  beamTypex            = beamType              end
+    if  isnothing(observable)            observablex          = set.observable              else  observablex          = observable            end
+    if  isnothing(multipoles)            multipolesx          = set.multipoles              else  multipolesx          = multipoles            end
+    if  isnothing(gauges)                gaugesx              = set.gauges                  else  gaugesx              = gauges                end
+    if  isnothing(printBefore)           printBeforex         = set.printBefore             else  printBeforex         = printBefore           end
+    if  isnothing(lineSelection)         lineSelectionx       = set.lineSelection           else  lineSelectionx       = lineSelection         end
+    if  isnothing(photonEnergyShift)     photonEnergyShiftx   = set.photonEnergyShift       else  photonEnergyShiftx   = photonEnergyShift     end
     
     Settings( beamTypex, observablex, multipolesx, gaugesx, printBeforex, lineSelectionx, photonEnergyShiftx)
 end
@@ -132,9 +139,14 @@ end
     ... to compute the absorption amplitude for ...
 """
 function  absorptionAmplitude()
-    wa = ComplexF64(1.)
-    println("BeamPhotoExcitation.absorptionAmplitude() ... not yet implemented.")
-    return( wa )
+    # NOT IMPLEMENTED, and it REFUSES rather than returning a number.  Until 29-Aug-2026 it printed one line and
+    # returned ComplexF64(1.) -- an amplitude of exactly one, indistinguishable from a computed result to any
+    # caller that did not watch the terminal.  That is the same defect class as FormFactor.amplitude returning
+    # 4.0 + 5.0im, fixed on 28-Aug.
+    error("\n\nBeamPhotoExcitation.absorptionAmplitude() is NOT IMPLEMENTED and returns no number.\n"          *
+          "It formerly returned the constant ComplexF64(1.) behind a printed warning.\n\n"                      *
+          "    It has no caller today, so nothing is lost by its refusing; it is kept because the amplitude is\n" *
+          "    the piece this module still needs.\n")
 end
 
 
@@ -146,8 +158,15 @@ end
 """
 function  computeOutcome(observable::Beam.DominantMultipoles, outcome::BeamPhotoExcitation.Outcome, nm::Nuclear.Model, 
                             grid::Radial.Grid, settings::BeamPhotoExcitation.Settings)
-    println("BeamPhotoExcitation.computeOutcome(), observable = $(observable) ... not yet implemented.")
-    return(outcome)
+    # NOT IMPLEMENTED, and it REFUSES rather than handing back its own input.  Until 29-Aug-2026 it printed one
+    # line and returned `outcome` UNTOUCHED, which computeOutcomes then passed to displayOutcome -- so a full,
+    # well-formatted table of the pre-computation values was printed as though it were a result.  That is the
+    # defect class fixed in ReducedDensityMatrix on 28-Aug, where a zero matrix was tabulated as "orbital
+    # interactions I_pq".
+    error("\n\nBeamPhotoExcitation.computeOutcome() is NOT IMPLEMENTED for observable = $(observable),\n"      *
+          "and it is the ONLY method of computeOutcome, so no observable of this module can be computed yet.\n" *
+          "It formerly returned its own argument unchanged, which was then displayed as a result.\n\n"          *
+          "    There is nothing to set differently; the module needs its amplitude written first.\n")
 end
 
 
@@ -179,13 +198,17 @@ function  computeOutcomes(finalMultiplet::Multiplet, initialMultiplet::Multiplet
         newOutcome = BeamPhotoExcitation.computeOutcome(outcome.observable, outcome, nm, grid, settings) 
         push!( newOutcomes, newOutcome)
     end
-    # Print all results to screen
-    for  outcome in outcomes  BeamPhotoExcitation.displayOutcome(stdout, outcome.observable, outcome, settings)    end
+    # Print all results to screen.  newOutcomes, NOT outcomes: until 29-Aug-2026 this loop and the return below
+    # both used `outcomes`, the list as it stood BEFORE computeOutcome was called, so whatever computeOutcome
+    # produced was built and then discarded, and the pre-computation values were displayed and returned in its
+    # place.  Found while making computeOutcome refuse; it cannot bite today, since that refusal now stops the
+    # run before this point, but it would have bitten the moment the module was implemented.
+    for  outcome in newOutcomes  BeamPhotoExcitation.displayOutcome(stdout, outcome.observable, outcome, settings)    end
     if  printSummary 
-        for  outcome in outcomes  BeamPhotoExcitation.displayOutcome(iostream, outcome.observable, outcome, settings)    end
+        for  outcome in newOutcomes  BeamPhotoExcitation.displayOutcome(iostream, outcome.observable, outcome, settings)  end
     end
     #
-    if    output    return( outcomes )
+    if    output    return( newOutcomes )
     else            return( nothing )
     end
 end

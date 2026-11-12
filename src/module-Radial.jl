@@ -6,105 +6,184 @@
 module Radial
 
 
-using  QuadGK, Printf, JenaAtomicCalculator, ..Basics 
+using  QuadGK, Printf, FastGaussQuadrature, JenaAtomicCalculator, ..Basics
 
 export Grid, Potential, Orbital, SingleElecSpectrum
 
 
-"""
-`abstract type Radial.AbstractMesh` 
-    ... defines an abstract mesh type for the use of the radial mesh
-    
-    + struct MeshNone       ... if an empty instance of Radial.Grid() need to be used.
-    + struct MeshGrasp      ... to use a GRASP-like grid with Newton-Cortes integration rules.
-    + struct MeshGL         ... to use a Gauss-Legendre type grid where the mesh points between the break points of the t-grid
-                                are chosen to support a Gauss-Legendre integration in this potential.
-"""
-abstract type  AbstractMesh                     end
-struct   MeshNone   <:  Radial.AbstractMesh     end
-struct   MeshGrasp  <:  Radial.AbstractMesh     end
-struct   MeshGL     <:  Radial.AbstractMesh     end
+## Radial.AbstractMesh, with MeshNone, MeshGrasp and MeshGL, was REMOVED on 12-Aug-2026.
+##
+## Nothing in JAC could ever produce anything but a Gauss-Legendre mesh: meshType was assigned in exactly one
+## place, Radial.Grid(exponential::Bool), always to MeshGL(), and no file in src/, examples/ or test/ ever
+## passed the meshType= keyword.  All 26 MeshGrasp comparisons were therefore permanently false, and what
+## hung off them was substantial: 25 dead branches in module-RadialIntegrals.jl, the grid fields rp and rpor
+## (empty arrays on every grid that has ever existed), Math.integrateFit/integrateFitTransform, and the
+## Basics.integrate(::NewtonCotes/::SimpsonRule/::TrapezRule) family with its four exported type names.
+##
+## That region had been unreachable long enough for a one-character typo to sit undetected in its central
+## routine -- Math.derivative read `JenaAtomicCalculatorDefaults.weights`, so its interior-point branch, the
+## common case, raised UndefVarError.  All of it is now gone, and Radial.Grid describes one thing: a
+## Gauss-Legendre mesh laid over B-spline break points, which is what every JAC calculation has actually used.
 
 
 """
-`struct  Radial.Grid`  ... defines a type for the radial grid which contains all information about the grid parameters, the genration 
-                            of the B-spline basis as well as for performing radial integrations.
-
-    ** Physical grid parameter **
-    + rnt        ::Float64           ... smalles grid point > 0.
-    + h          ::Float64           ... stepsize in the construction of the exponential grid.
-    + hp         ::Float64           ... asymptotic stepsize of the log-lin grid.
-    + NoPoints   ::Int64             ... No. of grid points so that r[NoPoints] coincides also 
-                                            with the largest break point of the B-spline knot.
-    ** B-spline grid parameters and break points **
-    + tL         ::Array{Float64,1}  ... radial break points for the B-splines of the large c.
-    + tS         ::Array{Float64,1}  ... radial break points for the B-splines of the small c.
-    + ntL        ::Int64             ... number of break points in the t-grid of the large c.
-    + ntS        ::Int64             ... number of break points in the t-grid of the small c.
-    + orderL     ::Int64             ... B-spline order of large components.
-    + orderS     ::Int64             ... B-spline order of small components.
-    + nsL        ::Int64             ... number of B-splines for large components.
-    + nsS        ::Int64             ... number of B-splines for small components.
-    + orderGL    ::Int64             
-        ... order of the Gauss-Lengedre integration if mesh == Radial.MeshGL(); this order also determines
-            the (number of) break points by taking the orderGL-th point from the physical grid points.
-    ** Radial mesh points **
-    + meshType   ::Radial.AbstractMesh
-    + r          ::Array{Float64,1}  ... radial grid points
-    + rp         ::Array{Float64,1}  ... derivative of the radial grid at the grid points
-    + rpor       ::Array{Float64,1}  ... rp over r
-    + wr         ::Array{Float64,1}  
-        ... integration weights for all grid points, for instance, GL weights.
+`abstract type Radial.AbstractGridGaussLegendreScheme`
+    ... labels the kind of Gauss-Legendre grid to be constructed; it is used for dispatch and to avoid
+        string comparisons.
+    Concrete subtypes:
+    + GridGaussLegendreQED    ... generate a GL grid for QED computations over the interval [1, infinity).
+    + GridGaussLegendreFinite ... generate a GL grid over a finite interval [tmin, tmax].
 """
-struct  Grid
+abstract type  AbstractGridGaussLegendreScheme                                              end
+struct         GridGaussLegendreQED     <:  AbstractGridGaussLegendreScheme                 end
+struct         GridGaussLegendreFinite  <:  AbstractGridGaussLegendreScheme                 end
+
+
+
+"""
+`struct  Radial.GridParameters`
+    ... the ANALYTIC DEFINITION of the radial grid: the handful of numbers a user chooses, from which
+        everything else follows.
+
+    + rnt        ::Float64  ... smallest grid point > 0.
+    + h          ::Float64  ... stepsize in the construction of the exponential grid.
+    + hp         ::Float64  ... asymptotic stepsize of the log-lin grid; hp = 0 gives a purely exponential one.
+    + NoPoints   ::Int64    ... No. of points of the physical grid, chosen so that its last point coincides
+                                with the largest B-spline break point.  NOTE that this counts the PHYSICAL
+                                grid of the definition, which is a different quantity from the number of
+                                mesh points length(mesh.r), even where the two happen to coincide.
+    + orderGL    ::Int64    ... order of the Gauss-Legendre integration; it also fixes the break points, by
+                                taking every orderGL-th point of the physical grid.
+"""
+struct  GridParameters
     rnt          ::Float64
     h            ::Float64
     hp           ::Float64
     NoPoints     ::Int64
-    #
+    orderGL      ::Int64
+end
+
+
+"""
+`struct  Radial.KnotSequence`
+    ... the B-SPLINE BREAK POINTS, separately for the large and the small component.
+
+    + tL         ::Array{Float64,1}  ... radial break points for the B-splines of the large component.
+    + tS         ::Array{Float64,1}  ... radial break points for the B-splines of the small component.
+    + orderL     ::Int64             ... B-spline order of the large components.
+    + orderS     ::Int64             ... B-spline order of the small components.
+
+        The counts ntL, ntS, nsL and nsS are NOT stored: they are functions of the above and are provided as
+        properties of Radial.Grid, so that they cannot fall out of step with the knots they describe.
+"""
+struct  KnotSequence
     tL           ::Array{Float64,1}
     tS           ::Array{Float64,1}
-    ntL          ::Int64 
-    ntS          ::Int64 
     orderL       ::Int64
     orderS       ::Int64
-    nsL          ::Int64
-    nsS          ::Int64
-    orderGL      ::Int64
-    #
-    meshType     ::Radial.AbstractMesh
+end
+
+
+"""
+`struct  Radial.RadialMesh`
+    ... the MESH on which radial functions are tabulated and integrated: a composite Gauss-Legendre rule
+        laid over the intervals between the break points of the knot sequence.
+
+    + r          ::Array{Float64,1}  ... mesh points, the Gauss-Legendre nodes of each interval of tL.
+    + wr         ::Array{Float64,1}  ... the Gauss-Legendre weights belonging to r.
+"""
+struct  RadialMesh
     r            ::Array{Float64,1}
-    rp           ::Array{Float64,1}
-    rpor         ::Array{Float64,1}
     wr           ::Array{Float64,1}
 end
 
 
 """
-`Radial.Grid()` ... constructor to define an 'empty' grid.  
+`struct  Radial.Grid`
+    ... the radial grid: its analytic definition, the B-spline break points that follow from it, and the
+        mesh on which radial integrations are performed.
+
+    + parameters ::Radial.GridParameters  ... what was asked for.
+    + knots      ::Radial.KnotSequence    ... the B-spline break points.
+    + mesh       ::Radial.RadialMesh      ... the Gauss-Legendre mesh points and weights.
+
+        Until 12-Aug-2026 these seventeen numbers and arrays sat side by side in one flat struct, so that
+        nothing distinguished the definition from what was derived from it, and four of the fields (ntL, ntS,
+        nsL, nsS) duplicated information already present in the knots.
+
+        FOR COMPATIBILITY, AND BECAUSE THEY READ WELL, all the former field names remain available directly
+        on the Grid: grid.r, grid.wr, grid.rnt, grid.tL, grid.nsL and the rest all work exactly as before
+        (see Base.getproperty below).  ntL, ntS, nsL and nsS are now COMPUTED from the knot sequence rather
+        than stored, which is the one behavioural difference: they can no longer be stale.
+"""
+struct  Grid
+    parameters   ::GridParameters
+    knots        ::KnotSequence
+    mesh         ::RadialMesh
+end
+
+
+"""
+`Base.getproperty(grid::Radial.Grid, s::Symbol)`
+    ... forwards the field names of the former flat Radial.Grid to the three structs that now hold them, and
+        computes ntL, ntS, nsL and nsS from the knot sequence.  About 700 accesses across JAC read these
+        names; forwarding them is deliberate rather than transitional, since `grid.r` reads better than
+        `grid.mesh.r` at the point of use.  A literal `grid.r` is constant-folded and costs nothing.
+"""
+function Base.getproperty(grid::Radial.Grid, s::Symbol)
+    ## the analytic definition
+    s === :rnt       &&  return( getfield(grid, :parameters).rnt      )
+    s === :h         &&  return( getfield(grid, :parameters).h        )
+    s === :hp        &&  return( getfield(grid, :parameters).hp       )
+    s === :NoPoints  &&  return( getfield(grid, :parameters).NoPoints )
+    s === :orderGL   &&  return( getfield(grid, :parameters).orderGL  )
+    ## the knot sequence
+    s === :tL        &&  return( getfield(grid, :knots).tL      )
+    s === :tS        &&  return( getfield(grid, :knots).tS      )
+    s === :orderL    &&  return( getfield(grid, :knots).orderL  )
+    s === :orderS    &&  return( getfield(grid, :knots).orderS  )
+    ## ... and the four counts that used to be stored alongside it
+    s === :ntL       &&  return( length(getfield(grid, :knots).tL) )
+    s === :ntS       &&  return( length(getfield(grid, :knots).tS) )
+    s === :nsL       &&  return( length(getfield(grid, :knots).tL) - getfield(grid, :knots).orderL )
+    s === :nsS       &&  return( length(getfield(grid, :knots).tS) - getfield(grid, :knots).orderS )
+    ## the mesh
+    s === :r         &&  return( getfield(grid, :mesh).r  )
+    s === :wr        &&  return( getfield(grid, :mesh).wr )
+    return( getfield(grid, s) )
+end
+
+
+# `Base.propertynames(grid::Radial.Grid)`  ... so that the forwarded names are visible to the REPL and to tab completion.
+Base.propertynames(grid::Radial.Grid) =
+    (:parameters, :knots, :mesh, :rnt, :h, :hp, :NoPoints, :orderGL, :tL, :tS, :orderL, :orderS,
+     :ntL, :ntS, :nsL, :nsS, :r, :wr)
+
+
+"""
+`Radial.Grid()` ... constructor to define an 'empty' grid.
 """
 function Grid()
-    Radial.Grid(0., 0., 0., 0,   Float64[], Float64[], 0, 0, 0, 0, 0, 0, 0,   Radial.MeshNone(), Float64[], Float64[], Float64[], Float64[] )
+    Radial.Grid( GridParameters(0., 0., 0., 0, 0), KnotSequence(Float64[], Float64[], 0, 0),
+                 RadialMesh(Float64[], Float64[]) )
 end
 
 
 """
 `Radial.Grid(exponential::Bool; printout::Bool=false)` 
-    ... constructor to define either a standard 'exponential' mesh (true) or a 'log-lin' mesh (false). 
-        The standard mesh type is Radial.MeshGL().
+    ... constructor to define either a standard 'exponential' mesh (true) or a 'log-lin' mesh (false).
 """
 function Grid(exponential::Bool; printout::Bool=false)
-    # The standard mesh type is Radial.MeshGL() with some proper parameters
-    nth = orderL = 7;    orderS = 8;   orderGL = 7;    meshType = MeshGL()
+    orderL = 7;    orderS = 8;   orderGL = 7
     
     if  exponential
         NoPoints = 392;    NoPoints = NoPoints - rem(NoPoints,orderGL)
-        grid = Radial.Grid(2.0e-6, 5.0e-2,     0., NoPoints,   Float64[], Float64[], 0, 0, orderL, orderS, 0, 0, orderGL, meshType,
-                            Float64[], Float64[], Float64[], Float64[] )
+        grid = Radial.Grid( GridParameters(2.0e-6, 5.0e-2,     0., NoPoints, orderGL),
+                            KnotSequence(Float64[], Float64[], orderL, orderS), RadialMesh(Float64[], Float64[]) )
     else
         NoPoints = 600;    NoPoints = NoPoints - rem(NoPoints,orderGL)
-        grid = Radial.Grid(2.0e-6, 5.0e-2, 2.0e-2, NoPoints,   Float64[], Float64[], 0, 0, orderL, orderS, 0, 0, orderGL, meshType,
-                            Float64[], Float64[], Float64[], Float64[] )
+        grid = Radial.Grid( GridParameters(2.0e-6, 5.0e-2, 2.0e-2, NoPoints, orderGL),
+                            KnotSequence(Float64[], Float64[], orderL, orderS), RadialMesh(Float64[], Float64[]) )
     end
     return( Radial.determineGrid(grid, printout=printout) )
 end
@@ -113,32 +192,35 @@ end
 """
 `Radial.Grid(gr::Radial.Grid;`
 
-        rnt=..,     h=..,       hp=..,      rbox=..,    orderL=..,  orderS=..,  orderGL=..,    
-        meshType..,  printout=..)
+        rnt=..,     h=..,       hp=..,      rbox=..,    orderL=..,  orderS=..,  orderGL=..,  printout=..)
     ... constructor for modifying the given Radial.Grid by 'overwriting' the previously selected parameters.
+
+        The keyword nth= was removed on 12-Aug-2026.  It was accepted and then silently dropped: the spacing
+        of the B-spline break points is set by orderGL in Radial.determineGrid, and Grid(gr; nth=3) left the
+        grid unchanged.  Nothing in src/, examples/ or test/ ever passed it.  A second knob for the same
+        quantity is not restored here; use orderGL.
 """
-function Grid(gr::Radial.Grid;    
-    rnt::Union{Nothing,Float64}=nothing,        h::Union{Nothing,Float64}=nothing,      hp::Union{Nothing,Float64}=nothing, 
-    rbox::Union{Nothing,Float64}=nothing,       nth::Union{Nothing,Int64}=nothing,      orderL::Union{Nothing,Int64}=nothing,
-    orderS::Union{Nothing,Int64}=nothing,       orderGL::Union{Nothing,Int64}=nothing,  meshType::Union{Nothing,Radial.AbstractMesh}=nothing, 
-    printout::Bool=false)
+function Grid(gr::Radial.Grid;
+    rnt::Union{Nothing,Float64}=nothing,        h::Union{Nothing,Float64}=nothing,      hp::Union{Nothing,Float64}=nothing,
+    rbox::Union{Nothing,Float64}=nothing,       orderL::Union{Nothing,Int64}=nothing,
+    orderS::Union{Nothing,Int64}=nothing,       orderGL::Union{Nothing,Int64}=nothing,  printout::Bool=false)
     
-    if  rnt      == nothing   rntx      = gr.rnt        else    rntx      = rnt       end 
-    if  h        == nothing   hx        = gr.h          else    hx        = h         end 
-    if  hp       == nothing   hpx       = gr.hp         else    hpx       = hp        end 
-    if  rbox     == nothing   rboxx     = nothing       else    rboxx     = rbox      end 
-    if  orderL   == nothing   orderLx   = gr.orderL     else    orderLx   = orderL    end 
-    if  orderS   == nothing   orderSx   = gr.orderS     else    orderSx   = orderS    end 
-    if  orderGL  == nothing   orderGLx  = gr.orderGL    else    orderGLx  = orderGL   end 
-    if  meshType == nothing   meshTypex = gr.meshType   else    meshTypex = meshType  end 
+    if  isnothing(rnt)        rntx      = gr.rnt        else    rntx      = rnt       end 
+    if  isnothing(h)          hx        = gr.h          else    hx        = h         end 
+    if  isnothing(hp)         hpx       = gr.hp         else    hpx       = hp        end 
+    if  isnothing(rbox)       rboxx     = nothing       else    rboxx     = rbox      end 
+    if  isnothing(orderL)     orderLx   = gr.orderL     else    orderLx   = orderL    end 
+    if  isnothing(orderS)     orderSx   = gr.orderS     else    orderSx   = orderS    end 
+    if  isnothing(orderGL)    orderGLx  = gr.orderGL    else    orderGLx  = orderGL   end 
     
-    if      rboxx == nothing    NoPointsx = gr.NoPoints - rem(gr.NoPoints, orderGLx)
+    if      isnothing(rboxx)    NoPointsx = gr.NoPoints - rem(gr.NoPoints, orderGLx)
     elseif  rboxx  > 0.         NoPointsx = Radial.determineNoPoints(rntx, hx, hpx, rboxx, orderGLx)
-    else    error("stop a")
+    else    error("Radial.Grid(): rbox = $rboxx must be positive; it is the size of the radial box in " *
+                 "atomic units.  Omit the keyword to keep the number of points of the given grid.")
     end
     
-    grid = Radial.Grid(rntx, hx, hpx, NoPointsx, Float64[], Float64[], 0, 0, orderLx, orderSx, 0, 0, orderGLx, meshTypex,
-                        Float64[], Float64[], Float64[], Float64[] )
+    grid = Radial.Grid( GridParameters(rntx, hx, hpx, NoPointsx, orderGLx),
+                        KnotSequence(Float64[], Float64[], orderLx, orderSx), RadialMesh(Float64[], Float64[]) )
     return( Radial.determineGrid(grid, printout=printout) )
 end
 
@@ -148,12 +230,10 @@ function Base.show(io::IO, grid::Radial.Grid)
 
     sa = Base.string(grid::Radial.Grid);    print(io, sa * "\n")
 
-    nr = grid.NoPoints;    ntL = length(grid.tL);    ntS = length(grid.tS);    if  nr < 6   return( nothing )    end
-    print(io, "r:    ", grid.r[1:3],    "  ...  ", grid.r[nr-2:nr],         "\n") 
-    if  grid.meshType == Radial.MeshGrasp()
-        print(io, "rp:   ", grid.rp[1:3],   "  ...  ", grid.rp[nr-2:nr],    "\n") 
-        print(io, "rpor: ", grid.rpor[1:3], "  ...  ", grid.rpor[nr-2:nr],  "\n") 
-    end
+    ## Indexed by the length of the MESH, not by NoPoints, which counts the physical grid of the definition
+    ## and is a different quantity even where the two happen to coincide.
+    nr = length(grid.r);   ntS = length(grid.tS);    if  nr < 6   return( nothing )    end
+    print(io, "r:    ", grid.r[1:3],    "  ...  ", grid.r[nr-2:nr],         "\n")
     print(io, "wr:   ", grid.wr[1:3],   "  ...  ", grid.wr[nr-2:nr],        "\n") 
     ## print(io, "tL:   ", grid.tL[1:3],   "  ...  ", grid.tL[ntL-2:ntL],   "\n") 
     print(io, "tS:   ", grid.tS[1:3],   "  ...  ", grid.tS[ntS-2:ntS]           ) 
@@ -167,7 +247,7 @@ function Base.string(grid::Radial.Grid)
     else
         sa = "Radial grid:  rnt = $(grid.rnt),  h = $(grid.h),  hp = $(grid.hp),  NoPoints = $(grid.NoPoints),  "
         sa = sa * "ntL = $(grid.ntL),  ntS = $(grid.ntS), "
-        sa = sa * "orderL = $(grid.orderL),  orderS = $(grid.orderS),  nsL = $(grid.nsL),  nsS = $(grid.nsS),  mesh = $(grid.meshType), ...  "
+        sa = sa * "orderL = $(grid.orderL),  orderS = $(grid.orderS),  nsL = $(grid.nsL),  nsS = $(grid.nsS), ...  "
     end 
 end
 
@@ -178,25 +258,30 @@ end
 """
 function determineGrid(grid::Radial.Grid; printout::Bool=false) 
     
-    # Read the meshType and general parameters from the given grid
-    meshType = grid.meshType
+    # Read the general parameters from the given grid
     rnt    = grid.rnt;       h      = grid.h;         hp      = grid.hp;        NoPoints = grid.NoPoints
     nth    = grid.orderGL;   orderL = grid.orderL;    orderS  = grid.orderS;    orderGL  = grid.orderGL
-    nr     = grid.NoPoints;  r      = zeros(nr);      rp      = zeros(nr);      rpor     = zeros(nr);      nsL = 0;   nsS = 0
+    ## rphys is the PHYSICAL grid of the analytic definition below.  It exists only to place the B-spline
+    ## break points; the mesh that the returned Grid carries is the Gauss-Legendre one built further down.
+    ## Its derivatives rp and rpor used to be computed here and stored in the Grid, where they were then
+    ## overwritten with empty arrays for every grid JAC has ever built (12-Aug-2026).
+    nr     = grid.NoPoints;  rphys  = zeros(nr);      nsL = 0;   nsS = 0
         
     # Ensure that the largest grid points is always consistent with the largest break point of the B-splines
-    if  NoPoints != NoPoints - rem(NoPoints,orderGL)    error("stop a")     end
+    if  NoPoints != NoPoints - rem(NoPoints,orderGL)
+        error("Radial.determineGrid(): NoPoints = $NoPoints is not a multiple of orderGL = $orderGL, so the " *
+              "last grid point cannot coincide with the largest B-spline break point.  Use " *
+              "NoPoints = $(NoPoints - rem(NoPoints,orderGL)) instead.")
+    end
 
     # Now define the physical grid due to the given parameters: either an exponential or exponential-linear grid
     if  hp == 0.
-        r[1] = rnt;   rp[1] = rnt;   eph = exp(h);    ett = 1.0
-        
+        rphys[1] = rnt;   eph = exp(h);    ett = 1.0
+
         for  i  in 2:nr
-            ett     = eph * ett
-            ettm1   = ett - 1.0
-            r[i]    = rnt * ettm1
-            rp[i]   = rnt * ett
-            rpor[i] = ett/ettm1
+            ett      = eph * ett
+            ettm1    = ett - 1.0
+            rphys[i] = rnt * ettm1
         end 
 
     elseif  hp != 0.
@@ -212,61 +297,62 @@ function determineGrid(grid::Radial.Grid; printout::Bool=false)
             return( 1. / (r + rnt) + h/hp )
         end
     
-        r[1]    = 0.
-        rp[1]   = rprime(0.) 
-        rpor[1] = 0.
-    
+        rphys[1] = 0.
+
         rc = 0.
         rn = 0.
-    
+
         for i = 2:nr
             rn = rn + rnt
-            while ((abs((rc - rn)/rn) > 100 * eps(Float64))) 
+            while ((abs((rc - rn)/rn) > 100 * eps(Float64)))
                 rc = rn
                 rn = rc - f(rc, i) / fprime(rc)
             end
-            r[i]    = rn
-            rp[i]   = rprime(rn)
-            rpor[i] = rp[i] / r[i]
+            rphys[i] = rn
         end
     else
-        error("stop a")
+        ## Reachable only for hp = NaN, since every other Float64 satisfies one of the two branches above.
+        error("Radial.determineGrid(): hp = $hp is not a usable asymptotic step size; use hp = 0 for a " *
+              "purely exponential grid or hp > 0 for a log-linear one.")
     end
     
     # Define the radial break points and the number of B-splines
     ntL = orderL;    ntS = orderS;    tL = zeros( orderL );    tS = zeros( orderS )
     for  i = nth:nth:NoPoints
-        ntL = ntL + 1;    push!( tL, r[i]);    ntS = ntS + 1;    push!( tS, r[i])
+        ntL = ntL + 1;    push!( tL, rphys[i]);    ntS = ntS + 1;    push!( tS, rphys[i])
     end
     for   i = ntL+1:ntL+orderL-1   push!( tL, tL[ntL] )   end;    nsL = ntL - 1;   ntL = length(tL)
     for   i = ntS+1:ntS+orderS-1   push!( tS, tS[ntS] )   end;    nsS = ntS - 1;   ntS = length(tS)
     
-    # Define the radial grid due to the definition
-    wr = zeros(nr)
-    if  meshType == Radial.MeshGL()
-        nr = 0;   r = Float64[];   rp = Float64[];   rpor = Float64[];   wr = Float64[];    rlow = 0.
-        wax = gauss(orderGL);   ra = wax[1];   wa = wax[2] 
-        for  i = 1:length(tL)
-            rstep = tL[i] - rlow
-            if  rstep > 0
-                bma = tL[i] - rlow;   bpa = tL[i] + rlow 
-                for  j = 1:orderGL
-                    nr = nr + 1;    push!(r, ra[j] * bma/2. + bpa/2. );    push!(wr, wa[j] * bma/2. )
-                end
+    # Lay a Gauss-Legendre mesh over each interval between two break points; this is the mesh the Grid carries
+    nr = 0;   r = Float64[];   wr = Float64[];    rlow = 0.
+    wax = gauss(orderGL);   ra = wax[1];   wa = wax[2]
+    for  i = 1:length(tL)
+        rstep = tL[i] - rlow
+        if  rstep > 0
+            bma = tL[i] - rlow;   bpa = tL[i] + rlow
+            for  j = 1:orderGL
+                nr = nr + 1;    push!(r, ra[j] * bma/2. + bpa/2. );    push!(wr, wa[j] * bma/2. )
             end
-            rlow = tL[i]
         end
-        #
-        if  printout
-            println("Define a radial grid of type $meshType with $nr grid points")
-            println(" [rnt=" * @sprintf("%.3e",rnt) * ", h=" * @sprintf("%.3e",h) * 
-                    ", hp=" * @sprintf("%.3e",hp) * ", NoPoints=$NoPoints, r_max=" * @sprintf("%.3e",r[nr]) * ";")
-            println("  B-splines with break points at every $(nth)th point, nsL=$nsL, nsS=$nsS, orderL=$orderL, orderS=$orderS, orderGL=$orderGL,  " *
-                    "ntL=$ntL, ntS=$ntS] ")
-        end
+        rlow = tL[i]
+    end
+    #
+    if  printout
+        println("Define a radial grid with $nr Gauss-Legendre mesh points")
+        println(" [rnt=" * @sprintf("%.3e",rnt) * ", h=" * @sprintf("%.3e",h) *
+                ", hp=" * @sprintf("%.3e",hp) * ", NoPoints=$NoPoints, r_max=" * @sprintf("%.3e",r[nr]) * ";")
+        println("  B-splines with break points at every $(nth)th point, nsL=$nsL, nsS=$nsS, orderL=$orderL, orderS=$orderS, orderGL=$orderGL,  " *
+                "ntL=$ntL, ntS=$ntS] ")
     end
 
-    Grid(rnt, h, hp, NoPoints,  tL, tS, ntL, ntS, orderL, orderS, nsL, nsS, orderGL,   meshType, r, rp, rpor, wr)
+    ## ntL, ntS, nsL and nsS are no longer stored; they follow from the knots.  They are still computed
+    ## above because the printout below reports them, and they are asserted against the properties that
+    ## replace them, so that the two definitions cannot drift apart unnoticed.
+    newGrid = Grid( GridParameters(rnt, h, hp, NoPoints, orderGL), KnotSequence(tL, tS, orderL, orderS),
+                    RadialMesh(r, wr) )
+    @assert newGrid.ntL == ntL && newGrid.ntS == ntS && newGrid.nsL == nsL && newGrid.nsS == nsS
+    return( newGrid )
 end
 
 
@@ -291,16 +377,15 @@ end
     ... specified a default version of a Gauss-Legendre grid with 6 points in the interval [0.,1.].
 """
 function GridGL()
-    GridGL("Finite", 0., 1., 6; printout=false)
+    GridGL(GridGaussLegendreFinite(), 0., 1., 6; printout=false)
 end
 
 
 """
-`Radial.GridGL("QED", orderGL::Int64; printout::Bool=false)`  
-    ... constructor to define Gauss-Legendre grid for the typical QED computation in the interval [1.0, infinity].
+`Radial.GridGL(::GridGaussLegendreQED, orderGL::Int64; printout::Bool=false)`
+    ... constructor to define Gauss-Legendre grid for the typical QED computation in the interval [1.0, infinity).
 """
-function GridGL(sa::String, orderGL::Int64; printout::Bool=false)
-    !(sa == "QED")  && error("Unrecognized keystring; sa = $sa")
+function GridGL(::GridGaussLegendreQED, orderGL::Int64; printout::Bool=false)
     txlow = 1.;    t = Float64[];    wt = Float64[];    nt = 0
     for i = 1:100000
         # Define the exponential increase (1.5) and the maximum size (infinity=150.)
@@ -320,11 +405,10 @@ end
 
 
 """
-`Radial.GridGL("Finite", tmin::Float64, tmax::Float64, orderGL::Int64; printout::Bool=false)`  
-    ... constructor to define Gauss-Legendre grid in the interval [tmin, tmax].
+`Radial.GridGL(::GridGaussLegendreFinite, tmin::Float64, tmax::Float64, orderGL::Int64; printout::Bool=false)`
+    ... constructor to define Gauss-Legendre grid in the finite interval [tmin, tmax].
 """
-function GridGL(sa::String, tmin::Float64, tmax::Float64, orderGL::Int64; printout::Bool=false)
-    !(sa == "Finite")  && error("Unrecognized keystring; sa = $sa")
+function GridGL(::GridGaussLegendreFinite, tmin::Float64, tmax::Float64, orderGL::Int64; printout::Bool=false)
     t = Float64[];    wt = Float64[]
     
     wax = QuadGK.gauss(orderGL);    t = wax[1];     wt = wax[2]        
@@ -370,7 +454,11 @@ end
 function GridGH(orderGH::Int64; printout::Bool=false)
     t = Float64[];    wt = Float64[]
     
-    wax = gausshermite(orderGH) #this function is included in the package FastGaussQuadrature
+    ## Qualified, and FastGaussQuadrature added to the module's `using` list (12-Aug-2026).  The call read
+    ## `gausshermite(orderGH)` with the package named only in a comment, so this constructor raised an
+    ## UndefVarError every time it was reached -- it cannot ever have worked.  Three call sites in
+    ## module-Pulse.jl reach it.
+    wax = FastGaussQuadrature.gausshermite(orderGH)
     
     t = wax[1]
     wt = wax[2]
@@ -417,19 +505,24 @@ function Base.show(io::IO, density::Radial.Density)
 
     sa = Base.string(density);    print(io, sa * "\n")
 
+    ## Both the head/tail slices and the field name were wrong here (12-Aug-2026).  This method was copied
+    ## from Radial.Potential and kept its `Zr`, a field Radial.Density does not have, so printing any density
+    ## raised a FieldError; and the guard `n < 6` did not cover the [1:23] slices below it, so 6 <= n < 46
+    ## gave a BoundsError.  The window is now taken from n itself.
     n = length(density.Dr);                    if  n < 6   return( nothing )    end
-    print(io, "Dr:    ", density.Dr[1:23],    "  ...  ", density.Zr[n-22:n],    "\n") 
+    nw = min(23, div(n, 2))
+    print(io, "Dr:    ", density.Dr[1:nw],    "  ...  ", density.Dr[n-nw+1:n],    "\n")
     print(io, density.grid)
 end
 
 
 # `Base.string(density::Radial.Density)`  ... provides a String notation for the variable density::Radial.Density.
-function Base.string(density::Radial.Density) 
+function Base.string(density::Radial.Density)
     if  length(density.Dr)  == 0
         sa = "Radial density not yet defined; kind = $(density.name) ..."
     else
-        sa = "$(density.name) (radial) density ... defined on $(length(density.Zr)) grid points ..."
-    end 
+        sa = "$(density.name) (radial) density ... defined on $(length(density.Dr)) grid points ..."
+    end
 end
 
 
@@ -461,8 +554,11 @@ function Base.show(io::IO, potential::Radial.Potential)
 
     sa = Base.string(potential);    print(io, sa * "\n")
 
+    ## The guard `n < 6` did not cover the [1:23] slices, so 6 <= n < 46 gave a BoundsError (12-Aug-2026);
+    ## the window is now taken from n itself.
     n = length(potential.Zr);                    if  n < 6   return( nothing )    end
-    print(io, "Zr:    ", potential.Zr[1:23],    "  ...  ", potential.Zr[n-22:n],    "\n") 
+    nw = min(23, div(n, 2))
+    print(io, "Zr:    ", potential.Zr[1:nw],    "  ...  ", potential.Zr[n-nw+1:n],    "\n")
     print(io, potential.grid)
 end
 
@@ -492,7 +588,7 @@ end
     + Q               ::Array{Float64,1}  ... small component of the radial orbital.
     + Pprime          ::Array{Float64,1}  ... dP/dr.
     + Qprime          ::Array{Float64,1}  ... dQ/dr.
-    + grid            ::Array{Float64,1}  ... explic. defined radial grid array for P, Q, if StandardGrid = false.
+    + grid            ::Radial.Grid       ... explic. defined radial grid for P, Q, if useStandardGrid = false.
 """
 mutable struct Orbital
     subshell          ::Subshell
@@ -661,165 +757,39 @@ function Base.show(io::IO, spectrum::SingleElecSpectrum)
 end
 
 
-"""
-`Radial.OrbitalBunge1993(subshell::Subshell, Z::Int64)`  ... to calculate the radial orbital on the standard grid.
-"""
-function OrbitalBunge1993(subshell::Subshell, Z::Int64, grid::Radial.Grid)
-    #x grid = Defaults.getDefaults("standard grid");    
-    #x qn = SubshellQuantumNumbers( string(subshell) );    n = qn[1];    kappa = qn[2];   l = qn[3]
-    n = subshell.n;    kappa = subshell.kappa;   l = Basics.subshell_l(subshell)
-
-    wa = Basics.store("orbital functions: NR, Bunge (1993)", Z)
-    if      l == 0  &&  n > wa[5][1]+0     error("orbitals with s symmetry for Z = $Z only available up to $(wa[5][1]+0) only.")
-    elseif  l == 1  &&  n > wa[6][1]+1     error("orbitals with p symmetry for Z = $Z only available up to $(wa[6][1]+1) only.")
-    elseif  l == 2  &&  n > wa[7][1]+2     error("orbitals with d symmetry for Z = $Z only available up to $(wa[7][1]+2) only.")
-    elseif  l == 3  &&  n > wa[8][1]+3     error("orbitals with f symmetry for Z = $Z only available up to $(wa[8][1]+3) only.")
-    elseif  l == 4  &&  n > wa[9][1]+4     error("orbitals with g symmetry for Z = $Z only available up to $(wa[9][1]+4) only.")
-    end
-
-    P = Float64[]
-    for  k in 1:grid.NoPoints-5
-        Rnl = 0.; r = grid.r[k]
-        for i in 4:length(wa[5+l])
-            njl = wa[5+l][i][1] 
-            Zjl = wa[5+l][i][2]
-            Cjl = wa[5+l][i][2+n-l]
-            Njl = (2*Zjl)^(njl+0.5) / sqrt( factorial(2*njl) ) 
-            Rnl = Rnl + Cjl*Njl*r^(njl-1)*exp(-Zjl*r);
-        end
-        push!(P, Rnl*r )
-    end
-
-    # Now define small component by apllying kinetic-balance condition
-    Q = zeros(size(P, 1))
-    #x println("small component not yet defined properly; P = $P ")
-
-    dP(i) = JenaAtomicCalculator.Math.derivative(P, i)
-    for i = 2:size(Q, 1)
-        Q[i] = -1/(2 * JenaAtomicCalculator.Defaults.INVERSE_FINE_STRUCTURE_CONSTANT) * (dP(i) / grid.h / grid.rp[i] + kappa/grid.r[i]) * P[i]
-    end
-
-    o     = Orbital( subshell, true, true, -0.5, P, Q, grid)
-    norma = RadialIntegrals.overlap(o, o, grid)
-    o.P = o.P/sqrt(norma)
-    o.Q = o.Q/sqrt(norma)
-
-    normb = RadialIntegrals.overlap(o, o, grid)
-
-    return( o )
-end
+## Radial.OrbitalBunge1993, Radial.compute_McLean1981 and Radial.OrbitalPrimitiveSlater were REMOVED on
+## 12-Aug-2026.  None of the three could run, and none had a caller:
+##
+##   * the first two called Basics.store("orbital functions: NR, Bunge (1993)" / "... McLean (1981)", Z),
+##     and Basics.store is DEFINED NOWHERE IN JAC.  It was meant to hold the Roothaan-Hartree-Fock
+##     coefficient tables of Bunge et al., ADNDT 53 (1993) 113 and McLean & McLean, ADNDT 26 (1981) 197;
+##     that data has never been part of this repository, so the functions were never more than a sketch;
+##   * OrbitalBunge1993 and OrbitalPrimitiveSlater additionally read grid.rp -- an array that was empty on
+##     every grid JAC ever built and no longer exists at all -- and constructed Radial.Orbital with SEVEN
+##     arguments where it has nine fields.
+##
+## DECIDED 13-Aug-2026 by the maintainer: the Bunge and McLean routes are RETIRED, not deferred, and the
+## compute themes RadialOrbitalBunge1993 and RadialOrbitalMcLean1981 have been removed with them.  Three
+## reasons, none of them the missing table itself: both sets are NON-RELATIVISTIC while JAC is a Dirac code,
+## and McLean's half covers Z = 55-92, exactly where that matters most; neither reaches beyond Z = 92 or past
+## neutral ground configurations, which is most of what JAC actually computes; and Anderson acceleration has
+## since removed much of the convergence cost that a better start orbital would have bought.  Should analytic
+## start orbitals be wanted, use ManyElectron.StartFromThomasFermi with the screened potential
+## Basics.ThomasFermiField (added 13-Aug-2026) -- it needs no external data and works at any Z, including the
+## superheavy region these tables cannot reach.
+##
+## The working route to hydrogenic start orbitals remains Bsplines.generateOrbitalsHydrogenic, which is what
+## AsfSettings(..., StartFromHydrogenic(), ...) already uses throughout JAC.
 
 
-"""
-`Radial.OrbitalMcLean1981(subshell::Subshell,Z::Int64)`  ... to calculate the radial orbital on the standard grid.  
-"""
-function compute_McLean1981(subshell::Subshell,Z::Int64)
-    grid = Defaults.getDefaults("standard grid");    
-    #x qn = Basics.SubshellQuantumNumbers( string(subshell) );    n = qn[1];   l = qn[3]
-    n = subshell.n;   l = Basics.subshell_l( subshell )
-
-    wa = Basics.store("orbital functions: NR, McLean (1981)", Z)
-
-    !(55 <= Z <= 92)   &&                     error("Nuclear charge must be 55 <= (Z=$Z) <= 92.")            
-    wa == Any[]        &&                     error("No data available for neutral Z = $Z.")
-
-    if      l == 0     &&  n > wa[5][1]+0     error("Orbitals with s symmetry for Z = $Z only available up to $(wa[5][1]+0) only.")
-    elseif  l == 1     &&  n > wa[6][1]+1     error("orbitals with p symmetry for Z = $Z only available up to $(wa[6][1]+1) only.")
-    elseif  l == 2     &&  n > wa[7][1]+2     error("orbitals with d symmetry for Z = $Z only available up to $(wa[7][1]+2) only.")
-    elseif  l == 3     &&  n > wa[8][1]+3     error("orbitals with f symmetry for Z = $Z only available up to $(wa[8][1]+3) only.")
-    elseif  l == 4     &&  n > wa[9][1]+4     error("orbitals with g symmetry for Z = $Z only available up to $(wa[9][1]+4) only.")
-    end
-
-    P = Float64[]
-    for  k in 1:grid.NoPoints-5
-        Rnl = 0.; r = grid.r[k]
-        for i in 4:length(wa[5+l])
-            njl = wa[5+l][i][1] 
-            Zjl = wa[5+l][i][2]
-            Cjl = wa[5+l][i][2+n-l]
-            Njl = (2*Zjl)^(njl+0.5) / sqrt( factorial(2*njl) ) 
-            Rnl = Rnl + Cjl*Njl*r^(njl-1)*exp(-Zjl*r);
-        end
-        println("k, r, Rnl = $k  $r  $Rnl ")
-        push!(P, Rnl*r )
-    end
-
-    println("small component not yet defined properly; P = $P ")
-
-    return( Orbital( subshell, -0.5) )
-end
 
 
-"""
-`Radial.OrbitalPrimitiveSlater(subshell::Subshell, N::Int64, alpha0::Float64, beta0::Float64, grid::Radial.Grid)`  
-    ... to calculate a list of (non-relativistic) radial Slater primitives::Array{Orbital,1} for the subshell-symmetry on 
-        the given grid. All orbitals have the same subshell, isBound = true, useStandardGrid = true and energy = 0. 
-        The small components are constructed by applying kinetic balance to the large component, and all the primitives are 
-        properly normalized.
-"""
-function OrbitalPrimitiveSlater(subshell::Subshell, N::Int64, alpha0::Float64, beta0::Float64, grid::Radial.Grid) 
-    function P(i::Int64, l::Int64, eta::Float64)   return( grid.r[i]^(l+1) * exp(-eta*grid.r[i]) )   end
-    dP(i) = JenaAtomicCalculator.Math.derivative(Px, i)
 
-    orbitals = Orbital[];    ll = Basics.subshell_l(subshell)
-    for  i = 1:N
-        eta = alpha0 * beta0^(i-1)
-        # Px  = [for i = 1:grid.NoPoints P(i, ll, eta)]
-        Qx  = zeros(size(Px, 1))
-        for j = 2:size(Q, 1)
-            Qx[j] = -1/(2 * JenaAtomicCalculator.Defaults.INVERSE_FINE_STRUCTURE_CONSTANT) * (dP(j) / grid.h / grid.rp[j] + kappa/grid.r[j]) * Px[j]
-        end
-
-        o     = Orbital( subshell, true, true, 0., Px, Qx, grid() )
-        norma = JenaAtomicCalculator.RadialIntegrals.overlap(o, o, grid)
-        o.P = o.P/sqrt(norma)
-        o.Q = o.Q/sqrt(norma)
-
-        normb = JenaAtomicCalculator.RadialIntegrals.overlap(o, o, grid)
-        println("OrbitalPrimitiveSlater-aa:  for i = $i : norm-before = $norma, norm-after = $normb")
-        
-        push!( orbitals, o)
-    end
-
-    return( SingleElecSpectrum() )
-end
 
 
 ###################################################################################################################
 ###################################################################################################################
 ###################################################################################################################
-
-
-"""
-`Radial.checkGrid(grid::Radial.Grid, shell::Shell, Z::Float64)`  
-    ... checks that the radial grid can represent the hydrogenic orbitals for the given subshell 
-        of nuclear charge Z; it simply tests that the boxSize > 4 * n^2 / Z [a_o].
-        (More accurate one could use the mean expectation values of r of this shell).
-        The program reports about this comparison and terminates if this is not the case. Nothing is returned.
-"""
-function checkGrid(grid::Radial.Grid, shell::Shell, Z::Float64)
-    wa = 4.0 * shell.n^2 / Z
-    println(">> Check radial grid for shell $shell of hydrogenic ions with Z = $Z;" *
-            "  r[NoPoints] = $(grid.r[grid.NoPoints]) ! > ! 4 * n^2 / Z = $wa")
-        
-    if  grid.r[grid.NoPoints] < wa    error("Grid with inappropriate extent; enlarge the boxSize.")   end
-    
-    return( nothing )
-end
-
-
-"""
-`Radial.checkGrid(grid::Radial.Grid, subshell::Subshell, relAccuracy::Float64)`  
-    ... checks that the radial grid can represent the hydrogenic orbitals for the given subshell with
-        a relative accuracy <= relAccuracy. The program reports about the relative accuracy and terminates with an 
-        error message if this is not the case. Nothing is returned.
-"""
-function checkGrid(grid::Radial.Grid, subshell::Subshell, relAccuracy::Float64)
-    # Generate a hydrogenic spectrum for the symmetry of the given subshell
-    error("Not yet implemented.")
-    
-    return( nothing )
-end
 
 
 """
@@ -828,16 +798,19 @@ end
         A Zbar::Float64 is returned.
 """
 function determineZbar(pot::Radial.Potential) 
+    ## The sampling loop read pot.Zr[mtp] rather than pot.Zr[i], so all nx samples were the SAME number
+    ## (12-Aug-2026).  The mean was therefore just Zr[mtp] and the printed spread was identically zero --
+    ## a quality indicator that could never fire, whatever the potential did near the outer boundary.
     nx = 5   # Number of grid points for determining the effective charge Zbar
-    mtp = size( pot.Zr, 1);    grid = pot.grid;    meanZbar = zeros(nx);    devsZbar = zeros(nx);   ny = 0
-        for  i = mtp-nx+1:mtp
-        ny  = ny + 1;    meanZbar[ny] = pot.Zr[mtp]
+    mtp = size( pot.Zr, 1);    meanZbar = zeros(nx);    devsZbar = zeros(nx);   ny = 0
+    for  i = mtp-nx+1:mtp
+        ny  = ny + 1;    meanZbar[ny] = pot.Zr[i]
     end
     mZbar   = sum(meanZbar) / nx;   for  i = 1:nx    devsZbar[i] = (meanZbar[i] - mZbar)^2    end
     stdZbar = sqrt( sum(devsZbar) / nx )
-    if  true  println(">> Radial potential with effective charge Zbar=" * @sprintf("%.4e",mZbar) *
-                        " (Delta-Zbar=" * @sprintf("%.4e",stdZbar) * ") at r=" * @sprintf("%.4e",pot.grid.r[mtp]) * " a.u." )    end
-    
+    println(">> Radial potential with effective charge Zbar=" * @sprintf("%.4e",mZbar) *
+            " (Delta-Zbar=" * @sprintf("%.4e",stdZbar) * ") at r=" * @sprintf("%.4e",pot.grid.r[mtp]) * " a.u." )
+
     return( mZbar )
 end
 
@@ -887,45 +860,70 @@ end
 
 
 """
-`Radial.generateGrid(grid::Radial.Grid; boxSize::Union{Nothing,Float64}=nothing, 
-                                        maximumFreeElectronEnergy::Union{Nothing,Float64}=nothing, 
-                                        maximumPrincipalQN::Union{Nothing,Int64}=nothing, 
-                                        NoPointsInsideNucleus::Union{Nothing,Int64}=nothing, 
-                                        NoPointsInsideFirstBohrRadius::Union{Nothing,Int64}=nothing)
-                                        
-    ... to generate a grid that fulfills special requirements; th following schemes are supported:
-    
-        boxSize 
-            ... apply a fixed box size (in atomic units) as needed in an average-atom model and elsewhere.
-        boxSizeWithZeroWeights 
-            ... apply a fixed box size (in atomic units) as needed in an average-atom model and elsewhere.
-                Here, a standard grid is used but with all weights w [r] = 0 for r > boxSize.
+`Radial.generateGrid(grid::Radial.Grid; boxSize=nothing, boxSizeWithZeroWeights=nothing,
+                                        maximumFreeElectronEnergy=nothing, maximumPrincipalQN=nothing,
+                                        lValue::Int64=0, Zeff::Union{Nothing,Float64}=nothing)`
+    ... generates a grid that fulfills a particular physical requirement.  EXACTLY ONE of the four schemes
+        below must be selected; a grid::Radial.Grid is returned and the reasoning is printed.
+
+        boxSize
+            ... apply a fixed box size [a.u.], as an average-atom model needs.  This does more than
+                Radial.Grid(grid; rbox=...): it afterwards rescales rnt so that the LAST BREAK POINT LANDS
+                EXACTLY ON THE REQUESTED SIZE.  That is the reason this function exists -- for an average-atom
+                model the box IS the Wigner-Seitz radius, and a box that is merely close is a different
+                physical system.
+        boxSizeWithZeroWeights
+            ... keep the grid and set the integration weights to zero beyond the given radius.
+                READ THIS BEFORE USING IT: that truncates INTEGRALS, it does NOT confine ORBITALS.  The
+                B-spline basis still extends past the box, so the orbitals are entirely unchanged and only
+                their overlaps are cut short.  It is not a model of a confined atom, and using it as one gives
+                a plausible-looking wrong answer.
         maximumFreeElectronEnergy
-            ... provide a maximum free-electron energy (Hartree) and determine the linearized stepsize such,
-                that 20 points per wavelength are used asymptotically.
+            ... give a maximum free-electron energy [Hartree]; the asymptotic step hp is set so that the
+                shortest de Broglie wavelength is sampled with 20 points.  This is the constructive
+                counterpart of Continuum.gridConsistency, which checks the same quantity and requires at
+                least 15 points per oscillation.
         maximumPrincipalQN
-            ... generate an grid with a rbox-size that is suitable to represent subshell orbitals
-                with the given n; the value of rbox = 5 * <r_n> is taken, i.e. 5 times the mean hydrogenic 
-                value (not yet).
-        NoPointsInsideNucleus
-            ... generate a grid (of given type) with the given number inside the nucleus; this affects the values
-                of rnt and h (not yet).
-        NoPointsInsideFirstBohrRadius
-            ... generate a grid (of given type) with the given number inside the first Bohr radius; this affects 
-                the values of rnt and h (not yet).
-    
-    Only on of these optional parameters can be selected at a given time. A proper grid::Radial.Grid is returned,
-    along with a short reasoning of what has been selected.
+            ... give the largest principal quantum number n to be represented; the box is set from the
+                hydrogenic outer turning point,
+
+                    r_+  = (n^2/Zeff) (1 + sqrt(1 - l(l+1)/n^2)),      rbox = 2.5 r_+
+
+                A BOX THAT IS TOO LARGE STARVES THE B-SPLINE BASIS EXACTLY AS BADLY AS ONE THAT IS TOO SMALL:
+                the number of splines is fixed, so a box much wider than the orbitals spends them on empty
+                space and the high-n members of each symmetry come back as a DIFFERENT STATE rather than an
+                inaccurate one -- which looks like an angular-momentum or kappa-sign bug and is not.
+                Bsplines.checkGridRepresentation and Bsplines.checkOrbitalConsistency detect that afterwards;
+                this scheme is the only thing in JAC that avoids it beforehand.
+
+                lValue defaults to 0, which gives the LARGEST turning point for the given n and hence the
+                safe box.  Zeff must be given explicitly and is the EFFECTIVE charge: an outer electron of a
+                near-neutral system sees Zeff ~ Z - N + 1, not Z.  Passing Z here is the standard way to get
+                a box several times too small.
 """
-function generateGrid(grid::Radial.Grid; boxSize::Union{Nothing,Float64}=nothing, 
-                                            boxSizeWithZeroWeights::Union{Nothing,Float64}=nothing,
-                                            maximumFreeElectronEnergy::Union{Nothing,Float64}=nothing, 
-                                            maximumPrincipalQN::Union{Nothing,Int64}=nothing, 
-                                            NoPointsInsideNucleus::Union{Nothing,Int64}=nothing, 
-                                            NoPointsInsideFirstBohrRadius::Union{Nothing,Int64}=nothing) 
-    
-    if  typeof(boxSize)                            != Nothing
-        # Apply a fixed box size (in atomic units) as needed in an average-atom model and elsewhere.
+function generateGrid(grid::Radial.Grid; boxSize::Union{Nothing,Float64}=nothing,
+                                         boxSizeWithZeroWeights::Union{Nothing,Float64}=nothing,
+                                         maximumFreeElectronEnergy::Union{Nothing,Float64}=nothing,
+                                         maximumPrincipalQN::Union{Nothing,Int64}=nothing,
+                                         lValue::Int64=0, Zeff::Union{Nothing,Float64}=nothing)
+
+    ## "Only one of these may be selected" was documented but never enforced, and calling with NO scheme fell
+    ## through to an undefined newGrid.  Both are now errors that say so (13-Aug-2026).
+    schemes = [("boxSize", !isnothing(boxSize)), ("boxSizeWithZeroWeights", !isnothing(boxSizeWithZeroWeights)),
+               ("maximumFreeElectronEnergy", !isnothing(maximumFreeElectronEnergy)),
+               ("maximumPrincipalQN", !isnothing(maximumPrincipalQN))]
+    given = [nm for (nm, isSet) in schemes if isSet]
+    if      length(given) == 0
+        error("Radial.generateGrid(): no scheme selected.  Give exactly one of boxSize, " *
+              "boxSizeWithZeroWeights, maximumFreeElectronEnergy or maximumPrincipalQN.")
+    elseif  length(given) > 1
+        error("Radial.generateGrid(): $(length(given)) schemes selected at once -- $(join(given, ", ")).  " *
+              "They set different grid parameters from different physical requirements and cannot be " *
+              "combined; give exactly one.")
+    end
+    #
+    if  !isnothing(boxSize)
+        # A fixed box size [a.u.], with rnt rescaled so that the last break point lands exactly on it.
         newGrid = Radial.Grid(grid; rbox=boxSize);    rnt = newGrid.rnt * boxSize / newGrid.tL[end]
         newGrid = Radial.Grid(newGrid; rnt = rnt)
         println(">> Generate a new grid with boxSize = $boxSize a.u. and the break points " *
@@ -933,43 +931,51 @@ function generateGrid(grid::Radial.Grid; boxSize::Union{Nothing,Float64}=nothing
                 "\n>> Note that the last grid point r[end] is always slightly smaller as it refers " *
                 "to the last GL (zero of) integration along r.")
         #
-    elseif  typeof(boxSizeWithZeroWeights)         != Nothing
-        # Apply a fixed box size (in atomic units) as needed in an average-atom model and elsewhere.
-        # All (integration) weight are set to zero for r > boxSizeWithZeroWeights.
-        # First determine true boxsize
+    elseif  !isnothing(boxSizeWithZeroWeights)
+        # Zero the integration weights beyond the box.  This truncates INTEGRALS and does NOT confine the
+        # orbitals; see the docstring.
         boxSize = 0.;   for  t in grid.tL  if  t < boxSizeWithZeroWeights   boxSize = t   end   end
-        println(">>  Generate a new grid with zero weights for boxSize = $boxSize a.u.; " * 
+        println(">>  Generate a new grid with zero weights for boxSize = $boxSize a.u.; " *
                 "\n    modify the (grid) parameters of the given grid to bring boxSize closer to boxSizeWithZeroWeights.")
-        wr = Float64[];   R = 0.;   iR = 0    
-        for  (ir, r)  in  enumerate(grid.r)   
+        wr = Float64[];   R = 0.;   iR = 0
+        for  (ir, r)  in  enumerate(grid.r)
             if  r > boxSize      push!(wr, 0.)
             else                 push!(wr, grid.wr[ir]);   R = r;   iR = ir
-            end 
+            end
         end
-        ## println(">>> wr = $wr   ... just to see the number of zero weights for the new grid. \n")
-        newGrid = Radial.Grid(grid.rnt, grid.h, grid.hp, grid.NoPoints, grid.tL, grid.tS, grid.ntL, grid.ntS, 
-                                grid.orderL, grid.orderS, grid.nsL, grid.nsS, grid.orderGL, grid.meshType,
-                                grid.r, grid.rp, grid.rpor, wr)
-        println(">> Generate a new grid with boxSize = $boxSize a.u. and with all weight grid.wr[j] = 0 " * 
+        newGrid = Radial.Grid( getfield(grid, :parameters), getfield(grid, :knots), RadialMesh(grid.r, wr) )
+        println(">> Generate a new grid with boxSize = $boxSize a.u. and with all weight grid.wr[j] = 0 " *
                 "for r_j > boxSizeWithZeroWeights (j > $iR)" *
-                "\n>> Note that the last non-zero weight at R = $R grid point r[end] is always slightly smaller than " *
-                "\n   boxSize = $boxSize as it refers to the last GL (zero of) integration point.")
+                "\n>> NOTE that this truncates the INTEGRALS only; the B-spline basis and hence the orbitals " *
+                "\n   extend beyond the box unchanged.  This is not a confined atom." *
+                "\n>> The last non-zero weight sits at R = $R a.u.")
         #
-    elseif  typeof(maximumFreeElectronEnergy)      != Nothing
+    elseif  !isnothing(maximumFreeElectronEnergy)
         wavenb      = sqrt( 2maximumFreeElectronEnergy + maximumFreeElectronEnergy * Defaults.getDefaults("alpha")^2 )
         wavelgth    = 2pi / wavenb;     hp = wavelgth / 20
         newGrid     = Radial.Grid(grid; hp=hp)
         println(">> Generate a new grid for the minium wavelength = $wavelgth a.u. of free electrons and  hp = $hp")
         #
-    elseif  typeof(maximumPrincipalQN)             != Nothing
-        error("stop a")
-        #
-    elseif  typeof(NoPointsInsideNucleus)          != Nothing
-        error("stop b")
-    elseif  typeof(NoPointsInsideFirstBohrRadius)  != Nothing
-        error("stop c")
+    elseif  !isnothing(maximumPrincipalQN)
+        n = maximumPrincipalQN
+        n < 1                  &&  error("Radial.generateGrid(): maximumPrincipalQN = $n must be >= 1.")
+        lValue < 0             &&  error("Radial.generateGrid(): lValue = $lValue must be >= 0.")
+        lValue > n - 1         &&  error("Radial.generateGrid(): lValue = $lValue is not compatible with n = $n.")
+        isnothing(Zeff)        &&  error("Radial.generateGrid(): maximumPrincipalQN also needs Zeff, the " *
+                                         "EFFECTIVE charge seen by the outermost electron -- about Z - N + 1 " *
+                                         "for a near-neutral system, NOT the nuclear charge Z.  Passing Z is " *
+                                         "the standard way to end up with a box several times too small.")
+        Zeff <= 0.             &&  error("Radial.generateGrid(): Zeff = $Zeff must be positive.")
+        rPlus   = (n^2 / Zeff) * (1.0 + sqrt(1.0 - lValue*(lValue+1)/n^2))
+        rbox    = 2.5 * rPlus
+        newGrid = Radial.Grid(grid; rbox=rbox)
+        println(">> Generate a new grid for n = $n, l = $lValue and Zeff = $Zeff: the hydrogenic outer " *
+                "turning point is r_+ = " * @sprintf("%.4e", rPlus) * " a.u., so rbox = 2.5 r_+ = " *
+                @sprintf("%.4e", rbox) * " a.u." *
+                "\n>> A box much LARGER than this starves the B-spline basis and can return a different " *
+                "state, not merely a less accurate one.")
     end
-        
+
     return( newGrid )
 end
 

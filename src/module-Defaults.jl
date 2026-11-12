@@ -12,13 +12,21 @@ using Dates,  JenaAtomicCalculator, ..Basics,  ..Radial,  ..Math
 export  convertUnits, getDefaults,  setDefaults
 
 # Dimensionless constants
-const FINE_STRUCTURE_CONSTANT         = 7.297_352_566_4e-3 
-const INVERSE_FINE_STRUCTURE_CONSTANT = 137.035_999_139
+# FINE_STRUCTURE_CONSTANT and INVERSE_FINE_STRUCTURE_CONSTANT are deliberately NOT const: both are
+# overwritten together by setDefaults("fine structure constant: alpha", value) to support alpha-variation
+# (q-factor) computations, which need to re-run the SCF/CI machinery at a slightly shifted alpha. Every
+# other module reads these two globals by name (Defaults.FINE_STRUCTURE_CONSTANT / .INVERSE_...), so an
+# update here propagates automatically, without touching those modules.
+FINE_STRUCTURE_CONSTANT         = 7.297_352_566_4e-3
+INVERSE_FINE_STRUCTURE_CONSTANT = 137.035_999_139
 
 # Constants in SI units
 const BOHR_RADIUS_SI                  = 0.529_177_210_67e-10
 const BOLTZMANN_CONSTANT_SI           = 1.380_648_52e-23
 const ELECTRON_MA_SI                  = 9.109_383_56e-31
+## The muon is 206.77 times heavier than the electron and is otherwise the same particle: same charge, same
+## spin, same Dirac equation.  In atomic units the electron mass is 1, so this ratio IS the muon mass.
+const MUON_ELECTRON_MASS_RATIO        = 206.768_2830
 const ELEMENTARY_CHARGE_SI            = 1.602_176_620_8e-19
 const HARTREE_ENERGY_SI               = 4.359_744_650e-18
 const PLANCK_CONSTANT_SI              = 6.626_070_040e-34
@@ -74,10 +82,17 @@ GBL_FRAMEWORK                = "relativistic"
 GBL_CONT_POTENTIAL           = Basics.DFSField(0.42)
 GBL_CONT_SOLUTION            = BsplineGalerkin()         ###  ContBessel(), ContSine(), AsymptoticCoulomb(), NonrelativisticCoulomb(), BsplineGalerkin()
 GBL_CONT_NORMALIZATION       = AlokNorm()                ###  PureSineNorm(), CoulombSineNorm(), OngRussekNorm(), AlokNorm()
-##x GBL_CONT_NORMALIZATION       = PureSineNorm()            ###  PureSineNorm(), CoulombSineNorm(), OngRussekNorm()
 GBL_QED_HYDROGENIC_LAMBDAC   = [1.0,  1.0,  1.0,  1.0,  1.0]
 GBL_QED_NUCLEAR_CHARGE       = 0.1
 GBL_WARNINGS                 = String[]
+## The warnings are collected so that a long job can be inspected AFTERWARDS -- anything printed to stdout
+## during a ten-hour cascade has scrolled away long before it ends.  Two properties are needed for that to
+## work (12-Aug-2026):  a message repeated by every line must appear ONCE, with a count, or the report is
+## unreadable; and the collector must survive Threads.@threads, since push! onto a shared Vector can lose
+## entries and can crash on a reallocation -- and the line loops of DielectronicRecombination and
+## ImpactExcitation are already threaded.
+GBL_WARNINGS_COUNT           = Dict{String,Int64}()
+const GBL_WARNINGS_LOCK      = ReentrantLock()
 
 GBL_ENERGY_UNIT              = "eV"
 GBL_CROSS_SECTION_UNIT       = "barn"
@@ -85,6 +100,9 @@ GBL_EDIFF_CROSS_SECTION_UNIT = "barn/eV"
 GBL_RATE_UNIT                = "1/s"
 GBL_STRENGTH_UNIT            = "cm^2 eV"
 GBL_TIME_UNIT                = "sec"
+
+GBL_NUCLEAR_CHARGE           = 1.0
+GBL_NUCLEAR_MODEL            = missing
 
 GBL_PRINT_DATA               = false
 GBL_PRINT_SUMMARY            = false
@@ -98,10 +116,6 @@ GBL_SUMMARY_IOSTREAM         = nothing
 
 GBL_STANDARD_GRID            = Radial.Grid(true, printout=false)        
 
-#
-# Global variables that are used for internal storage
-GBL_Storage_XL_Coulomb      = Dict{String, Float64}()
-GBL_Storage_XL_Breit        = Dict{String, Float64}()
 
 
 """
@@ -152,8 +166,11 @@ GBL_Storage_XL_Breit        = Dict{String, Float64}()
                                                 a Float64 is returned.
 
 + `("length: from fm to atomic", value::Float64)`  ... to convert a length value (in fm) into a.u.;  a Float64 is returned.
-+ `("length: from atomic to fm", value::Float64)`  or  `("energy: from atomic to Kayser", value::Float64)`  
++ `("length: from atomic to fm", value::Float64)`  or  `("length: from atomic to cm", value::Float64)`  
     ... to convert a length value (in Bohr's a.u.) to the speficied length unit;  a Float64 is returned.
+
++ `("moment: from nuclear magneton to atomic", value::Float64)`  ... to convert a value in mu_nuc into a.u.;  a Float64 is returned.
++ `("moment: from nuclear magneton x fm^2 to atomic", value::Float64)`  ... to convert a value in [mu_nuc x fm^2] into a.u.;  a Float64 is returned.
 
 + `("rate: from atomic to predefined unit", value::Float64)`  or  ("rate: from atomic", value::Float64)  ... to convert a rate value 
                                             from atomic to the predefined rate unit; a Float64 is returned.
@@ -197,7 +214,7 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: cross section") == "barn"   return( wa * CONVERT_CROSS_SECTION_AU_TO_BARN )
         elseif  Defaults.getDefaults("unit: cross section") == "Mbarn"  return( wa * CONVERT_CROSS_SECTION_AU_TO_BARN * 1.0e-6 )
         elseif  Defaults.getDefaults("unit: cross section") == "cm^2"   return( wa * CONVERT_CROSS_SECTION_AU_TO_BARN * 1.0e-24 )
-        else    error("stop a")
+        else    error("Defaults.convertUnits(): the current setting `unit: cross section` is currently $(Defaults.getDefaults("unit: cross section")), which this conversion does not handle. Valid: a.u., barn, Mbarn, cm^2.")
         end
     
     elseif   sa in ["cross section: from atomic to barn"]               return( wa * CONVERT_CROSS_SECTION_AU_TO_BARN )
@@ -209,7 +226,7 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: cross section") == "barn"   return( wa / CONVERT_CROSS_SECTION_AU_TO_BARN )
         elseif  Defaults.getDefaults("unit: cross section") == "Mbarn"  return( wa / CONVERT_CROSS_SECTION_AU_TO_BARN * 1.0e6 )
         elseif  Defaults.getDefaults("unit: cross section") == "cm^2"   return( wa / CONVERT_CROSS_SECTION_AU_TO_BARN * 1.0e24 )
-        else    error("stop b")
+        else    error("Defaults.convertUnits(): the current setting `unit: cross section` is currently $(Defaults.getDefaults("unit: cross section")), which this conversion does not handle. Valid: a.u., barn, Mbarn, cm^2.")
         end
 
     elseif   sa in ["cross section: from barn to atomic unit"]          return( wa / CONVERT_CROSS_SECTION_AU_TO_BARN )
@@ -223,7 +240,7 @@ function convertUnits(sa::String, wa::Float64)
         if      Defaults.getDefaults("unit: energy-diff. cross section") == "a.u."      return( wa )
         elseif  Defaults.getDefaults("unit: energy-diff. cross section") == "barn/eV"   
                                                                         return( wa * CONVERT_CROSS_SECTION_AU_TO_BARN/CONVERT_ENERGY_AU_TO_EV )
-        else    error("stop bb")
+        else    error("Defaults.convertUnits(): the current setting `unit: energy-diff. cross section` is currently $(Defaults.getDefaults("unit: energy-diff. cross section")), which this conversion does not handle. Valid: a.u., barn/eV.")
         end
 
     elseif   sa in ["energy: from atomic to predefined unit", "energy: from atomic"]
@@ -233,7 +250,7 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: energy") == "Hz"            return( wa * CONVERT_ENERGY_AU_TO_PER_SEC )
         elseif  Defaults.getDefaults("unit: energy") == "A"             return( 2pi * Defaults.INVERSE_FINE_STRUCTURE_CONSTANT / wa * 
                                                                                         Defaults.BOHR_RADIUS_SI * 1.0e10 )
-        else    error("stop c")
+        else    error("Defaults.convertUnits(): the current setting `unit: energy` is currently $(Defaults.getDefaults("unit: energy")), which this conversion does not handle. Valid: eV, Kayser, Hartree, Hz, A.")
         end
     
     elseif   sa in ["energy: from atomic to eV"]                        return( wa * CONVERT_ENERGY_AU_TO_EV )
@@ -250,7 +267,7 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: energy") == "Hz"            return( wa / CONVERT_ENERGY_AU_TO_PER_SEC )
         elseif  Defaults.getDefaults("unit: energy") == "A"             return( 2pi * Defaults.INVERSE_FINE_STRUCTURE_CONSTANT / wa * 
                                                                                         Defaults.BOHR_RADIUS_SI * 1.0e10 )
-        else    error("stop d")
+        else    error("Defaults.convertUnits(): the current setting `unit: energy` is currently $(Defaults.getDefaults("unit: energy")), which this conversion does not handle. Valid: eV, Kayser, Hartree, Hz, A.")
         end
 
     elseif   sa in ["energy: from eV to atomic"]                        return( wa / CONVERT_ENERGY_AU_TO_EV )
@@ -259,25 +276,44 @@ function convertUnits(sa::String, wa::Float64)
     elseif   sa in ["intensity: from W/cm^2 to atomic"]                 return( wa / CONVERT_INTENSITY_AU_TO_W_CM2 )
     elseif   sa in ["intensity: from atomic to W/cm^2"]                 return( wa * CONVERT_INTENSITY_AU_TO_W_CM2 )
 
+    elseif  sa in ["kinetic energy to wave number: atomic units"]
+        c = INVERSE_FINE_STRUCTURE_CONSTANT
+        wb = sqrt( wa*wa/(c*c) + 2wa );                                 return( wb )
+
+    elseif  sa in ["kinetic energy to wavelength: atomic units"]
+        c = INVERSE_FINE_STRUCTURE_CONSTANT
+        wb = sqrt( wa*wa/(c*c) + 2wa );                                 return( 2pi / wb )
+
+    elseif  sa in ["length: from fm to atomic"]                         return (wa / CONVERT_LENGTH_AU_TO_FEMTOMETER )
+    elseif  sa in ["length: from atomic to fm"]                         return (wa * CONVERT_LENGTH_AU_TO_FEMTOMETER )
+    elseif  sa in ["length: from atomic to cm"]                         return (wa * CONVERT_LENGTH_AU_TO_FEMTOMETER * 1.0e-13 )
+
+    elseif  sa in ["moment: from nuclear magneton to atomic"]           return (wa * 5.446170e-4 / 2. )
+    elseif  sa in ["moment: from nuclear magneton x fm^2 to atomic"]    return (wa * 1.944690e-13 / 2. )
+
     elseif    sa in ["rate: from atomic to predefined unit", "rate: from atomic"]
         if       Defaults.getDefaults("unit: rate") == "1/s"            return( wa * CONVERT_RATE_AU_TO_PER_SEC )
         elseif   Defaults.getDefaults("unit: rate") == "a.u."           return( wa )
-        else     error("stop e")
+        else     error("Defaults.convertUnits(): the current setting `unit: rate` is currently $(Defaults.getDefaults("unit: rate")), which this conversion does not handle. Valid: 1/s, a.u..")
         end
     
     elseif   sa in ["rate: from atomic to 1/s"]                         return( wa * CONVERT_RATE_AU_TO_PER_SEC )
 
     elseif   sa in ["rate: from predefined to atomic unit", "rate: to atomic"]
-        if      Defaults.getDefaults("rate: time") == "1/s"             return( wa / CONVERT_RATE_AU_TO_PER_SEC )
-        elseif  Defaults.getDefaults("rate: time") == "a.u."            return( wa  )
-        else    error("stop f")
+        # "unit: rate", NOT "rate: time".  Until 29-Aug-2026 both lines read "rate: time", which is not a
+        # settings key at all, so getDefaults raised "Unsupported keystring:: rate: time" BEFORE any conversion
+        # was attempted -- convertUnits("rate: to atomic", ...) could never work, while the from-atomic
+        # direction six lines above, which reads "unit: rate", always did.
+        if      Defaults.getDefaults("unit: rate") == "1/s"             return( wa / CONVERT_RATE_AU_TO_PER_SEC )
+        elseif  Defaults.getDefaults("unit: rate") == "a.u."            return( wa  )
+        else    error("Defaults.convertUnits(): the current setting `unit: rate` is currently $(Defaults.getDefaults("unit: rate")), which this conversion does not handle. Valid: 1/s, a.u..")
         end
 
     elseif    sa in ["strength: from atomic to predefined unit", "strength: from atomic"]
         if       Defaults.getDefaults("unit: strength") == "barn eV"    return( wa * CONVERT_STRENGTH_AU_TO_BARN_EV )
         elseif   Defaults.getDefaults("unit: strength") == "cm^2 eV"    return( wa * CONVERT_STRENGTH_AU_TO_CM2_EV )
         elseif   Defaults.getDefaults("unit: strength") == "a.u."       return( wa )
-        else     error("stop fx")
+        else     error("Defaults.convertUnits(): the current setting `unit: strength` is currently $(Defaults.getDefaults("unit: strength")), which this conversion does not handle. Valid: barn eV, cm^2 eV, a.u..")
         end
         
     elseif  sa in ["time: from atomic to predefined unit", "time: from atomic"]
@@ -285,7 +321,7 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: time") == "fs"              return( wa * CONVERT_TIME_AU_TO_SEC * 1.0e15 )
         elseif  Defaults.getDefaults("unit: time") == "as"              return( wa * CONVERT_TIME_AU_TO_SEC * 1.0e18 )
         elseif  Defaults.getDefaults("unit: time") == "a.u."            return( wa )
-        else    error("stop g")
+        else    error("Defaults.convertUnits(): the current setting `unit: time` is currently $(Defaults.getDefaults("unit: time")), which this conversion does not handle. Valid: sec, fs, as, a.u..")
         end
     
     elseif   sa in ["time: from atomic to sec"]                         return( wa * CONVERT_TIME_AU_TO_SEC )
@@ -297,23 +333,11 @@ function convertUnits(sa::String, wa::Float64)
         elseif  Defaults.getDefaults("unit: time") == "fs"              return( wa / (CONVERT_TIME_AU_TO_SEC * 1.0e15) )
         elseif  Defaults.getDefaults("unit: time") == "as"              return( wa / (CONVERT_TIME_AU_TO_SEC * 1.0e18) )
         elseif  Defaults.getDefaults("unit: time") == "a.u."            return( wa )
-        else    error("stop h")
+        else    error("Defaults.convertUnits(): the current setting `unit: time` is currently $(Defaults.getDefaults("unit: time")), which this conversion does not handle. Valid: sec, fs, as, a.u..")
         end
     
     elseif   sa in ["temperature: from Kelvin to (Hartree) units"]      return( wa / 315774.64 )
     elseif   sa in ["temperature: from atomic to Kelvin"]               return( wa * 315774.64 )
-
-    elseif  sa in ["length: from fm to atomic"]                         return (wa / CONVERT_LENGTH_AU_TO_FEMTOMETER )
-    elseif  sa in ["length: from atomic to fm"]                         return (wa * CONVERT_LENGTH_AU_TO_FEMTOMETER )
-    elseif  sa in ["length: from atomic to cm"]                         return (wa * CONVERT_LENGTH_AU_TO_FEMTOMETER * 1.0e-13 )
-
-    elseif  sa in ["kinetic energy to wave number: atomic units"]
-        c = INVERSE_FINE_STRUCTURE_CONSTANT
-        wb = sqrt( wa*wa/(c*c) + 2wa );                                 return( wb )
-
-    elseif  sa in ["kinetic energy to wavelength: atomic units"]
-        c = INVERSE_FINE_STRUCTURE_CONSTANT
-        wb = sqrt( wa*wa/(c*c) + 2wa );                                 return( 2pi / wb )
 
     elseif  sa in ["wave number to total electron energy: atomic units"]
         c = INVERSE_FINE_STRUCTURE_CONSTANT
@@ -365,6 +389,23 @@ end
     ... to define a method for the normalization of the continuum orbitals as asymptotically (pure) sine or Coulomb 
         functions, or following the procedure by Ong & Russek (1978).
 
++ `("method: Wigner symbols, exact")`  or  `("method: Wigner symbols, floating-point")`  or
+    `("method: Wigner symbols, GSL")`
+    ... to (pre-) define HOW the Wigner 3-j, 6-j and 9-j symbols are evaluated. All three agree to about one part in
+        1e15, so this is a choice of cost and not of physics: `floating-point` evaluates in Float64, is 4.2x faster on a
+        mid-size cascade with BIT-IDENTICAL results, and is the DEFAULT; `exact` evaluates in Rational{BigInt} and is
+        what JAC used until 25-Aug-2026; and `GSL` is faster again but differs in the ninth digit, which would put
+        approved reference data in question. See `AngularMomentum.AbstractWignerMethod`.
+
++ `("nuclear: charge", Z::Float64)`  or  `("nuclear: model", nm::Any")`
+    ... to define the nuclear charge or nuclear model for the pedestrian approach to atomic computations.
+
++ `("fine structure constant: alpha", value::Float64)`
+    ... to (re-) define the fine-structure constant alpha used throughout JAC, together with its reciprocal
+        (the speed of light in atomic units); needed for alpha-variation (q-factor) computations, which
+        re-run the SCF/CI machinery at a slightly shifted alpha. Defaults.FINE_STRUCTURE_CONSTANT and
+        Defaults.INVERSE_FINE_STRUCTURE_CONSTANT are updated together so they never go out of sync.
+
 + `("QED model: Petersburg")`  or  `("QED model: Sydney")`   
     ... to define a model for the computation of the QED corrections following the work by Shabaev et al. (2011; Petersburg) 
         or Flambaum and Ginges (2004; Syney).
@@ -398,16 +439,51 @@ function setDefaults(sa::String)
     elseif    sa == "method: normalization, pure Coulomb"                GBL_CONT_NORMALIZATION  = CoulombSineNorm()  
     elseif    sa == "method: normalization, Ong-Russek"                  GBL_CONT_NORMALIZATION  = OngRussekNorm()
     elseif    sa == "method: normalization, Alok"                        GBL_CONT_NORMALIZATION  = AlokNorm()
+    elseif    sa == "method: Wigner symbols, exact"                      selectWignerMethod(:exact)
+    elseif    sa == "method: Wigner symbols, floating-point"             selectWignerMethod(:floating)
+    elseif    sa == "method: Wigner symbols, GSL"                        selectWignerMethod(:gsl)
     else      error("Unsupported keystring:: $sa")
     end
     nothing
 end
 
 
-function setDefaults(sa::String, sb::String)
-    ## global GBL_ENERGY_UNIT, GBL_CROSS_SECTION_UNIT, GBL_RATE_UNIT, GBL_TIME_UNIT, GBL_SUMMARY_IOSTREAM, GBL_PRINT_SUMMARY, 
-    ##    GBL_TEST_IOSTREAM, GBL_PRINT_TEST 
+"""
+`Defaults.selectWignerMethod(name::Symbol)`
+    ... to switch how the Wigner symbols are evaluated, from the short name used by the `setDefaults` keystrings:
+        `:exact`, `:floating` or `:gsl`. The choice itself is DISPATCHED on a singleton type inside
+        `AngularMomentum`; this routine only turns a keystring into that type. Nothing is returned.
+"""
+function selectWignerMethod(name::Symbol)
+    AM = JenaAtomicCalculator.AngularMomentum
+    if        name == :exact      AM.setWignerMethod(AM.ExactWigner())
+    elseif    name == :floating   AM.setWignerMethod(AM.FloatingWigner())
+    elseif    name == :gsl        AM.setWignerMethod(AM.GslWigner())
+    else      error("Unsupported Wigner method:: $name")
+    end
+    nothing
+end
 
+
+
+
+"""
+`Defaults.setDefaults(sa::String, sb::String)`
+    ... sets the string-valued global default named by the keystring sa to sb; nothing is returned.
+
+    Two families of keystring are handled here and nowhere else, and they behave differently:
+
+    + the UNIT settings -- `"unit: energy"`, `"unit: cross section"`, `"unit: rate"`, `"unit: strength"` and
+      `"unit: time"` -- are VALIDATED against the list of units the corresponding conversion can perform, and an
+      unsupported value raises at once rather than at the first conversion.
+    + the STREAM settings -- `"print data: open"/"close"`, `"print data-X: ..."`, `"print data-Y: ..."`,
+      `"print summary: open"/"append"/"close"` and `"print test: open"/"close"` -- open or close a file whose
+      name is sb, and the "close" forms ignore sb.
+
+    An unrecognised keystring raises and names itself. See the keystring catalogue above `setDefaults(sa::String)`
+    for the complete list across all methods of this family.
+"""
+function setDefaults(sa::String, sb::String)
     if        sa == "unit: energy"
         units = ["eV", "Kayser", "Hartree", "Hz", "A"]
         !(sb in units)    &&    error("Currently supported energy units: $(units)")
@@ -481,16 +557,83 @@ end
 
 
 """
+`Defaults.setDefaults(sa::String, Z::Float64)`
+    ... sets a global default that carries a single real number; nothing is returned.
+
+    + `"nuclear: charge"`               ... the nuclear charge used where none is given explicitly.
+    + `"fine structure constant: alpha"` ... alpha, and with it its inverse, which is kept consistent here rather
+      than recomputed at each use. **Changing alpha changes every relativistic quantity in the package**, so this
+      is a setting for a deliberate study of the alpha-dependence -- see the AlphaVariation module -- and not one
+      to be varied casually.
+
+    An unrecognised keystring raises and names itself.
+"""
+function setDefaults(sa::String, Z::Float64)
+
+    if        sa == "nuclear: charge"      global GBL_NUCLEAR_CHARGE = Z
+    elseif    sa == "fine structure constant: alpha"
+        global FINE_STRUCTURE_CONSTANT         = Z
+        global INVERSE_FINE_STRUCTURE_CONSTANT = 1.0 / Z
+    else      error("Unsupported keystring:: $sa")
+    end
+
+    nothing
+end
+
+
+"""
+`Defaults.setDefaults(sa::String, nm::Any)`
+    ... sets a global default that carries an arbitrary object; nothing is returned. The single keystring is
+        `"nuclear: model"`, whose value is a `Nuclear.Model` used where none is given explicitly. The argument is
+        typed `Any` rather than `Nuclear.Model` only because this module is compiled before that type exists; it
+        is not an invitation to store something else. An unrecognised keystring raises and names itself.
+"""
+function setDefaults(sa::String, nm::Any)
+
+    if        sa == "nuclear: model"      global GBL_NUCLEAR_MODEL = nm
+    else      error("Unsupported keystring:: $sa")
+    end
+
+    nothing
+end
+
+
+"""
 + `("relativistic subshell list", subshells::Array{Subshell,1}; printout::Bool=true)`  
     ... to (pre-) define internally the standard relativistic subshell list on which the standard order of orbitals is based.
 """
 function setDefaults(sa::String, subshells::Array{Subshell,1}; printout::Bool=true)
     if        sa == "relativistic subshell list"
-        if printout    println("(Re-) Define a new standard subshell list.")    end
-        global GBL_STANDARD_SUBSHELL_LIST = deepcopy(subshells)
+        ## DEPRECATED as a user-facing setting (12-Aug-2026); it delegates to the internal setter below.
+        ## See there for why this does not belong in a public configuration API.
+        Defaults.setStandardSubshellList(subshells; printout=printout)
     else
         error("Unsupported keystring:: $sa")
     end
+
+    nothing
+end
+
+
+"""
+`Defaults.setStandardSubshellList(subshells::Array{Subshell,1}; printout::Bool=true)`
+    ... sets the standard relativistic subshell list, which fixes the ORDER in which the subshells of a CSF are
+        named when one is printed. Nothing is returned.
+
+        THIS IS FOR DISPLAY ONLY, and it is internal. It is set in many places but read in exactly two, both of
+        which produce output: `Base.string(csf::CsfR)` and `Basics.display(stream, orbitals, grid)`. No
+        computation consults it -- every process module works from its own local subshell list, obtained from
+        `Basics.generate(OrderedSubshellList(), basisA, basisB)` and passed explicitly to whatever needs it.
+
+        IT IS NOT A USER SETTING, which is why it was demoted out of `Defaults.setDefaults` on 12-Aug-2026
+        (the string key still delegates here, so existing scripts keep working). The correspondence to a CSF is
+        POSITIONAL -- `csf.occupation[i]` belongs to `subshells[i]` -- and nothing validates the list against
+        the CSFs it will label. A list that does not match therefore mislabels every printed CSF silently. The
+        value is derived data with no physical content, so there is nothing a user answers by overriding it.
+"""
+function setStandardSubshellList(subshells::Array{Subshell,1}; printout::Bool=true)
+    if printout    println("(Re-) Define a new standard subshell list.")    end
+    global GBL_STANDARD_SUBSHELL_LIST = deepcopy(subshells)
 
     nothing
 end
@@ -541,7 +684,8 @@ function setDefaults(sa::String, Znuc::Float64, wa::Array{Float64,1})
     global GBL_QED_HYDROGENIC_LAMBDAC,  GBL_QED_NUCLEAR_CHARGE
 
     if        sa == "QED: damped-hydrogenic"
-        if  length(wa) != 5  error("stop a ")   end
+        if  length(wa) != 5  error("Defaults.setDefaults(\"QED: damped-hydrogenic\"): the array must hold five " *
+                                   "damping parameters; got $(length(wa)).")   end
         println("Re-define the damped overlap integrals < a | e^{-r/lambda_C} | a > of the lowest kappa-orbitals for nuclear charge Z = " *
                 "$(Znuc).")
         GBL_QED_NUCLEAR_CHARGE     = Znuc
@@ -572,6 +716,9 @@ end
 
 + `("electron g-factor")`  ... to give the electron g-factor g_s = 2.00232.
 
++ `("nuclear: charge")`  or  `("nuclear: model")` 
+    ... to get the nuclear charge or model, if it has been set before.
+
 + `("unit: energy")`  or  `("unit: cross section")`  or  `("unit: rate")`  or  `("unit: strength")`  or  `("unit: time")`  
     ... to get the corresponding (user-defined) unit::String for the current computations.
 
@@ -579,6 +726,7 @@ end
     ... to get the (current standard) grid::Array{Float64,1} to which all radial orbital functions usually refer.
 
 + `("speed of light: c")`  ... to get the speed of light in atomic units.
++ `("mass: muon")`  ... to get the muon mass in atomic units, i.e. in units of the electron mass.
 
 + `("summary flag/stream")`  
     ... to get the logical flag and stream for printing a summary file; a tupel (flag, iostream) is returned.
@@ -595,6 +743,8 @@ function getDefaults(sa::String)
     elseif    sa == "framework"                                         return (GBL_FRAMEWORK)
     elseif    sa == "method: continuum"                                 return (GBL_CONTINUUM)
     elseif    sa in ["electron rest energy", "mc^2"]                    return (1/(FINE_STRUCTURE_CONSTANT^2))   
+    elseif    sa == "nuclear: charge"                                   return (GBL_NUCLEAR_CHARGE)
+    elseif    sa == "nuclear: model"                                    return (GBL_NUCLEAR_MODEL)
     elseif    sa == "unit: energy"                                      return (GBL_ENERGY_UNIT)
     elseif    sa == "unit: cross section"                               return (GBL_CROSS_SECTION_UNIT)
     elseif    sa == "unit: energy-diff. cross section"                  return (GBL_EDIFF_CROSS_SECTION_UNIT)
@@ -603,6 +753,7 @@ function getDefaults(sa::String)
     elseif    sa == "unit: time"                                        return (GBL_TIME_UNIT)
     elseif    sa == "standard grid"                                     return (GBL_STANDARD_GRID)
     elseif    sa == "speed of light: c"                                 return (1.0/FINE_STRUCTURE_CONSTANT)
+    elseif    sa == "mass: muon"                                        return (MUON_ELECTRON_MASS_RATIO)
     elseif    sa == "data flag/stream"                                  return ( (GBL_PRINT_DATA, GBL_DATA_IOSTREAM) )
     elseif    sa == "data-X flag/stream"                                return ( (GBL_PRINT_DATAX, GBL_DATAX_IOSTREAM) )
     elseif    sa == "data-Y flag/stream"                                return ( (GBL_PRINT_DATAY, GBL_DATAY_IOSTREAM) )
@@ -622,7 +773,6 @@ end
 """
 function getDefaults(sa::String, n_max::Int64)
 
-    ## !(1 <= n_max < 20)    &&    error("Unsupported value of n_max = $n_max")
     !(1 <= n_max < 12)    &&    error("Unsupported value of n_max = $n_max")
 
     if        sa == "ordered shell list: non-relativistic"
@@ -659,23 +809,31 @@ end
 + `(ResetWarnings)`  ... to reset the global array GBL_WARNINGS.
 """
 function warn(wa::AbstractWarning)
-    global GBL_WARNINGS
+    global GBL_WARNINGS, GBL_WARNINGS_COUNT
 
     if        wa == PrintWarnings()
-        iostream = open("jac-warn.report", "w") 
-        println(iostream, " ")
-        println(iostream, "\n\n",
-                        "Warnings from the present sessions or run, printed at $( string(now())[1:16] ): \n",
-                        "======================================================================= \n")
-        for sa in  GBL_WARNINGS
-            println(iostream, "++ " * sa)
+        lock(GBL_WARNINGS_LOCK)
+        try
+            iostream = open("jac-warn.report", "w")
+            println(iostream, " ")
+            println(iostream, "\n\n",
+                            "Warnings from the present sessions or run, printed at $( string(now())[1:16] ): \n",
+                            "======================================================================= \n")
+            if  length(GBL_WARNINGS) == 0    println(iostream, "++ none.")    end
+            for sa in  GBL_WARNINGS
+                nx = get(GBL_WARNINGS_COUNT, sa, 1)
+                println(iostream, "++ " * sa * (nx > 1  ?  "   [$nx times]"  :  ""))
+            end
+            close(iostream)
+        finally
+            unlock(GBL_WARNINGS_LOCK)
         end
-        close(iostream)
         #
     elseif    wa == ResetWarnings()
-        ## @warn("Reset global array GBL_WARNINGS.")
-        ## printstyled("Constants.warn():  Reset global array GBL_WARNINGS.", color=:light_magenta)
-        GBL_WARNINGS = String[]
+        lock(GBL_WARNINGS_LOCK)
+        try     GBL_WARNINGS = String[];    GBL_WARNINGS_COUNT = Dict{String,Int64}()
+        finally unlock(GBL_WARNINGS_LOCK)
+        end
     else      error("Unsupported Warnings:: $wa")
     end
 
@@ -683,11 +841,32 @@ function warn(wa::AbstractWarning)
 end
 
 
+"""
+`Defaults.warn(wa::AbstractWarning, sa::String)`
+    ... records the warning text sa under the action wa; nothing is returned. The only action taken here is
+        `AddWarning()`; the actions that print or reset the collected warnings take no text and are handled by
+        `Defaults.warn(wa::AbstractWarning)`.
+
+    **A warning is RECORDED ONCE AND COUNTED EVERY TIME.** A condition met by five hundred lines produces one
+    entry saying so, not five hundred entries, and the count is shown when the warnings are printed. The
+    bookkeeping is done under a lock, so this may be called from a threaded line loop; the lock is uncontended in
+    the ordinary single-threaded case and costs nothing against the work that produced the warning.
+"""
 function warn(wa::AbstractWarning, sa::String)
-    global GBL_WARNINGS
+    global GBL_WARNINGS, GBL_WARNINGS_COUNT
 
     if        wa == AddWarning()
-        push!(GBL_WARNINGS, sa)
+        ## Recorded once, but counted every time: a condition met by 500 lines is one entry saying so, not
+        ## 500 entries.  The lock makes this safe to call from a threaded line loop; it is uncontended in
+        ## the ordinary single-threaded case and costs nothing against the work that produced the warning.
+        lock(GBL_WARNINGS_LOCK)
+        try
+            nx = get(GBL_WARNINGS_COUNT, sa, 0)
+            GBL_WARNINGS_COUNT[sa] = nx + 1
+            if  nx == 0     push!(GBL_WARNINGS, sa)     end
+        finally
+            unlock(GBL_WARNINGS_LOCK)
+        end
     else      error("Unsupported Warnings:: $wa")
     end
 
@@ -696,11 +875,6 @@ end
 
     
     
-"""
-`Defaults.saRatip()`  
-    ... returns true or false if the spin-angular coefficients should be calculated by Fortran codes from RATIP/Grasp.
-"""
-saRatip() = false
 saGG()    = true
 
 

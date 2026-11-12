@@ -1,12 +1,38 @@
 
 """
 `module  JAC.PhotoExcitationFluores`  
-... a submodel of JAC that contains all methods for computing photo-excitation-autoionization cross sections and rates.
+... a submodel of JAC that contains all methods for computing photo-excitation-fluorescence cross sections and rates.
+
+    STATUS, 31-Aug-2026: PARKED BY THE MAINTAINER. Do NOT pick this module up as a task without saying so first.
+
+    IT CANNOT BUILD A PATHWAY, AND WOULD RETURN A SENTINEL IF IT COULD. Two faults, and they are of different
+    kinds; the second is the reason parking is the right answer rather than a one-word repair.
+
+    (i) `PhotoExcitationFluores.Pathway(...)` is called with NINE arguments at lines 188 and 335 against an
+    EIGHT-field struct: an extra `true` sits where a retired `hasSublines` field used to be. The struct is
+    (initialLevel, intermediateLevel, finalLevel, excitEnergy, fluorEnergy, crossSection, excitChannels,
+    fluorChannels). Every call therefore raises a MethodError, which is how this was found -- through
+    `examples/example-Eb.jl` in the `/testExamples` run of 31-Aug-2026.
+
+    (ii) Behind it, `computeAmplitudesProperties` returns `crossSection = EmProperty(-1., -1.)` -- a NEGATIVE
+    SENTINEL, not a computed quantity. Repairing (i) alone would turn a module that refuses into a module that
+    hands back a cross section of -1 as though it were a result.
+
+    BUT IT IS NOT THE SAME CASE AS PhotoExcitationAutoion, AND THE DIFFERENCE IS WORTH KNOWING BEFORE ANYONE
+    DECIDES WHAT TO DO. That module substitutes hardcoded stubs for every amplitude. THIS ONE COMPUTES REAL
+    AMPLITUDES: `PhotoEmission.amplitude(Absorption(), ...)` for the excitation step and
+    `PhotoEmission.amplitude(Emission(), ...)` for the fluorescence step, both gauges, no stubs anywhere. What is
+    missing is only the final contraction of the two into a resonant cross section. The hard half is written.
+
+    NOTHING HAS EVER RUN THROUGH IT: its only example, `examples/example-Eb.jl`, carries ZERO `Last successful`
+    dates, and the test suite does not reach it.  What remains is one resonant contraction over amplitudes
+    that already exist; the decision to defer it is the maintainer's.
 """
 module PhotoExcitationFluores 
 
 
-using Printf, ..AngularMomentum, ..AutoIonization, ..Basics, ..Defaults, ..ManyElectron, ..Radial, ..PhotoEmission, ..TableStrings
+using Printf, ..AngularMomentum, ..AutoIonization, ..Basics, ..Defaults, ..ManyElectron, ..Radial, ..PhotoEmission, ..PhotoExcitation,
+      ..Statistical, ..TableStrings
 
 """
 `struct  PhotoExcitationFluores.Settings  <:  AbstractProcessSettings`  
@@ -49,7 +75,34 @@ function Settings()
 end
 
 
-# `Base.show(io::IO, settings::PhotoExcitationFluores.Settings)` 
+"""
+`PhotoExcitationFluores.Settings(set::PhotoExcitationFluores.Settings; keywords...)`
+    ... keyword constructor to modify selected fields of a PhotoExcitationFluores.Settings object;
+        for fields not given, the values of set are used.
+"""
+function Settings(set::PhotoExcitationFluores.Settings;
+        multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,           gauges::Union{Nothing,Array{UseGauge,1}}=nothing,
+        calcPhotonDm::Union{Nothing,Bool}=nothing,                         calcAngular::Union{Nothing,Bool}=nothing,
+        calcStokes::Union{Nothing,Bool}=nothing,                           printBefore::Union{Nothing,Bool}=nothing,
+        incidentStokes::Union{Nothing,ExpStokes}=nothing,                  solidAngles::Union{Nothing,Array{SolidAngle,1}}=nothing,
+        photonEnergyShift::Union{Nothing,Float64}=nothing,                 pathwaySelection::Union{Nothing,PathwaySelection}=nothing)
+    if  isnothing(multipoles)          multipolsx          = set.multipoles         else   multipolsx          = multipoles         end
+    if  isnothing(gauges)              gaugesx             = set.gauges             else   gaugesx             = gauges             end
+    if  isnothing(calcPhotonDm)        calcPhotonDmx       = set.calcPhotonDm       else   calcPhotonDmx       = calcPhotonDm       end
+    if  isnothing(calcAngular)         calcAngularx        = set.calcAngular        else   calcAngularx        = calcAngular        end
+    if  isnothing(calcStokes)          calcStokesx         = set.calcStokes         else   calcStokesx         = calcStokes         end
+    if  isnothing(printBefore)         printBeforex        = set.printBefore        else   printBeforex        = printBefore        end
+    if  isnothing(incidentStokes)      incidentStokesx     = set.incidentStokes     else   incidentStokesx     = incidentStokes     end
+    if  isnothing(solidAngles)         solidAnglesx        = set.solidAngles        else   solidAnglesx        = solidAngles        end
+    if  isnothing(photonEnergyShift)   photonEnergyShiftx  = set.photonEnergyShift  else   photonEnergyShiftx  = photonEnergyShift  end
+    if  isnothing(pathwaySelection)    pathwaySelectionx   = set.pathwaySelection   else   pathwaySelectionx   = pathwaySelection   end
+
+    Settings( multipolsx, gaugesx, calcPhotonDmx, calcAngularx, calcStokesx, printBeforex,
+              incidentStokesx, solidAnglesx, photonEnergyShiftx, pathwaySelectionx )
+end
+
+
+# `Base.show(io::IO, settings::PhotoExcitationFluores.Settings)`
 # 	 ... prepares a proper printout of the variable settings::PhotoExcitationFluores.Settings.  
 function Base.show(io::IO, settings::PhotoExcitationFluores.Settings) 
     println(io, "multipoles:              $(settings.multipoles)  ")
@@ -76,8 +129,8 @@ end
     + excitEnergy         ::Float64                ... photon excitation energy of this pathway
     + fluorEnergy         ::Float64                ... photon fluorescence energy of this pathway
     + crossSection        ::EmProperty             ... total cross section of this pathway
-    + excitChannels       ::Array{PhotoEmission.Channel,1}  ... List of excitation channels of this pathway.
-    + fluorChannels       ::Array{PhotoEmission.Channel,1}  ... List of fluorescence channels of this pathway.
+    + excitChannels       ::Array{MultipoleAmplitude,1}     ... excitation amplitudes, one per multipole, both gauges.
+    + fluorChannels       ::Array{MultipoleAmplitude,1}     ... fluorescence amplitudes, one per multipole, both gauges.
 """
 struct  Pathway
     initialLevel          ::Level
@@ -86,8 +139,8 @@ struct  Pathway
     excitEnergy           ::Float64
     fluorEnergy           ::Float64
     crossSection          ::EmProperty
-    excitChannels         ::Array{PhotoEmission.Channel,1}
-    fluorChannels         ::Array{PhotoEmission.Channel,1}
+    excitChannels         ::Array{MultipoleAmplitude,1}
+    fluorChannels         ::Array{MultipoleAmplitude,1}
 end 
 
 
@@ -123,18 +176,38 @@ end
 """
 function  computeAmplitudesProperties(pathway::PhotoExcitationFluores.Pathway, grid::Radial.Grid, settings::PhotoExcitationFluores.Settings)
     # Compute all excitation channels
-    neweChannels = PhotoEmission.Channel[]
-    for eChannel in pathway.excitChannels
-        amplitude   = PhotoEmission.amplitude("absorption", eChannel.multipole, eChannel.gauge, pathway.excitEnergy, 
-                                                pathway.intermediateLevel, pathway.initialLevel, grid)
-        push!( neweChannels, PhotoEmission.Channel( eChannel.multipole, eChannel.gauge, amplitude))
+    neweChannels = MultipoleAmplitude[]
+    for  ma in pathway.excitChannels
+        mp = ma.multipole
+        if  string(mp)[1] == 'E'
+            ampC = PhotoEmission.amplitude(Absorption(), mp, Basics.Coulomb,   pathway.excitEnergy,
+                                            pathway.intermediateLevel, pathway.initialLevel, grid)
+            ampB = PhotoEmission.amplitude(Absorption(), mp, Basics.Babushkin, pathway.excitEnergy,
+                                            pathway.intermediateLevel, pathway.initialLevel, grid)
+            amp  = EmPropertyC(ampC, ampB)
+        else
+            ampM = PhotoEmission.amplitude(Absorption(), mp, Basics.Magnetic,  pathway.excitEnergy,
+                                            pathway.intermediateLevel, pathway.initialLevel, grid)
+            amp  = EmPropertyC(ampM)
+        end
+        push!( neweChannels, MultipoleAmplitude(mp, amp))
     end
     # Compute all fluorescence channels
-    newfChannels = PhotoEmission.Channel[]
-    for fChannel in pathway.fluorChannels
-        amplitude   = PhotoEmission.amplitude("emission", fChannel.multipole, fChannel.gauge, pathway.fluorEnergy, 
-                                                pathway.finalLevel, pathway.intermediateLevel, grid)
-        push!( newfChannels, PhotoEmission.Channel( fChannel.multipole, fChannel.gauge, amplitude))
+    newfChannels = MultipoleAmplitude[]
+    for  ma in pathway.fluorChannels
+        mp = ma.multipole
+        if  string(mp)[1] == 'E'
+            ampC = PhotoEmission.amplitude(Emission(), mp, Basics.Coulomb,   pathway.fluorEnergy,
+                                            pathway.finalLevel, pathway.intermediateLevel, grid)
+            ampB = PhotoEmission.amplitude(Emission(), mp, Basics.Babushkin, pathway.fluorEnergy,
+                                            pathway.finalLevel, pathway.intermediateLevel, grid)
+            amp  = EmPropertyC(ampC, ampB)
+        else
+            ampM = PhotoEmission.amplitude(Emission(), mp, Basics.Magnetic,  pathway.fluorEnergy,
+                                            pathway.finalLevel, pathway.intermediateLevel, grid)
+            amp  = EmPropertyC(ampM)
+        end
+        push!( newfChannels, MultipoleAmplitude(mp, amp))
     end
     crossSection = EmProperty(-1., -1.)
     pathway = PhotoExcitationFluores.Pathway( pathway.initialLevel, pathway.intermediateLevel, pathway.finalLevel, pathway.excitEnergy, 
@@ -145,54 +218,78 @@ end
 
 """
 `PhotoExcitationFluores.computePhotonDm(pathway::PhotoExcitationFluores.Pathway, settings::PhotoExcitationFluores.Settings)`  
-    ... to compute the photon density matrix of the fluorescence photon in Coulomb gauge for the given pathway as well as 
-        for all the selected solid angles. An Float64 array A(n_solidAngles, 6) is returned with the following meaning:
-            (theta_1, phi_1, rho(1,1),  rho(1,-1),  rho(-1,1),  rho(-1,-1),         for array elements (n, 1..6)
-                theta_2, phi_2, rho(1,1),  rho(1,-1),  rho(-1,1),  rho(-1,-1), ... )
+    ... computes the density matrix of the fluorescence photon, in Coulomb gauge, for the given pathway and for all
+        selected solid angles.  An `dmArray::Array{ComplexF64,2}` of shape (n_solidAngles, 6) is returned, each row
+        holding (theta, phi, rho(1,1), rho(1,-1), rho(-1,1), rho(-1,-1)).
+
+        THE EXCITED ENSEMBLE IS NOW COMPUTED rather than assumed.  What decides the polarization of the fluorescence is
+        the alignment left behind by the excitation step, and that is taken from
+        `PhotoExcitation.computeExcitedLevelTensors` on the pathway's excitation channels, so this module and
+        `PhotoExcitation` describe the same excited atom.  Its sublevel density matrix is recovered with
+        `Statistical.densityMatrix`.
+
+        THE PHOTON AMPLITUDE IS ASSEMBLED EXPLICITLY, with no Racah reduction, for the same reason as in the excitation
+        step: at these angular momenta the sums cost nothing and their phases can be checked.  A photon emitted into
+        (theta,phi) with helicity lambda is described by rotating the multipole operator out of the beam frame,
+
+            M(M_e -> M_f, lambda)  =  SUM_(L)  i^(L+p) lambda^p A_L  conj(D^L_(M_e-M_f, lambda)(phi,theta,0))
+                                                <J_f M_f, L (M_e-M_f) | J_e M_e>
+
+        the projection being fixed at mu = M_e - M_f by the Clebsch-Gordan coefficient, and the photon density matrix
+        follows by summing over the unobserved final sublevels,
+
+            rho^gamma_(lambda lambda')  =  SUM_(M_f) SUM_(M_e,M_e') rho_e(M_e,M_e') M(M_e,M_f,lambda) conj(M(M_e',M_f,lambda')) .
 """
 function  computePhotonDm(pathway::PhotoExcitationFluores.Pathway, settings::PhotoExcitationFluores.Settings)
-    # Calculate an individual element of the photon density matrix at a given angle
-    function computePhotonDmElement(pathway, rho_kq::Float64, solidAngle::SolidAngle, lambda::Int64, lambdap::Int64)
-        meCoulomb = 0.0+0.0im;      meBabushkin = 0.0+0.0im;    Je = pathway.intermediateLevel.J;    Jf = pathway.finalLevel.J
+    Je = pathway.intermediateLevel.J;             Jf = pathway.finalLevel.J
+    Jex = AngularMomentum.oneJ(Je);               Jfx = AngularMomentum.oneJ(Jf)
+    MeList = AngularMomentum.m_values(Je);        MfList = AngularMomentum.m_values(Jf)
+
+    # The alignment left by the excitation step, and the sublevel density matrix it stands for
+    eKey    = Basics.LevelKey( LevelSymmetry(Je, pathway.intermediateLevel.parity), pathway.intermediateLevel.index,
+                               pathway.intermediateLevel.energy, 1.)
+    tensors = PhotoExcitation.computeExcitedLevelTensors( Int64(round(2*Jex)), pathway.initialLevel.J, eKey,
+                                                         pathway.excitChannels, settings.incidentStokes, Basics.Coulomb)
+    rhoE    = length(tensors) == 0 ? Dict{Tuple{AngularM64,AngularM64},ComplexF64}() : Statistical.densityMatrix(tensors)
+
+    # The emission amplitude into (theta,phi) with helicity lambda
+    function emissionAmplitude(Me::AngularM64, Mf::AngularM64, lambda::Int64, solidAngle::SolidAngle)
+        mu = AngularMomentum.oneM(Me) - AngularMomentum.oneM(Mf)
+        wa = ComplexF64(0.)
         for  ch in pathway.fluorChannels
-            L = ch.multipole.L;   if  ch.multipole.electric  p = 1   else   p = 0   end
-            for  chp in pathway.fluorChannels
-                Lp = chp.multipole.L;   if  chp.multipole.electric  pp = 1   else   pp = 0   end
-                for  k = 0:10
-                    if  !AngularMomentum.isTriangle(L, Lp, k)  ||   !AngularMomentum.isTriangle(Je, Je, AngularJ64(k))    continue    end
-                    if  ch.gauge == Basics.Babushkin  ||    chp.gauge == Basics.Babushkin                                 continue    end 
-                    for  q = 0:10
-                        for  qp = 0:10
-                            if  lambda - lambdap  != -qp    continue    end
-                            meCoulomb = meCoulomb + AngularMomentum.Wigner_DFunction(k,-q,qp, solidAngle.phi, solidAngle.theta, 0.0) * rho_kq *
-                                                    im^(Lp + pp  - L - p) * lambda^p * lambdap^pp * sqrt((2L+1)*(2Lp+1))                      *
-                                                    (-1)^(Basics.twice(Jf)/2 + Basics.twice(Je)/2 + k+q+1)                                    *
-                                                    AngularMomentum.ClebschGordan(L, lambda, Lp, -lambdap, k, -qp)                            * 
-                                                    AngularMomentum.Wigner_6j(L, Lp, k, Je, Je, Jf)                                           *
-                                                    ch.amplitude * conj(chp.amplitude)
-                        end
-                    end
+            L = ch.multipole.L;    p = ch.multipole.electric ? 1 : 0
+            if  abs(mu) > L    continue    end
+            cg = AngularMomentum.ClebschGordan(Jfx, AngularMomentum.oneM(Mf), 1.0*L, mu, Jex, AngularMomentum.oneM(Me))
+            if  cg == 0.    continue    end
+            wa = wa + (1.0im)^(L + p) * lambda^p * ch.amplitude.Coulomb * cg *
+                      conj( AngularMomentum.Wigner_DFunction(L, mu, 1.0*lambda, solidAngle.phi, solidAngle.theta, 0.0) )
+        end
+
+        return( wa )
+    end
+
+    function photonDmElement(solidAngle::SolidAngle, lambda::Int64, lambdap::Int64)
+        wa = ComplexF64(0.)
+        for  Mf in MfList
+            for  Me in MeList
+                for  Mep in MeList
+                    if  !haskey(rhoE, (Me,Mep))    continue    end
+                    wa = wa + rhoE[(Me,Mep)] * emissionAmplitude(Me, Mf, lambda, solidAngle) *
+                              conj( emissionAmplitude(Mep, Mf, lambdap, solidAngle) )
                 end
             end
         end
-        meCoulomb = 2*pi * meCoulomb
-        
-        return( meCoulomb, meBabushkin )
+
+        return( 2pi * wa )
     end
-    
+
     dmArray = zeros(ComplexF64, length(settings.solidAngles), 6)
-    # Calculate rho_kq (alpha_e, J_e) of the excited level
-    @warn("Statistical tensors of the excited atoms are not yet implemeneted here.")
-    rho_kq = 2.0
-    # Compute in turn all the corresponding photon density matrix elements
     for  (s, solidAngle) in enumerate(settings.solidAngles)
-        dmArray[s,1] = solidAngle.theta;    dmArray[s,2] = solidAngle.phi    
-        dmArray[s,3] = computePhotonDmElement(pathway, rho_kq, solidAngle, 1, 1)[1]   
-        dmArray[s,4] = computePhotonDmElement(pathway, rho_kq, solidAngle, 1,-1)[1]   
-        dmArray[s,5] = computePhotonDmElement(pathway, rho_kq, solidAngle,-1, 1)[1]  
-        dmArray[s,6] = computePhotonDmElement(pathway, rho_kq, solidAngle,-1,-1)[1]   
+        dmArray[s,1] = solidAngle.theta;                    dmArray[s,2] = solidAngle.phi
+        dmArray[s,3] = photonDmElement(solidAngle,  1,  1); dmArray[s,4] = photonDmElement(solidAngle,  1, -1)
+        dmArray[s,5] = photonDmElement(solidAngle, -1,  1); dmArray[s,6] = photonDmElement(solidAngle, -1, -1)
     end
-    
+
     return( dmArray )
 end
 
@@ -209,6 +306,16 @@ function  computePathways(finalMultiplet::Multiplet, intermediateMultiplet::Mult
     printstyled("PhotoExcitationFluores.computePathways(): The computation of photo-excitation-fluorescence amplitudes starts now ... \n", color=:light_green)
     printstyled("-------------------------------------------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
+    error("\n\nPhotoExcitationFluores is PARKED (31-Aug-2026) and gives no number.\n"                             *
+          ">>> TWO faults. Pathway(...) is called with NINE arguments against an EIGHT-field struct (an extra\n"  *
+          ">>> `true` where a retired hasSublines used to sit), so no pathway can be built at all; and behind\n"  *
+          ">>> that, computeAmplitudesProperties returns crossSection = EmProperty(-1., -1.), a NEGATIVE\n"       *
+          ">>> SENTINEL. Repairing the constructor alone would turn a module that refuses into one that hands\n"  *
+          ">>> back -1 as a result.\n\n"                                                                          *
+          ">>> WORTH KNOWING: unlike PhotoExcitationAutoion, this module computes REAL amplitudes -- both the\n"  *
+          ">>> absorption and the fluorescence step, in both gauges, with no stubs. Only the contraction of the\n" *
+          ">>> two into a resonant cross section is missing. See the STATUS block in the module docstring and\n"  *
+          ">>> the module docstring for what remains.\n")
     pathways = PhotoExcitationFluores.determinePathways(finalMultiplet, intermediateMultiplet, initialMultiplet, settings)
     # Display all selected pathways before the computations start
     if  settings.printBefore    PhotoExcitationFluores.displayPathways(stdout, pathways, settings)    end
@@ -226,7 +333,6 @@ function  computePathways(finalMultiplet::Multiplet, intermediateMultiplet::Mult
     # Calculate the photon density matrix of the fluorescence photon if needed and display all requested properties
     # These calculations are done in turn for all selected pathways
     if  settings.calcPhotonDm  ||  settings.calcAngular  ||  settings.calcStokes
-        @warn("Statistical tensors of the excited atoms are not yet implemeneted here.")
         for  pathway in newPathways
             dmArray = PhotoExcitationFluores.computePhotonDm(pathway, settings) 
             PhotoExcitationFluores.displayPhotonDm(stdout, pathway, dmArray, settings)
@@ -258,7 +364,7 @@ function  determinePathways(finalMultiplet::Multiplet, intermediateMultiplet::Mu
                     eEnergy = nLevel.energy - iLevel.energy + settings.photonEnergyShift
                     fEnergy = nLevel.energy - fLevel.energy + settings.photonEnergyShift
                     if  eEnergy < 0.   ||   fEnergy < 0.    continue    end
-                    rSettings = PhotoEmission.Settings( settings.multipoles, settings.gauges, false, false, LineSelection(), 0., 0., 0.)
+                    rSettings = PhotoEmission.Settings( settings.multipoles, settings.gauges, false, false, CorePolarization(), LineSelection(), 0., 0., 0., false)
                     eChannels = PhotoEmission.determineChannels(nLevel, iLevel, rSettings) 
                     fChannels = PhotoEmission.determineChannels(fLevel, nLevel, rSettings) 
                     push!( pathways, PhotoExcitationFluores.Pathway(iLevel, nLevel, fLevel, eEnergy, fEnergy, EmProperty(0., 0.), 

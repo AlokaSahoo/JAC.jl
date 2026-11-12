@@ -1,12 +1,18 @@
 
 """
-`module  JAC.HydrogenicIon`  
-... a submodel of JAC that contains methods for computing various one-electron energies, matrix elements, etc..
+`module  JAC.HydrogenicIon`
+... a submodel of JAC that provides one-electron Schroedinger/Dirac energies, radial orbitals and r^k
+    expectation values for a point-like nucleus. Used internally by SelfConsistent.jl (SCF starting
+    orbitals) and PhotoRecombination.jl (free-orbital approximations); not a general-purpose, user-
+    facing entry point for ad hoc hydrogenic questions. Only `energy()` and `radialOrbital(sh, Z, ...)`
+    are closed-form and independent of Bsplines.jl, making them a reliable exact benchmark; `orbital()`
+    and `radialOrbital(sh, nm::Nuclear.Model, grid)` diagonalize in the same B-spline basis as the SCF
+    and inherit its high-n/high-kappa numerical artifacts (verified 01-Aug-2026).
 """
 module HydrogenicIon 
 
 
-using  Printf, ..Basics, ..BsplinesN, ..Defaults, ..Math, ..Nuclear, ..Radial, ..RadialIntegrals,  GSL
+using  Printf, ..Basics, ..Bsplines, ..Defaults, ..Math, ..Nuclear, ..Radial, ..RadialIntegrals,  GSL
 using  SpecialFunctions,  HypergeometricFunctions
 
 
@@ -51,8 +57,8 @@ end
 """
 function orbital(sh::Subshell, nm::Nuclear.Model, grid::Radial.Grid)
     Defaults.setDefaults("standard grid", grid; printout=false)
-    basis    = BsplinesN.generatePrimitives(grid)
-    orbitals = BsplinesN.generateOrbitalsHydrogenic(basis, nm, [sh]; printout = false)
+    basis    = Bsplines.generatePrimitives(grid)
+    orbitals = Bsplines.generateOrbitalsHydrogenic([sh], nm, basis; printout = false)
     orb      = orbitals[sh]
     return( orb )
 end
@@ -119,39 +125,6 @@ end
 
 
 """
-`HydrogenicIon.radialOrbital_old2022(sh::Subshell, Z::Float64, grid::Radial.Grid)`
-    ... to compute a relativstic hydrogenic Dirac orbital on the given grid by applying the kinetic-balance to a 
-        corresponding non-relavistic orbital; an orbital::Radial.Orbital is returned.
-"""
-function radialOrbital_old2022(sh::Subshell, Z::Float64, grid::Radial.Grid)
-    en  = HydrogenicIon.energy(sh, Z)
-    P   = HydrogenicIon.radialOrbital( Shell(sh.n, Basics.subshell_l(sh)), Z, grid)
-    
-    Q   = zeros(size(P, 1));   Pprime   = zeros(size(P, 1));    Qprime   = zeros(size(P, 1))
-    if  grid.meshType == Radial.MeshGrasp()
-        dP(i) = Math.derivative(P, i)
-        for i = 2:size(Q, 1)
-            Q[i] = -1/(2 * Defaults.INVERSE_FINE_STRUCTURE_CONSTANT) * (dP(i) / grid.h / grid.rp[i] + sh.kappa/grid.r[i]) * P[i]
-            @warn("radialOrbital():: P' and Q' not yet defined.")
-        end
-    elseif  grid.meshType == Radial.MeshGL()
-        @warn("radialOrbital():: Q[:] = zero everywhere; kinetic-balance not yet defined for Gauss-Legendre grids.")
-    else
-        error("stop a")
-    end
-
-    orb   = Radial.Orbital( sh, true, false, en, P, Q, Pprime, Qprime, grid)
-    norma = RadialIntegrals.overlap(orb, orb, grid)
-    orb.P = orb.P/sqrt(norma)
-    orb.Q = orb.Q/sqrt(norma)
-    normb = RadialIntegrals.overlap(orb, orb, grid)
-    println("HydrogenicIon.radialOrbital():  for subshell $sh : norm-before = $norma, norm-after = $normb")
-    
-    return( orb )
-end
-
-
-"""
 `HydrogenicIon.radialOrbital(sh::Subshell, Z::Float64, r::Float64)`
     ... to compute a relativistic hydrogenic Dirac orbital for the given subshell and nuclear charge Z; 
         a value::Float64 is returned; contributed by C Naumann (2022).
@@ -181,21 +154,9 @@ end
         of the Dirac Hamiltonian in a B-spline basis; an orbital::Radial.Orbital is returned; contributed by C Naumann (2022).
 """
 function radialOrbital(sh::Subshell, nm::Nuclear.Model, grid::Radial.Grid)
-    basis   = BsplinesN.generatePrimitives(grid)
-    orb_dic = BsplinesN.generateOrbitalsHydrogenic(basis, nm, [sh]; printout = false)
+    basis   = Bsplines.generatePrimitives(grid)
+    orb_dic = Bsplines.generateOrbitalsHydrogenic([sh], nm, basis; printout = false)
     orb     = orb_dic[sh]
-    @show orb_dic
-    return( orb )
-end
-
-
-"""
-`HydrogenicIon.radialOrbital_old2022(sh::Subshell, nm::Nuclear.Model, grid::Radial.Grid)`
-    ... to compute a relativstic hydrogenic Dirac orbital for the given nuclear model by using an explicit diagonalization
-        of the Dirac Hamiltonian in a B-spline basis; an orbital::Radial.Orbital is returned.
-"""
-function radialOrbital_old2022(sh::Subshell, nm::Nuclear.Model, grid::Radial.Grid)
-    error("HydrogenicIon.radialOrbital() Not yet implemented.")
     return( orb )
 end
 

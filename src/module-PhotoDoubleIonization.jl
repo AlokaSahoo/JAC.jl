@@ -1,18 +1,127 @@
 
 """
 `module  JAC.PhotoDoubleIonization`  
-... a submodel of JAC that contains all methods for computing photo-double ionization properties between some initial 
-    and final-state multiplets. This modules implements a simplified model for the photo-double ionization by treating
-    one of the ionized electrons as semi-bound in some high-n shells and by using a (resonant) Green function multiplet
-    for second-order computations. From a physics viewpoint, this model becomes better as higher n is chosen and as 
-    larger the number of sharings is. The use of a semi-bound electron ensures that most parts of the photo-double
-    ionization is similar to the (standard) photoionization of atoms.
+... a submodel of JAC that computes photo-double ionization, i.e. the absorption of ONE photon with TWO electrons emitted into the
+    continuum. The final state is built as a pair of outgoing partial waves: the first electron couples to the final ion to give an
+    intermediate symmetry, the second couples to that to give the total symmetry of the scattering state, and a multipole must reach that
+    total symmetry from the initial level. The amplitude is second order, with both time orderings of the knock-out (TS1) mechanism, and
+    the intermediate states are levels of the (N-1)-electron ion with ONE continuum partial wave added.
+
+    STATUS, 15-Sep-2026: THE PARKING IS LIFTED BY THE MAINTAINER -- see the closing paragraph of this block for
+    what that does and does not mean. The 15-Aug text below is kept because it is the diagnosis, and it is still
+    the best statement of what is wrong.
+
+    STATUS, 15-Aug-2026 (SUPERSEDED, KEPT AS THE DIAGNOSIS): POSTPONED BY THE MAINTAINER. Do NOT pick this module up as a task without saying so
+    first. It was rebuilt on this date from the parked quasi-shell version, and the rebuild is UNFINISHED:
+    the structure works and passes several internal tests, but the ABSOLUTE SCALE IS WRONG BY THREE TO FOUR
+    ORDERS OF MAGNITUDE and no number it produces means anything yet.
+
+    DO NOT MISREAD THE STATE. That the module now runs end to end, returns finite numbers and passes its
+    symmetry tests is NOT evidence that it is nearly right. The three self-tests below are necessary and
+    cheap, and they were all passing while the result was still wrong by 10^3-10^4. In particular, a
+    beautifully symmetric energy-sharing distribution says only that the pair set is exchange-closed.
+
+    WHAT WORKS, and was verified on He (Z=2, 1s^2 -> He^2+ + 2e) at 200/400/800 eV:
+      * The five-layer structure Line -> Sharing -> PartialWavePair -> Channel -> MultipoleAmplitude.
+        For He at E1 every pair correctly serves the single total symmetry 1-, and the eight pairs at
+        maxKappa=2 are the relativistic decomposition of the textbook eps-s eps-p and eps-p eps-d channels.
+      * The double-ionization threshold comes out at 77.77 eV against 79.0 eV measured.
+      * The energy-sharing distribution is mirror-symmetric to 1e-10 .. 1e-14, and EACH TIME ORDERING is
+        separately symmetric, which is the stronger test: a defect in one can otherwise be masked by the other.
+      * The distribution is U-shaped and deepens with photon energy, as it must far above threshold.
+      * The total cross section reproduces the weighted sum of the differential ones to 0.00%.
+
+    WHAT IS WRONG. sigma(2+)/sigma(+) comes out 0.001% at 200 eV rising to 0.006% at 800 eV, against a
+    measured 3-4% near 200 eV falling to the asymptotic 1.68%. So the result is ~3600x too small AND trends
+    the wrong way. The single-ionization cross section computed from the SAME orbitals, normalization and
+    prefactor lands within 15% of the literature, so the deficit is specific to the second-order
+    double-ionization amplitude, not to the machinery underneath it.
+
+    THE REFERENCE THAT SETTLES THE NORMALIZATION is Kornberg & Miraglia, Phys. Rev. A 48, 3714 (1993),
+    "Double photoionization of helium: use of a correlated two-electron continuum wave function"
+    (examples/papers/1993.pra-kornberg-pdi-helium.pdf). Their Eq. (2) reads
+
+        d^5 sigma(2+) / (d eps1 d Omega1 d Omega2)  =  4 pi^2 alpha a0^2 k1 k2 C^(G) |e.T_fi^(G)(k1,k2)|^2
+
+    with C^(L) = E_gamma, C^(V) = 1/E_gamma, C^(A) = E_gamma^(-3). THREE FACTORS ARE MISSING HERE:
+      1. the momentum product k1 k2, which this module does not apply at all. It is O(1) -- 1.90 at the end
+         sharing of the 200 eV case and 4.49 at the midpoint -- so it CANNOT close the gap, but it flattens
+         the U by a factor 2.4 and is therefore a shape prediction to test.
+      2. the gauge-dependent prefactor C^(G): length and velocity differ by E_gamma^2, whereas this module
+         applies ONE gauge-independent prefactor to both Coulomb and Babushkin.
+      3. a factor 1/2: "the correctly normalized total cross section is one half of the integral in the
+         shake-off region". This is NOT the same double counting that Basics.determineEnergySharings handles.
+    Their final state is normalized to a delta function in MOMENTUM space while JAC normalizes its continuum
+    orbitals per unit ENERGY; since dE = k dk that conversion generates k factors of its own and must be done
+    deliberately, not assumed. Doing it may absorb part or all of item 1.
+
+    THE OTHER SUSPECT is the intermediate space, which is severely truncated: the numbers above used four
+    Green levels, maxKappa=1 and a 5-point Gauss-Legendre integral over the WHOLE excess-energy range, for an
+    integrand peaked near threshold. The rise of the ratio with photon energy is the signature of exactly
+    that. A convergence scan was started and did not finish; it is the first thing to run on resuming.
+
+    WHAT IS NOT A PROBLEM. The Babushkin/Coulomb ratio of ~2.7 is NOT evidence of a defect: Kornberg &
+    Miraglia report a large length-velocity discrepancy at all energies, with the two forms separated by
+    about an order of magnitude over much of the range and velocity the trustworthy one at high energy.
+    Do not spend time hunting it.
+
+    QUANTITATIVE TARGETS for the next attempt, both from that paper: Fig. 2 gives d sigma / d eps1 in Mb/eV
+    at 120, 150 and 200 eV and at 1, 2 and 3 keV; Fig. 3 gives sigma(2+)/sigma(+) against photon energy with
+    the 1.68% asymptote marked. Note their total cross section cost about 20 h on a 10-Mflop machine, so this
+    is an expensive calculation even when done correctly.
+
+    ---------------------------------------------------------------------------------------------------------
+    THE PARKING IS LIFTED, 15-Sep-2026, ON THE MAINTAINER'S DECISION. What changed, and what did not:
+
+    FIXED SINCE 15-Aug: the photon was subtracted instead of added in one time ordering; the intermediate
+    integral stopped at the wrong energy; the residue term was missing, so the amplitude was exactly real;
+    the cross-section constant was wrong by 4 pi/(alpha^2 omega^2). And on 15-Sep the OUTPUT PATH: this
+    module's `displayResults` was called by `computeLines` and had never been written, while `displayLines`
+    read a `channels` field that the 15-Aug rebuild had moved onto the PartialWavePair. Either would raise.
+    So until today the public entry point could not run to completion whatever else was right.
+
+    THE ABSOLUTE SCALE IS NO LONGER 3-4 ORDERS OUT; THE 15-Aug TEXT ABOVE IS STALE ON THIS POINT. That figure
+    predates the four fixes of 06-Sep, one of which was a cross-section constant wrong by 4 pi/(alpha^2 omega^2).
+    Measured 15-Sep-2026 for He with 9 sharings and maxKappa = 2, in the COULOMB gauge:
+        sigma(2+)/sigma(+)  =  2.70 % at 200 eV,  3.18 % at 400 eV,  2.28 % at 800 eV
+    against a measured 3-4 % near 200 eV falling towards an asymptotic 1.68 %. So the velocity-gauge ratio is
+    the right SIZE and falls between 400 and 800 eV, which is the right direction. It is not monotonic, and
+    nothing below is converged; but "three orders of magnitude too small" is no longer true and must not be
+    repeated.
+
+    WHAT IS STILL NOT TRUSTWORTHY, and the caller is warned of it at run time rather than stopped:
+      * THE SHARING INTEGRAL IS NOT CONVERGED, and this is now the leading error. Measured at 200 eV: the total
+        moves +2.3 %, +12.4 % and +14.1 % as the Gauss-Legendre points go 5 -> 9 -> 15 -> 21, i.e. +29 % over
+        the whole scan and still rising. The round-1 statement that it was converged "to a few per cent, and
+        more points will not help" is WRONG on both counts and is corrected here.
+      * THE LENGTH (Babushkin) FORM. Measured 15-Sep: quadrupling the intermediate set moves the velocity
+        (Coulomb) cross section by under 1 % at 200 eV while the length one nearly DOUBLES. The gauge RATIO
+        is therefore not a convergence indicator here, because one of its two members is the unstable one.
+        This agrees with Kornberg & Miraglia, who find velocity the trustworthy form at high energy.
+      * THE ENERGY TREND is not monotonic in either gauge; see the numbers above.
+
+    WHY THE TWO GAUGES ARE NOT EXPECTED TO AGREE, which is a property of second-order amplitudes and not a
+    defect of this module. The length and velocity forms of a one-photon matrix element are connected by the
+    commutator identity <a|p|b> = i (E_a - E_b) <a|r|b>, i.e. by the LEVEL DIFFERENCE. In a second-order
+    amplitude the photon operator carries the PHYSICAL frequency omega, while the intermediate state is
+    off shell: E_n - E_i is not omega. The difference between the two forms is then governed by the factor
+    (E_i - E_n - omega), which vanishes only ON SHELL, and the two gauges are equivalent only through
+    CLOSURE over a COMPLETE intermediate set. Putting omega in the operator is the correct S-matrix
+    prescription and is what this module does; it is ALSO the reason the two forms separate here. See
+    Fortun et al., arXiv:1610.03571, for the master identity and the statement that extended gauge
+    invariance holds only at exact resonance. Do not "fix" this by replacing omega with a level difference:
+    that would restore gauge agreement matrix element by matrix element while making the amplitude wrong.
+
+    THE SUITE NOW GUARDS THIS MODULE. `TestFrames.testModule_PhotoDoubleIonization` asserts the output path,
+    the mirror symmetry of the sharing distribution, and that the quadrature adds up -- three invariants that
+    hold whatever the scale turns out to be. It deliberately asserts NOTHING about the absolute value and
+    nothing about gauge equality, for the reason given above.
 """
 module PhotoDoubleIonization
 
 
-using Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..Radial, ..Nuclear, ..ManyElectron, ..PhotoEmission, 
-                ..TableStrings
+using Printf, ..AngularMomentum, ..Basics, ..Bsplines, ..Continuum, ..Defaults, ..Radial, ..RadialIntegrals, ..Nuclear,
+                ..ManyElectron, ..PhotoEmission, ..TableStrings
 
 """
 `struct  PhotoDoubleIonization.Settings  <:  AbstractProcessSettings`  
@@ -20,142 +129,209 @@ using Printf, ..AngularMomentum, ..Basics, ..Continuum, ..Defaults, ..Radial, ..
 
     + multipoles              ::Array{EmMultipole}      ... Specifies the multipoles of the radiation field that are to be included.
     + gauges                  ::Array{UseGauge}         ... Specifies the gauges to be included into the computations.
-    + quasiShells             ::Array{Shell,1}          
-        ... Non-relativistic shells that emulate the quasi-free part of the two-electron continuum.
     + photonEnergies          ::Array{Float64,1}        ... List of photon energies [in user-selected units].  
+    + electronEnergyShift     ::Float64                 ... An overall energy shift of the two emitted electrons [in user-selected units];
+        it corrects the total electron energy for a shift of the i-f transition energy and thereby separates the energies at which the
+        continuum orbitals are generated from the sharing coordinates.
     + NoEnergySharings        ::Int64                   ... Number of energy sharings that are used in the computations for each line.
+    + intermediateEnergyFactor ::Float64               ... The top of the INTERMEDIATE energy integral, as a multiple of the on-shell
+                                                           energy E_i + omega - E_green(min).  It must EXCEED 1, or the pole of the
+                                                           photon-first ordering sits exactly on the upper endpoint, where no principal
+                                                           value exists; and it is a convergence parameter, because the intermediate
+                                                           state is VIRTUAL and its electron energy is not bounded by energy
+                                                           conservation. The grid must support a continuum orbital at the resulting top
+                                                           energy.  Default 3.
+    + NoIntermediateEnergies  ::Int64                   ... Number of points in the integral over the INTERMEDIATE electron energy of the
+        second-order amplitude. This is a different convergence question from `NoEnergySharings` and must be set separately: the sharing
+        mesh resolves the OUTER integral over how the excess energy is divided between the two emitted electrons, whereas this mesh decides
+        how completely the second-order sum over intermediate states is carried out. **Until 30-Sep-2026 both were taken from
+        `NoEnergySharings`**, so asking for more sharings silently made the intermediate sum more complete as well, and the differential
+        cross section at a FIXED sharing then grew with the number of sharings -- measured at equal sharing, a factor 2.7 between 3 and 41
+        sharings, with the partial-wave set unchanged. 0 means fall back to `NoEnergySharings`, i.e. the old, entangled behaviour.
     + maxKappa                ::Int64                   ... Maximum kappa value of partial waves to be included.
     + calcDifferentialCs      ::Bool                    ... True, if the energy-differential cs are to be calculated and false otherwise.  
     + printBefore             ::Bool                    ... True, if all energies and lines are printed before their evaluation.
     + lineSelection           ::LineSelection           ... Specifies the selected levels, if any.
     + eeInteraction           ::AbstractEeInteraction   ... Type of the electron-electron interaction in the second-order treatment.
-    + gMultiplet              ::Multiplet               ... Mean-field multiplet of intermediate levels in the computations.
+    + gMultiplet              ::Multiplet               ... Mean-field multiplet of the (N-1)-ELECTRON IONIC CORES of the
+        intermediate levels, NOT of the intermediate levels themselves.  `PhotoDoubleIonization.generateIntermediateLevels` builds each
+        intermediate by generating a continuum orbital IN THE FIELD OF one of these levels and attaching it, so a multiplet of
+        N-electron intermediates handed in here yields (N+1)-electron intermediates and every junction of the second-order sum then
+        pairs unequal electron numbers.  This field said "intermediate levels" until 01-Nov-2026 and `examples/example-Dj.jl` followed
+        it: for the two-electron 1s^2 initial state it supplied the two-electron configurations 1s4s and 1s4p, and the code made them
+        three-electron -- measured, and the reason that branch has never carried a `Last successful` date.  The same role is played, and
+        was always correctly documented, by `AutoIonization.Settings.gCoreMultiplet`.
+    + continuumExchange       ::Union{Nothing,Bool}     ... True/false to force exchange between the two ejected electrons
+        and the bound electrons on or off; `nothing` -- the default -- lets `Basics.perform` decide automatically from the
+        final-ion `AsfSettings.scField` (`Continuum.resolveExchangeDefault`, item 99).
 """
-struct Settings  <:  AbstractProcessSettings 
+struct Settings  <:  AbstractProcessSettings
     multipoles                ::Array{EmMultipole}
     gauges                    ::Array{UseGauge}
-    quasiShells               ::Array{Shell,1} 
-    photonEnergies            ::Array{Float64,1} 
-    NoEnergySharings          ::Int64         
-    maxKappa                  ::Int64 
-    calcDifferentialCs        ::Bool 
+    photonEnergies            ::Array{Float64,1}
+    electronEnergyShift       ::Float64
+    NoEnergySharings          ::Int64
+    NoIntermediateEnergies    ::Int64
+    intermediateEnergyFactor  ::Float64
+    maxKappa                  ::Int64
+    calcDifferentialCs        ::Bool
     printBefore               ::Bool
     lineSelection             ::LineSelection
     eeInteraction             ::AbstractEeInteraction
     gMultiplet                ::Multiplet
-end 
+    continuumExchange         ::Union{Nothing,Bool}
+end
 
 
 """
 `PhotoDoubleIonization.Settings()`  ... constructor for the default values of PhotoDoubleIonization line computations
 """
 function Settings()
-    Settings(Basics.EmMultipole[E1], Basics.UseGauge[Basics.UseCoulomb, Basics.UseBabushkin], Shell[], Float64[], 0, 0, false, false, 
-                LineSelection(), CoulombInteraction(), Multiplet())
+    Settings(Basics.EmMultipole[E1], Basics.UseGauge[Basics.UseCoulomb, Basics.UseBabushkin], Float64[], 0., 0, 0, 3., 0, false, false,
+                LineSelection(), CoulombInteraction(), Multiplet(), nothing)
 end
 
 
 """
 `PhotoDoubleIonization.Settings(set::PhotoDoubleIonization.Settings;`
 
-        multipoles=..,          gauges=..,                  quasiShells=..,          
-        photonEnergies=..,      NoEnergySharings=..,     
-        maxKappa=..,            calcDifferentialCs..,       printBefore=..,             lineSelection=..,       
-        eeInteraction=..,       gMultiplet=..)
-                    
+        multipoles=..,          gauges=..,                  photonEnergies=..,
+        electronEnergyShift=.., NoEnergySharings=..,     NoIntermediateEnergies=..,   intermediateEnergyFactor=..,
+        maxKappa=..,            calcDifferentialCs..,       printBefore=..,             lineSelection=..,
+        eeInteraction=..,       gMultiplet=..,              continuumExchange=..)
+
     ... constructor for modifying the given PhotoDoubleIonization.Settings by 'overwriting' the previously selected parameters.
 """
-function Settings(set::PhotoDoubleIonization.Settings;    
-    multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,                gauges::Union{Nothing,Array{UseGauge,1}}=nothing,  
-    quasiShells::Union{Nothing,Array{Shell,1}}=nothing,
-    photonEnergies::Union{Nothing,Array{Float64,1}}=nothing,                NoEnergySharings::Union{Nothing,Int64}=nothing,       
-    maxKappa::Union{Nothing,Int64}=nothing,                                 calcDifferentialCs::Union{Nothing,Bool}=nothing,      
-    printBefore::Union{Nothing,Bool}=nothing,                               lineSelection::Union{Nothing,LineSelection}=nothing, 
-    eeInteraction::Union{Nothing,AbstractEeInteraction}=nothing,            gMultiplet::Union{Nothing,Multiplet}=nothing)  
-    
-    if  multipoles         == nothing   multipolesx         = set.multipoles         else  multipolesx         = multipoles          end 
-    if  gauges             == nothing   gaugesx             = set.gauges             else  gaugesx             = gauges              end 
-    if  quasiShells        == nothing   quasiShellsx        = set.quasiShells        else  quasiShellsx        = quasiShells         end 
-    if  photonEnergies     == nothing   photonEnergiesx     = set.photonEnergies     else  photonEnergiesx     = photonEnergies      end 
-    if  NoEnergySharings   == nothing   NoEnergySharingsx   = set.electronEnergies   else  NoEnergySharingsx   = NoEnergySharings    end 
-    if  maxKappa           == nothing   maxKappax           = set.maxKappa           else  maxKappasx          = maxKappa            end 
-    if  calcDifferentialCs == nothing   calcDifferentialCsx = set.calcDifferentialCs else  calcDifferentialCsx = calcDifferentialCs  end 
-    if  printBefore        == nothing   printBeforex        = set.printBefore        else  printBeforex        = printBefore         end 
-    if  lineSelection      == nothing   lineSelectionx      = set.lineSelection      else  lineSelectionx      = lineSelection       end 
-    if  eeInteraction      == nothing   eeInteractionx      = set.eeInteraction      else  eeInteractionx      = eeInteraction       end 
-    if  gMultiplet         == nothing   gMultipletx         = set.gMultiplet         else  gMultipletx         = gMultiplet          end 
+function Settings(set::PhotoDoubleIonization.Settings;
+    multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,                gauges::Union{Nothing,Array{UseGauge,1}}=nothing,
+    photonEnergies::Union{Nothing,Array{Float64,1}}=nothing,                electronEnergyShift::Union{Nothing,Float64}=nothing,
+    NoEnergySharings::Union{Nothing,Int64}=nothing,                         NoIntermediateEnergies::Union{Nothing,Int64}=nothing,
+    intermediateEnergyFactor::Union{Nothing,Float64}=nothing,
+    maxKappa::Union{Nothing,Int64}=nothing,                                 calcDifferentialCs::Union{Nothing,Bool}=nothing,
+    printBefore::Union{Nothing,Bool}=nothing,                               lineSelection::Union{Nothing,LineSelection}=nothing,
+    eeInteraction::Union{Nothing,AbstractEeInteraction}=nothing,            gMultiplet::Union{Nothing,Multiplet}=nothing,
+    continuumExchange::Union{Nothing,Bool}=nothing)
 
-    Settings( multipolesx, gaugesx, quasiShellsx, photonEnergiesx, NoEnergySharingsx, maxKappax, calcDifferentialCsx, 
-                printBeforex, lineSelectionx, eeInteractionx, gMultipletx)
+    if  isnothing(multipoles)           multipolesx         = set.multipoles         else  multipolesx         = multipoles          end
+    if  isnothing(gauges)               gaugesx             = set.gauges             else  gaugesx             = gauges              end
+    if  isnothing(photonEnergies)       photonEnergiesx     = set.photonEnergies     else  photonEnergiesx     = photonEnergies      end
+    if  isnothing(electronEnergyShift)  electronEnergyShiftx= set.electronEnergyShift else electronEnergyShiftx= electronEnergyShift end
+    if  isnothing(NoEnergySharings)     NoEnergySharingsx   = set.NoEnergySharings   else  NoEnergySharingsx   = NoEnergySharings    end
+    if  isnothing(NoIntermediateEnergies)  NoIntermediateEnergiesx = set.NoIntermediateEnergies  else  NoIntermediateEnergiesx = NoIntermediateEnergies  end
+    if  isnothing(intermediateEnergyFactor)  intermediateEnergyFactorx = set.intermediateEnergyFactor  else  intermediateEnergyFactorx = intermediateEnergyFactor  end
+    if  isnothing(maxKappa)             maxKappax           = set.maxKappa           else  maxKappax           = maxKappa            end
+    if  isnothing(calcDifferentialCs)   calcDifferentialCsx = set.calcDifferentialCs else  calcDifferentialCsx = calcDifferentialCs  end
+    if  isnothing(printBefore)          printBeforex        = set.printBefore        else  printBeforex        = printBefore         end
+    if  isnothing(lineSelection)        lineSelectionx      = set.lineSelection      else  lineSelectionx      = lineSelection       end
+    if  isnothing(eeInteraction)        eeInteractionx      = set.eeInteraction      else  eeInteractionx      = eeInteraction       end
+    if  isnothing(gMultiplet)           gMultipletx         = set.gMultiplet         else  gMultipletx         = gMultiplet          end
+    if  isnothing(continuumExchange)    continuumExchangex  = set.continuumExchange  else  continuumExchangex  = continuumExchange   end
+
+    Settings( multipolesx, gaugesx, photonEnergiesx, electronEnergyShiftx, NoEnergySharingsx, NoIntermediateEnergiesx,
+                intermediateEnergyFactorx, maxKappax,
+                calcDifferentialCsx, printBeforex, lineSelectionx, eeInteractionx, gMultipletx, continuumExchangex)
 end
 
 
-# `Base.show(io::IO, settings::PhotoDoubleIonization.Settings)`  
+# `Base.show(io::IO, settings::PhotoDoubleIonization.Settings)`
 #   ... prepares a proper printout of the variable settings::PhotoDoubleIonization.Settings.
-function Base.show(io::IO, settings::PhotoDoubleIonization.Settings) 
+function Base.show(io::IO, settings::PhotoDoubleIonization.Settings)
     println(io, "multipoles:               $(settings.multipoles)  ")
     println(io, "gauges:                   $(settings.gauges)  ")
-    println(io, "quasiShells:              $(settings.quasiShells)  ")
+    println(io, "electronEnergyShift:      $(settings.electronEnergyShift)  ")
     println(io, "photonEnergies:           $(settings.photonEnergies)  ")
     println(io, "NoEnergySharings:         $(settings.NoEnergySharings)  ")
+    println(io, "NoIntermediateEnergies:   $(settings.NoIntermediateEnergies)  ")
+    println(io, "intermediateEnergyFactor: $(settings.intermediateEnergyFactor)  ")
     println(io, "maxKappa:                 $(settings.maxKappa)  ")
     println(io, "calcDifferentialCs:       $(settings.calcDifferentialCs)  ")
     println(io, "printBefore:              $(settings.printBefore)  ")
     println(io, "lineSelection:            $(settings.lineSelection)  ")
     println(io, "eeInteraction:            $(settings.eeInteraction)  ")
     println(io, "gMultiplet:               $(settings.gMultiplet)  ")
+    println(io, "continuumExchange:        $(settings.continuumExchange)  ")
 end
 
 
 """
-`struct  PhotoDoubleIonization.Channel`  
-    ... defines a type for a PhotoDoubleIonization channel to help characterize a single multipole and scattering (continuum) state 
-        with one semi-bound and one free electron.
+`struct  PhotoDoubleIonization.Channel`
+    ... defines a type for one total symmetry of the complete final state, i.e. of the final ion together with both emitted electrons, and
+        collects the multipole amplitudes that reach this symmetry from the initial level.
 
-    + multipole      ::EmMultipole          ... Multipole of the photon absorption.
-    + gauge          ::EmGauge              ... Gauge for dealing with the (coupled) radiation field.
-    + quasiSubshell  ::Subshell             ... (Bound) subshell that represents a quasi-free electron.
-    + xSymmetry      ::LevelSymmetry        ... angular momentum and parity due to the coupling of the quasi-bound subshell.
-    + kappa          ::Int64                ... partial-wave of the free electron
-    + tSymmetry      ::LevelSymmetry        ... total angular momentum and parity of the scattering state
-    + phase          ::Float64              ... phase of the partial wave
-    + amplitude      ::Complex{Float64}     ... PhotoDoubleIonization amplitude associated with the given channel.
+    + symmetry       ::LevelSymmetry                    ... total angular momentum and parity of the complete scattering state.
+    + amplitudes     ::Array{MultipoleAmplitude,1}      ... one entry per contributing multipole, each holding BOTH gauges.
 """
 struct  Channel
-    multipole        ::EmMultipole
-    gauge            ::EmGauge
-    quasiSubshell    ::Subshell  
-    xSymmetry        ::LevelSymmetry
-    kappa            ::Int64
-    tSymmetry        ::LevelSymmetry
-    phase            ::Float64
-    amplitude        ::Complex{Float64}
+    symmetry         ::LevelSymmetry
+    amplitudes       ::Array{MultipoleAmplitude,1}
 end
 
 
-# `Base.show(io::IO, channel::PhotoDoubleIonization.Sharing)`  ... prepares a proper printout of sharing::PhotoDoubleIonization.Channel.
-function Base.show(io::IO, channel::PhotoDoubleIonization.Channel) 
-    println(io, "multipole:              $(channel.multipole)  ")
-    println(io, "gauge:                  $(channel.gauge)  ")
-    println(io, "quasiSubshell:          $(channel.quasiSubshell)  ")
-    println(io, "xSymmetry:              $(channel.xSymmetry)  ")
-    println(io, "kappa:                  $(channel.kappa)  ")
-    println(io, "tSymmetry:              $(channel.tSymmetry)  ")
-    println(io, "phase:                  $(channel.phase)  ")
-    println(io, "amplitude:              $(channel.amplitude)  ")
+# `Base.show(io::IO, channel::PhotoDoubleIonization.Channel)`  ... prepares a proper printout of channel::PhotoDoubleIonization.Channel.
+function Base.show(io::IO, channel::PhotoDoubleIonization.Channel)
+    println(io, "symmetry:               $(channel.symmetry)  ")
+    println(io, "amplitudes:             $(channel.amplitudes)  ")
 end
 
 
 """
-`struct  PhotoDoubleIonization.Sharing`  
-    ... defines a type for a PhotoDoubleIonization sharing to help characterize energy sharing between the two emitted electrons.
+`struct  PhotoDoubleIonization.PartialWavePair`
+    ... defines a type for one pair of outgoing partial waves, i.e. for the two electrons that leave the ion together. The two electrons are
+        coupled in sequence: the first couples to the final ion to give xSymmetry, and the second couples to that intermediate symmetry to
+        give the total symmetry of a channel. One pair generally serves several total symmetries, which is why the channels are held here
+        rather than the pair being repeated for each of them; the two continuum orbitals are therefore generated once per pair.
 
-    + omega          ::Float64         ... Energy of the incident photon
-    + epsilon1       ::Float64         ... Energy of (free) electron 1.
-    + epsilon2       ::Float64         ... Energy of (free) electron 2.
-    + weight         ::Float64         ... Gauss-Lengendre weight of this sharing for energy-integrated quantities.
-    + differentialCs ::EmProperty      ... differential cross section of this energy sharing.
-    + channels       ::Array{PhotoDoubleIonization.Channel,1}  ... List of PhotoDoubleIonization channels of this line.
+    + kappa1         ::Int64                ... partial wave of the first emitted electron.
+    + energy1        ::Float64              ... energy at which the orbital of the first electron is generated.
+    + phase1         ::Float64              ... scattering phase of the first partial wave.
+    + xSymmetry      ::LevelSymmetry        ... intermediate symmetry of (final ion + electron 1).
+    + kappa2         ::Int64                ... partial wave of the second emitted electron.
+    + energy2        ::Float64              ... energy at which the orbital of the second electron is generated.
+    + phase2         ::Float64              ... scattering phase of the second partial wave.
+    + channels       ::Array{PhotoDoubleIonization.Channel,1}   ... total symmetries that this pair of partial waves serves.
+"""
+struct  PartialWavePair
+    kappa1           ::Int64
+    energy1          ::Float64
+    phase1           ::Float64
+    xSymmetry        ::LevelSymmetry
+    kappa2           ::Int64
+    energy2          ::Float64
+    phase2           ::Float64
+    channels         ::Array{PhotoDoubleIonization.Channel,1}
+end
+
+
+# `Base.show(io::IO, pair::PhotoDoubleIonization.PartialWavePair)`  ... prepares a proper printout of pair::PhotoDoubleIonization.PartialWavePair.
+function Base.show(io::IO, pair::PhotoDoubleIonization.PartialWavePair)
+    println(io, "kappa1:                 $(pair.kappa1)  ")
+    println(io, "energy1:                $(pair.energy1)  ")
+    println(io, "phase1:                 $(pair.phase1)  ")
+    println(io, "xSymmetry:              $(pair.xSymmetry)  ")
+    println(io, "kappa2:                 $(pair.kappa2)  ")
+    println(io, "energy2:                $(pair.energy2)  ")
+    println(io, "phase2:                 $(pair.phase2)  ")
+    println(io, "channels:               $(pair.channels)  ")
+end
+
+
+"""
+`struct  PhotoDoubleIonization.Sharing`
+    ... defines a type for one division of the excess energy between the two emitted electrons. The list of sharings of a line IS the
+        energy-sharing distribution, which is the primary observable of this process, and each sharing owns two quantities that belong
+        nowhere else: the quadrature weight of this sharing point, and the differential cross section summed over all pairs and channels
+        at this point.
+
+        The sharing coordinates epsilon1, epsilon2 are what Basics.determineEnergySharings produces and define the quadrature point. They
+        are NOT the same as the energies at which the orbitals are generated, which additionally carry settings.electronEnergyShift and
+        are held by the partial-wave pair.
+
+    + omega          ::Float64         ... energy of the incident photon.
+    + epsilon1       ::Float64         ... sharing coordinate of (free) electron 1.
+    + epsilon2       ::Float64         ... sharing coordinate of (free) electron 2.
+    + weight         ::Float64         ... Gauss-Legendre weight of this sharing for energy-integrated quantities.
+    + differentialCs ::EmProperty      ... energy-differential cross section dsigma/depsilon1 at this sharing.
+    + partialWavePairs ::Array{PhotoDoubleIonization.PartialWavePair,1}   ... pairs of partial waves at this sharing.
 """
 struct  Sharing
     omega            ::Float64
@@ -163,36 +339,35 @@ struct  Sharing
     epsilon2         ::Float64
     weight           ::Float64
     differentialCs   ::EmProperty
-    channels         ::Array{PhotoDoubleIonization.Channel,1}
+    partialWavePairs ::Array{PhotoDoubleIonization.PartialWavePair,1}
 end
 
 
 # `Base.show(io::IO, sharing::PhotoDoubleIonization.Sharing)`  ... prepares a proper printout of sharing::PhotoDoubleIonization.Sharing.
-function Base.show(io::IO, sharing::PhotoDoubleIonization.Sharing) 
+function Base.show(io::IO, sharing::PhotoDoubleIonization.Sharing)
     println(io, "omega:                  $(sharing.omega)  ")
     println(io, "epsilon1:               $(sharing.epsilon1)  ")
     println(io, "epsilon2:               $(sharing.epsilon2)  ")
     println(io, "weight:                 $(sharing.weight)  ")
     println(io, "differentialCs:         $(sharing.differentialCs)  ")
-    println(io, "channels:               $(sharing.channels)  ")
+    println(io, "partialWavePairs:       $(sharing.partialWavePairs)  ")
 end
 
 
-
 """
-`struct  PhotoDoubleIonization.Line`  ... defines a type for a photo-double ionization line that may include the definition of channels.
+`struct  PhotoDoubleIonization.Line`
+    ... defines a type for a photo-double ionization line between an initial and a final level, for one photon energy, in which a single
+        photon is absorbed and TWO electrons are emitted into the continuum. The cross section is the sharing-integrated total.
 
-    + initialLevel   ::Level                  ... initial-(state) level
-    + finalLevel     ::Level                  ... final-(state) level
-    + electronEnergy ::Float64                ... Energy of the (outgoing free) electron.
-    + photonEnergy   ::Float64                ... Energy of the absorbed photon.
-    + crossSection   ::EmProperty             ... Cross section for this photo-double ionization.
-    + sharings       ::Array{PhotoDoubleIonization.Sharing,1}  ... List of PhotoDoubleIonization.Sharings of this line.
+    + initialLevel   ::Level                  ... initial-(state) level.
+    + finalLevel     ::Level                  ... final-(state) level of the doubly-ionized ion.
+    + photonEnergy   ::Float64                ... energy of the absorbed photon.
+    + crossSection   ::EmProperty             ... total cross section, integrated over all energy sharings.
+    + sharings       ::Array{PhotoDoubleIonization.Sharing,1}  ... the energy-sharing distribution of this line.
 """
 struct  Line
     initialLevel     ::Level
     finalLevel       ::Level
-    electronEnergy   ::Float64
     photonEnergy     ::Float64
     crossSection     ::EmProperty
     sharings         ::Array{PhotoDoubleIonization.Sharing,1}
@@ -200,143 +375,619 @@ end
 
 
 """
-`PhotoDoubleIonization.Line()`  
-    ... constructor an empty PhotoDoubleIonization line.
+`PhotoDoubleIonization.Line()`  ... constructor for an empty PhotoDoubleIonization line; a line::PhotoDoubleIonization.Line is returned.
 """
 function Line()
-    Line(Level(), Level(), 0., 0., EmProperty(0., 0.), PhotoDoubleIonization.Sharing[])
+    Line(Level(), Level(), 0., EmProperty(0., 0.), PhotoDoubleIonization.Sharing[])
 end
 
 
 # `Base.show(io::IO, line::PhotoDoubleIonization.Line)`  ... prepares a proper printout of the variable line::PhotoDoubleIonization.Line.
-function Base.show(io::IO, line::PhotoDoubleIonization.Line) 
+function Base.show(io::IO, line::PhotoDoubleIonization.Line)
     println(io, "initialLevel:      $(line.initialLevel)  ")
     println(io, "finalLevel:        $(line.finalLevel)  ")
-    println(io, "electronEnergy:    $(line.electronEnergy)  ")
     println(io, "photonEnergy:      $(line.photonEnergy)  ")
     println(io, "crossSection:      $(line.crossSection)  ")
     println(io, "sharings:          $(line.sharings)  ")
 end
 
 
+"""
+`PhotoDoubleIonization.amplitude(::Absorption, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level,
+        nLevels::Array{Level,1}, nWeights::Array{Float64,1}, grid::Radial.Grid; display::Bool=false, printout::Bool=false)`
+    ... computes the second-order photo-double ionization amplitude
 
+                <alpha_f J_f || O^(Mp, absorption) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>  / (E_i - E_n)
+            +   <alpha_f J_f || V^(e-e) || alpha_n J_f> <alpha_n J_f || O^(Mp, absorption) || alpha_i J_i>  / (E_i - omega - E_n)
+
+        for the interaction with a photon of frequency omega, multipolarity Mp and the given gauge; a value::ComplexF64 is returned.
+        The first term is the ordering in which the two electrons interact first and the photon is absorbed afterwards, the second the
+        ordering in which the photon is absorbed first. Together they are the knock-out (TS1) mechanism.
+
+        The intermediate levels are handed in rather than taken from a multiplet, because they are not bound states: each of them is a
+        level of the (N-1)-electron ion with ONE continuum partial wave added, and such a state has one continuum electron exactly as the
+        final state has two. A Green multiplet of bound levels cannot contribute at all, since it differs from the final state in two
+        orbitals and the one-body photon operator connects only one.
+
+        Because those partial waves are normalized PER ENERGY INTERVAL, so are the intermediate levels, and the sum over them is really an
+        integral over the intermediate electron energy. nWeights carries the quadrature weight of each intermediate level and must have the
+        same length as nLevels; passing ones would silently turn the integral back into a plain sum.
+
+        The intermediate level is in general multi-configurational, so the two matrix elements of each ordering run over two INDEPENDENT
+        CSF indices t and tp; a single index with mc[t]^2 would keep only the diagonal terms. Each ordering has its own symmetry condition
+        and the two are mutually exclusive whenever symi != symf, which is why neither may skip the loop over intermediate levels.
 """
-`PhotoDoubleIonization.amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level, 
-                                    gMultiplet::Multiplet, grid::Radial.Grid; display::Bool=false, printout::Bool=false)`  
-    ... to compute the photo-double ionization amplitude  
-    
-                <alpha_f J_f || O^(Mp, absorption) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>  
-            +   <alpha_f J_f || V^(e-e) || alpha_n J_f> <alpha_n J_f || O^(Mp, absorption) || alpha_i J_i> 
-            
-        absorption amplitude for the interaction with the photon field of frequency omega, multipolarity Mp and gauge. 
-        A value::ComplexF64 is returned. The amplitude value is printed to screen if display=true.
-"""
-function amplitude(kind::String, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level, 
-                    gMultiplet::Multiplet, grid::Radial.Grid; display::Bool=false, printout::Bool=false)
-    #
-    # Always ensure the same subshell list for all initial, intermediate and final levels
-    subshells  = Basics.merge(initialLevel.basis.subshells, finalLevel.basis.subshells)
-    @show  initialLevel.basis.subshells, finalLevel.basis.subshells, subshells
-    iLevel     = Level(initialLevel, subshells)
-    fLevel     = Level(finalLevel, subshells)
-    nMultiplet = Multiplet(gMultiplet, subshells)
-    
+function amplitude(::Absorption, Mp::EmMultipole, gauge::EmGauge, omega::Float64, finalLevel::Level, initialLevel::Level,
+                   nLevels::Array{Level,1}, nWeights::Array{Float64,1}, grid::Radial.Grid; display::Bool=false, printout::Bool=false,
+                   nOnShell::Union{Nothing,Array{Bool,1}}=nothing, nBlock::Union{Nothing,Array{Int64,1}}=nothing,
+                   nEnergy::Union{Nothing,Array{Float64,1}}=nothing,
+                   energyRange::Union{Nothing,Tuple{Float64,Float64}}=nothing)
+    length(nLevels) == length(nWeights)  ||  error("nLevels and nWeights must have the same length.")
+    onShell = isnothing(nOnShell) ? falses(length(nLevels)) : nOnShell
+    length(nLevels) == length(onShell)   ||  error("nLevels and nOnShell must have the same length.")
+    if  length(nLevels) == 0    return( ComplexF64(0.) )    end
+    # THE INTERMEDIATE MUST CARRY THE SAME NUMBER OF ELECTRONS AS THE INITIAL STATE, and this is checked rather than assumed because
+    # the one thing that must not happen is a plausible number from a sum whose junctions pair different electron counts.  It is a
+    # caller error and not a physical limitation: `settings.gMultiplet` must hold the (N-1)-electron ionic CORES, to which
+    # generateIntermediateLevels attaches the continuum electron -- see that field's docstring.
+    for  nLevel in nLevels
+        if  nLevel.basis.NoElectrons != initialLevel.basis.NoElectrons
+            error("PhotoDoubleIonization.amplitude(): an intermediate level carries $(nLevel.basis.NoElectrons) electrons where the "  *
+                  "initial level carries $(initialLevel.basis.NoElectrons).  Every junction of the second-order sum would then pair "   *
+                  "unequal electron numbers.  `settings.gMultiplet` must be the (N-1)-ELECTRON IONIC CORES, not the intermediate "     *
+                  "levels themselves:  generateIntermediateLevels generates a continuum orbital in the field of each of its levels "   *
+                  "and attaches it.  See the docstring of PhotoDoubleIonization.Settings' gMultiplet field.")
+        end
+    end
+    # The principal value needs the levels grouped by their pole and the integration interval they span; without
+    # all three the old, non-convergent assembly is used, so an un-updated caller changes no number silently.
+    doPV = !isnothing(nBlock)  &&  !isnothing(nEnergy)  &&  !isnothing(energyRange)
+    doPV  &&  ( length(nBlock) == length(nLevels) && length(nEnergy) == length(nLevels)  ||
+                error("nBlock and nEnergy must have the same length as nLevels.") )
+
+    # Always ensure the same subshell list for all initial, intermediate and final levels.  Each intermediate
+    # level carries a continuum subshell of its own kappa, so every one of them has to enter the merge.
+    subshells = Basics.merge(initialLevel.basis.subshells, finalLevel.basis.subshells)
+    for  nLevel in nLevels   subshells = Basics.merge(subshells, nLevel.basis.subshells)   end
+    iLevel    = Level(initialLevel, subshells)
+    fLevel    = Level(finalLevel,   subshells)
+
     nf = length(fLevel.basis.csfs);    symf = LevelSymmetry(fLevel.J, fLevel.parity)
     ni = length(iLevel.basis.csfs);    symi = LevelSymmetry(iLevel.J, iLevel.parity);    eni = iLevel.energy
-    nn = length(nMultiplet.levels[1].basis.csfs)
-    
-    if  printout   printstyled("Compute photo-double $(Mp) ionizations amplitude for the transition [$(iLevel.index)-$(fLevel.index)] ... ", 
-                                color=:light_green)    end
+
+    if  printout   printstyled("Compute photo-double $(Mp) ionization amplitude for the transition " *
+                               "[$(iLevel.index)-$(fLevel.index)] ... ", color=:light_green)    end
     amplitude = ComplexF64(0.)
-    #
+    # The photon-first ordering is the one with the pole, so its numerators are accumulated PER INTERMEDIATE
+    # LEVEL and assembled afterwards; the electron-first ordering has no pole and is summed in place as before.
+    numer     = zeros(ComplexF64, length(nLevels))
+
     for  r = 1:nf
         symr = LevelSymmetry(fLevel.basis.csfs[r].J, fLevel.basis.csfs[r].parity);      if  symr != symf    continue    end
         for  s = 1:ni
             syms = LevelSymmetry(iLevel.basis.csfs[s].J, iLevel.basis.csfs[s].parity);  if  syms != symi    continue    end
-            for  nLevel in nMultiplet.levels
-                symn = LevelSymmetry(nLevel.J, nLevel.parity);    enn = nLevel.energy;   @show symn
-                #
+            for  (k, nLevel) in enumerate(nLevels)
+                nLevel = Level(nLevel, subshells)
+                symn   = LevelSymmetry(nLevel.J, nLevel.parity);    enn = nLevel.energy;    wn = nWeights[k]
+                nn     = length(nLevel.basis.csfs)
+
                 #   Compute <alpha_f J_f || O^(Mp, kind) || alpha_n J_i> <alpha_n J_i || V^(e-e) || alpha_i J_i>
-                if  symn != symi     continue    end
-                for  t = 1:nn
-                    if  nLevel.mc[t] == 0.  continue    end
-                    Vee       = ManyElectron.matrixElement_Vee(CoulombInteraction(), nLevel.basis, t, iLevel.basis, s, grid)
-                    OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, fLevel.basis, r, nLevel.basis, t, grid)
-                    amplitude = amplitude + fLevel.mc[r] * OMp * nLevel.mc[t]^2 * Vee * iLevel.mc[s] / (eni - enn)
-                    @show  t, eni, (eni - enn), amplitude
+                #   THIS JUNCTION REACHES CSF PAIRS DIFFERING IN ONE ORBITAL, WHERE V^(e-e) IS NOT THE WHOLE
+                #   OPERATOR -- and it nevertheless STAYS, measured rather than assumed, 02-Nov-2026.  The
+                #   operator a one-orbital junction requires is H - E, and on example-Dj.jl's Green core 1s at
+                #   omega = 400 eV and equal sharing the two read V_ee = +2.470622e-01 against H - E =
+                #   +1.560546e-01, a factor 1.583, the one-body part contributing -9.100758e-02 with the right
+                #   sign.  But ManyElectron.matrixElement_HminusE drops the overlap term -E <r|s>, and here that
+                #   term is the LARGEST piece: the continuum orbital is generated in the field of the GREEN
+                #   level, so <101s_1/2|1s_initial> = -0.0235 rather than 0, and |E_i <r|s>| ~ 3.2e-01, i.e.
+                #   2.05x the whole H - E element.  Swapping the operator would add 0.091 and omit 0.32.  The
+                #   precondition is therefore CHECKED instead, in checkSecondOrderConditions, and the swap waits
+                #   for a case whose Green space shares the initial state's orbitals.  The junctions differing in
+                #   TWO orbitals are unaffected either way -- the two operators agree there to 1.000 exactly.
+                if  symn == symi
+                    for  t = 1:nn
+                        if  nLevel.mc[t] == 0.  continue    end
+                        OMp = ManyElectron.matrixElement_Mab(Mp, gauge, omega, fLevel.basis, r, nLevel.basis, t, grid)
+                        for  tp = 1:nn
+                            if  nLevel.mc[tp] == 0.  continue    end
+                            Vee       = ManyElectron.matrixElement_Vee(CoulombInteraction(), nLevel.basis, tp, iLevel.basis, s, grid)
+                            amplitude = amplitude + wn * fLevel.mc[r] * OMp * nLevel.mc[t] * nLevel.mc[tp] * Vee *
+                                                    iLevel.mc[s] / (eni - enn)
+                        end
+                    end
                 end
-                #
+
                 #   Compute <alpha_f J_f || V^(e-e) || alpha_n J_f> <alpha_n J_f || O^(Mp, kind) || alpha_i J_i>
-                if  symn != symf     continue    end
-                for  t = 1:nn
-                    if  nLevel.mc[t] == 0.  continue    end
-                    OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, nLevel.basis, t, iLevel.basis, s, grid)
-                    Vee       = ManyElectron.matrixElement_Vee(CoulombInteraction(), fLevel.basis, r, nLevel.basis, t, grid)
-                    amplitude = amplitude + fLevel.mc[r] * Vee * nLevel.mc[t]^2 * OMp * iLevel.mc[s] / (eni - omega - enn)
-                    @show  t, eni, (eni + omega - enn), amplitude
+                #   THE SIGN OF omega HERE IS THE ONE THAT DECIDES WHETHER THIS MODULE HAS A POLE.  In this time
+                #   ordering the PHOTON ACTS FIRST, so the intermediate state has already absorbed it and the
+                #   denominator is E_i + omega - E_n; the other ordering above absorbs no photon before reaching
+                #   |n> and correctly reads E_i - E_n.  Until 6-Sep-2026 this line carried -omega, which is the
+                #   EMISSION denominator, and it moved the whole integrand off shell: measured at omega = 200 eV
+                #   it swept -226 to -344 eV and never approached zero, so the intermediate integral was smooth,
+                #   converged to six figures in eleven points, and described no resonance.  With +omega the
+                #   denominator passes through zero at exactly one electron photoionized and the other still
+                #   bound -- which IS the TS1 mechanism this module is built on -- and that on-shell region
+                #   needs a contour prescription rather than plain quadrature.
+                if  symn == symf
+                    for  t = 1:nn
+                        if  nLevel.mc[t] == 0.  continue    end
+                        Vee = ManyElectron.matrixElement_Vee(CoulombInteraction(), fLevel.basis, r, nLevel.basis, t, grid)
+                        for  tp = 1:nn
+                            if  nLevel.mc[tp] == 0.  continue    end
+                            OMp       = ManyElectron.matrixElement_Mab(Mp, gauge, omega, nLevel.basis, tp, iLevel.basis, s, grid)
+                            # THE PROPAGATOR IS CHOSEN BY THE LEVEL'S OWN KIND, not by testing its energy.  A
+                            # retarded Green function is P[1/(E_i+omega-E_n)] - i*pi*delta(E_i+omega-E_n); the
+                            # quadrature levels carry the principal value, the on-shell level carries the residue
+                            # and takes no denominator at all.  Deciding this by how close enn happens to lie to
+                            # the pole would misclassify any quadrature node that drifted near it.
+                            # THE DELTA-RESIDUE IS HERE AND THE PRINCIPAL VALUE IS NOT -- MEASURED 30-Sep-2026,
+                            # and it is why the second-order sum has no converged value.  A retarded propagator is
+                            # 1/(x + i eta) = PV(1/x) - i pi delta(x).  The -i pi below IS the delta piece, taken at
+                            # the one designated on-shell node; every OTHER node then divides by the bare x, and a
+                            # plain Gauss-Legendre sum of 1/x through a pole is not a principal value.  It has no
+                            # limit: refining the mesh puts nodes ever nearer the pole.  Measured on He at 200 eV,
+                            # maxKappa = 2, with the SHARING mesh held at 9 and only this one refined, the total runs
+                            # 4.35e-05 -> 4.18 -> 4.44 -> 5.15 -> 6.35 -> 7.99 -> 9.64e-05 for 3, 5, 9, 15, 25, 41,
+                            # 61 points -- more than doubling, with the increments NOT shrinking (+16, +23, +26,
+                            # +21 %).  The OUTER sharing quadrature, by contrast, converges to five digits by 15
+                            # points once the two meshes are separated, so it was never the problem.  A correct PV
+                            # needs nodes placed symmetrically about the pole, a subtraction of the singular part, or
+                            # the interval split AT the pole -- none of which a plain rule does.  Priority item 33.
+                            numer[k] = numer[k] + fLevel.mc[r] * Vee * nLevel.mc[t] * nLevel.mc[tp] * OMp *
+                                                  iLevel.mc[s]
+                        end
+                    end
                 end
             end
         end
     end
+    amplitude = amplitude + PhotoDoubleIonization.assemblePrincipalValue(numer, nLevels, nWeights, onShell,
+                                    nBlock, nEnergy, energyRange, eni + omega, doPV)
+
     if  printout   printstyled("done. \n", color=:light_green)    end
-    
-    if  display  
+
+    if  display
         println("    < level=$(finalLevel.index) [J=$(finalLevel.J)$(string(finalLevel.parity))] ||" *
-                " PhotoDouble^($Mp, $kind) ($omega a.u., $gauge) ||" *
+                " PhotoDouble^($Mp, absorption) ($omega a.u., $gauge) ||" *
                 " $(initialLevel.index) [$(initialLevel.J)$(string(initialLevel.parity))] >  = $amplitude  ")
     end
-    
+
     return( amplitude )
 end
 
 
+"""
+`PhotoDoubleIonization.assemblePrincipalValue(numer::Array{ComplexF64,1}, nLevels::Array{Level,1}, nWeights::Array{Float64,1},
+        onShell::Array{Bool,1}, nBlock::Union{Nothing,Array{Int64,1}}, nEnergy::Union{Nothing,Array{Float64,1}},
+        energyRange::Union{Nothing,Tuple{Float64,Float64}}, ePole::Float64, doPV::Bool)`  
+    ... assembles the photon-first second-order sum from the per-level numerators, as a CAUCHY PRINCIPAL VALUE plus the delta residue;
+        a value::ComplexF64 is returned.
 
+        WHY A PLAIN SUM CANNOT DO IT.  The retarded propagator is  1/(x + i eta) = PV(1/x) - i pi delta(x), and in the photon-first
+        ordering x = E_i + omega - E_n passes through zero at exactly one electron photoionized and the other still bound -- the TS1
+        mechanism this module is built on.  Until 05-Oct-2026 the delta residue was taken at one designated node while every other node
+        divided by the BARE x, and a Gauss-Legendre sum of 1/x through a pole is not a principal value and has no limit: each refinement
+        places nodes nearer the singularity.  Measured on He at 200 eV with maxKappa = 2 and the SHARING mesh held at 9, the total ran
+        4.35e-05, 4.18, 4.44, 5.15, 6.35, 7.99, 9.64e-05 for 3, 5, 9, 15, 25, 41, 61 intermediate points -- more than doubling, with the
+        increments NOT shrinking (+16, +23, +26, +21 %).
+
+        WHAT IS DONE INSTEAD -- SUBTRACTION OF THE SINGULAR PART, which needs no new mesh and no interval splitting:
+
+            PV int_a^b  N(e) / (e* - e)  de   =   int_a^b  [N(e) - N(e*)] / (e* - e)  de   +   N(e*) ln|(e* - a)/(b - e*)|
+
+        The first integrand is regular at the pole -- it tends to -N'(e*) -- so the existing Gauss-Legendre rule integrates it correctly,
+        and the second term is analytic.  The one thing this needs is N(e*), the numerator AT the pole, and that is already computed: it
+        is the flagged on-shell level, which the module generates precisely there.  Nothing else about the quadrature changes.
+
+        WHY THE LEVELS MUST BE GROUPED.  There is one pole PER (Green level, kappa) group, at e* = E_i + omega - E_gLevel, while all
+        groups share one node set.  Subtracting a group's own N(e*) from another group's nodes would be meaningless, so `nBlock` labels
+        the groups and the subtraction is done inside each.
+
+        AND A GROUP WHOSE POLE LIES OUTSIDE THE INTERVAL IS LEFT ALONE.  `generateIntermediateLevels` adds an on-shell level whenever
+        e* > 0, which does not mean e* < b: a pole above the top of the intermediate mesh is not enclosed by the integration range, there
+        is nothing to regularize, and the residue must NOT be taken either -- that channel is simply not reached by this quadrature.  Such
+        a group therefore keeps the plain weighted sum, and its on-shell level is skipped.
+
+        + numer        ::Array{ComplexF64,1}   ... the numerator of each intermediate level, already summed over all CSF indices.
+        + nWeights     ::Array{Float64,1}      ... quadrature weight of each level; the on-shell level carries 1 and is not integrated.
+        + onShell      ::Array{Bool,1}         ... true for the one level per group that sits AT the pole.
+        + nBlock       ::Array{Int64,1}        ... the (Green level, kappa) group of each level, or nothing to fall back.
+        + nEnergy      ::Array{Float64,1}      ... continuum electron energy of each level, or nothing to fall back.
+        + energyRange  ::Tuple{Float64,Float64}... the interval (a, b) the intermediate quadrature spans, or nothing to fall back.
+        + ePole        ::Float64               ... E_i + omega, i.e. the total energy whose crossing defines the pole.
+        + doPV         ::Bool                  ... false reproduces the pre-05-Oct-2026 assembly exactly, for an un-updated caller.
 """
-`PhotoDoubleIonization.computeAmplitudesProperties(line::PhotoDoubleIonization.Line, nm::Nuclear.Model, quasiOrbitals::Dict{Subshell, Orbital},
-                        grid::Radial.Grid, nrContinuum::Int64, settings::PhotoDoubleIonization.Settings; printout::Bool=false)`  
-    ... to compute all amplitudes and properties of the given line; a line::PhotoDoubleIonization.Line is returned for which the amplitudes and 
-        properties are now evaluated.
-"""
-function  computeAmplitudesProperties(line::PhotoDoubleIonization.Line, nm::Nuclear.Model, quasiOrbitals::Dict{Subshell, Orbital}, 
-                                        grid::Radial.Grid, nrContinuum::Int64, settings::PhotoDoubleIonization.Settings; printout::Bool=false)
-    newSharings = PhotoDoubleIonization.Sharing[];   contSettings = Continuum.Settings(false, nrContinuum);    csC = 0.;    csB = 0.
-    for  sharing in line.sharings
-        newChannels = PhotoDoubleIonization.Channel[];    dcsC = 0.;    dcsB = 0.   
-        for channel in sharing.channels
-            subshells = line.initialLevel.basis.subshells;  
-            push!(subshells, channel.quasiSubshell);    push!(subshells, Subshell(101, channel.kappa))
-            newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshells)
-            newfLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel, subshells[1:end-2])
-            newfLevel = Basics.generateLevelWithExtraElectron(quasiOrbitals[channel.quasiSubshell], channel.xSymmetry, newfLevel)
-            cOrbital, phase  = Continuum.generateOrbitalForLevel(sharing.epsilon2, Subshell(101, channel.kappa), 
-                                                                    line.finalLevel, nm, grid, contSettings)
-            #
-            newcLevel  = Basics.generateLevelWithExtraElectron(cOrbital, channel.tSymmetry, newfLevel)
-            newChannel = PhotoDoubleIonization.Channel(channel.multipole, channel.gauge, channel.quasiSubshell, channel.xSymmetry,
-                                                        channel.kappa, channel.tSymmetry, phase, 0.)
-            amplitude  = PhotoDoubleIonization.amplitude("absorption", channel.multipole, channel.gauge, sharing.omega, newcLevel,
-                                                            newiLevel, settings.gMultiplet, grid, display=true, printout=true)           
-            push!( newChannels, PhotoIonization.Channel(newChannel.multipole, newChannel.gauge, newChannel.quasiSubshell, newChannel.xSymmetry, 
-                                                        newChannel.kappa, newChannel.tSymmetry, newChannel.phase, amplitude) )
-            if       channel.gauge == Basics.Coulomb     dcsC = dcsC + abs(amplitude)^2
-            elseif   channel.gauge == Basics.Babushkin   dcsB = dcsB + abs(amplitude)^2
-            elseif   channel.gauge == Basics.Magnetic    dcsB = dcsB + abs(amplitude)^2;   dcsC = dcsC + abs(amplitude)^2
-            end
+function assemblePrincipalValue(numer::Array{ComplexF64,1}, nLevels::Array{Level,1}, nWeights::Array{Float64,1},
+                                onShell::Array{Bool,1}, nBlock::Union{Nothing,Array{Int64,1}},
+                                nEnergy::Union{Nothing,Array{Float64,1}},
+                                energyRange::Union{Nothing,Tuple{Float64,Float64}}, ePole::Float64, doPV::Bool)
+    value = ComplexF64(0.)
+    if  !doPV
+        for  k = 1:length(numer)
+            value = value + nWeights[k] * numer[k] *
+                    ( onShell[k] ? ComplexF64(0., -pi) : ComplexF64(1. / (ePole - nLevels[k].energy)) )
         end
-        dcs = Basics.EmProperty(dcsC, dcsB)
-        push!(newSharings, PhotoDoubleIonization.Sharing(sharing.omega, sharing.epsilon1, sharing.epsilon2, sharing.weight, dcs, newChannels) )
+        return( value )
     end
-    Ji2 = Basics.twice(line.initialLevel.J)
-    csFactor     = 8 * pi^3 / Defaults.getDefaults("alpha") / line.photonEnergy
-    csFactor     = csFactor / 2.   # Not fully clear, arises likely from the Rydberg normalization
-    ##  Correct for energy normalization 
-    ##  if  line.electronEnergy < 2.0   csFactor = csFactor * (line.electronEnergy/2.0)^1.5     end
-    crossSection = EmProperty(csFactor * csC, csFactor * csB)
-    newLine = PhotoIonization.Line( line.initialLevel, line.finalLevel, line.electronEnergy, line.photonEnergy, 
-                                    crossSection, newSharings)
-    return( newLine )
+
+    aRange = energyRange[1];    bRange = energyRange[2]
+    for  block  in  sort(unique(nBlock))
+        ks     = findall(isequal(block), nBlock)
+        kStars = filter(k -> onShell[k], ks)
+        kStar  = isempty(kStars) ? 0 : kStars[1]
+        # Is the pole actually enclosed by the integration range?  Only then is there anything to regularize.
+        enclosed = kStar > 0  &&  aRange < nEnergy[kStar] < bRange
+        if  !enclosed
+            for  k  in  ks
+                onShell[k]  &&  continue
+                value = value + nWeights[k] * numer[k] / (ePole - nLevels[k].energy)
+            end
+            continue
+        end
+        nStar = numer[kStar];    eStar = nEnergy[kStar]
+        for  k  in  ks
+            k == kStar  &&  continue
+            value = value + nWeights[k] * (numer[k] - nStar) / (ePole - nLevels[k].energy)
+        end
+        value = value + nStar * log( (eStar - aRange) / (bRange - eStar) )
+        value = value + nStar * ComplexF64(0., -pi)
+    end
+
+    return( value )
 end
 
+
+"""
+`PhotoDoubleIonization.generateIntermediateLevels(symn::LevelSymmetry, gMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+        energyGrid::Radial.GridGL, contSettings::Continuum.Settings, maxKappa::Int64;
+        nuclearPot::Union{Nothing,Radial.Potential}=nothing, primitives::Union{Nothing,Bsplines.Primitives}=nothing)`
+    ... builds the intermediate levels of the second-order sum for ONE required total symmetry symn, by adding a continuum partial wave to
+        every level of the (N-1)-electron Green multiplet. Every kappa with abs(kappa) <= maxKappa that couples a Green level to symn is
+        taken, at every energy of energyGrid.
+
+        These states are not bound: they carry one continuum electron, which is what lets the one-body photon operator connect them to a
+        final state carrying two. Because the partial waves are normalized per energy interval, the corresponding quadrature weight of
+        energyGrid is returned with each level, and the caller must use it -- the sum over intermediate states is an integral over the
+        intermediate electron energy.
+
+        If onShellTotalEnergy is given, ONE further level is added per Green level and kappa, at the energy e* that makes the intermediate
+        state degenerate with the initial level plus the photon. That level is the pole of the photon-first ordering and is flagged rather
+        than distinguished by its energy, so that the caller multiplies it by -i*pi instead of dividing it by a denominator: a retarded
+        Green function is the principal value MINUS i*pi times this residue, and without it the amplitude of an above-threshold process
+        comes out exactly real, i.e. with the open channel closed. Levels are added only where e* > 0; a closed channel has no residue.
+
+        A tuple (nLevels, nWeights, nOnShell, nBlock, nEnergy)::Tuple{Array{Level,1}, Array{Float64,1}, Array{Bool,1},
+        Array{Int64,1}, Array{Float64,1}} is returned. nBlock labels the (Green level, kappa) group that each intermediate level belongs
+        to, and nEnergy carries its continuum electron energy; together they let the caller assemble ONE principal-value integral per
+        group, which is what the pole of the photon-first ordering requires -- a group is exactly the set of levels sharing one pole.
+"""
+function generateIntermediateLevels(symn::LevelSymmetry, gMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                                          energyGrid::Radial.GridGL, contSettings::Continuum.Settings, maxKappa::Int64;
+                                          nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                          primitives::Union{Nothing,Bsplines.Primitives}=nothing,
+                                          spectators::Union{Nothing,Array{Tuple{Subshell,Float64},1}}=nothing,
+                                          onShellTotalEnergy::Union{Nothing,Float64}=nothing)
+    nLevels = Level[];    nWeights = Float64[];    nOnShell = Bool[]
+    nBlock  = Int64[];    nEnergy  = Float64[];    block    = 0
+
+    # A ONE-BODY operator connects this intermediate level to the final state, so the continuum electron that
+    # the photon does NOT act upon must be the very same orbital in both -- same kappa, same energy AND the same
+    # subshell label, since two continuum subshells that differ only in their label count as different orbitals
+    # and make the one-body matrix element vanish.  The caller therefore passes the pair's own subshells.
+    if  !isnothing(spectators)
+        for  gLevel in gMultiplet.levels
+            gLevel = Basics.generateLevelWithSymmetryReducedBasis(gLevel, gLevel.basis.subshells)
+            symg   = LevelSymmetry(gLevel.J, gLevel.parity)
+            for  (subsh, en) in spectators
+                if  !(subsh.kappa in AngularMomentum.allowedKappaSymmetries(symg, symn))    continue    end
+                nOrbital, nPhase = Continuum.generateOrbitalForLevel(en, subsh, gLevel, nm, grid, contSettings;
+                                                                    nuclearPot=nuclearPot, primitives=primitives)
+                block = block + 1
+                push!(nLevels,  Basics.generateLevelWithExtraElectron(nOrbital, symn, gLevel))
+                push!(nWeights, 1.0);    push!(nOnShell, false)
+                push!(nBlock,   block);  push!(nEnergy,  en)
+            end
+        end
+        return( nLevels, nWeights, nOnShell, nBlock, nEnergy )
+    end
+
+    for  gLevel in gMultiplet.levels
+        # The Green multiplet's basis holds CSFs of every symmetry it was built from; only the CSFs of this
+        # level's own symmetry may be coupled to a partial wave, so the basis is reduced first.
+        gLevel = Basics.generateLevelWithSymmetryReducedBasis(gLevel, gLevel.basis.subshells)
+        symg   = LevelSymmetry(gLevel.J, gLevel.parity)
+        for  kappa in AngularMomentum.allowedKappaSymmetries(symg, symn)
+            if  abs(kappa) > maxKappa    continue    end
+            shn = Subshell(103, kappa);    block = block + 1
+            for  (ie, en)  in  enumerate(energyGrid.t)
+                nOrbital, nPhase = Continuum.generateOrbitalForLevel(en, shn, gLevel, nm, grid, contSettings;
+                                                                    nuclearPot=nuclearPot, primitives=primitives)
+                push!(nLevels,  Basics.generateLevelWithExtraElectron(nOrbital, symn, gLevel))
+                push!(nWeights, energyGrid.wt[ie]);    push!(nOnShell, false)
+                push!(nBlock,   block);                push!(nEnergy,  en)
+            end
+            # The residue of the retarded Green function: the SAME numerator, with the partial wave generated at the
+            # energy that puts the intermediate state on shell, carrying weight 1 because the orbitals are normalized
+            # per unit energy and the density of states is therefore unity.
+            if  !isnothing(onShellTotalEnergy)
+                enStar = onShellTotalEnergy - gLevel.energy
+                if  enStar > 0.
+                    nOrbital, nPhase = Continuum.generateOrbitalForLevel(enStar, shn, gLevel, nm, grid, contSettings;
+                                                                        nuclearPot=nuclearPot, primitives=primitives)
+                    push!(nLevels,  Basics.generateLevelWithExtraElectron(nOrbital, symn, gLevel))
+                    push!(nWeights, 1.0);    push!(nOnShell, true)
+                    push!(nBlock,   block);  push!(nEnergy,  enStar)
+                end
+            end
+        end
+    end
+
+    return( nLevels, nWeights, nOnShell, nBlock, nEnergy )
+end
+
+
+"""
+`PhotoDoubleIonization.checkGreenSpaceOnGrid(gMultiplet::Multiplet, grid::Radial.Grid)`
+    ... tests that the caller-supplied Green space actually lives on the grid this computation integrates on, and returns a
+        list::Array{String,1} of the problems found -- empty when there is none.  `settings.gMultiplet` is built by the CALLER,
+        normally from its own `Representation`, and a Representation handed a DIFFERENT grid returns orbitals carrying
+        `useStandardGrid = true` and an EMPTY stored grid.  Their radial arrays are then read index by index against a mesh they
+        do not belong to, so every matrix element through them is nonsense rather than merely inaccurate, and nothing says so.
+        MEASURED on `examples/example-Dj.jl`, whose branch 1 passed `Radial.Grid(true)` (392 points to 614 a.u.) while branch 2
+        computed on 1302 points to 10 a.u.:  <a|a> came back 0.3581 for 1s_1/2, 0.1149 for 2s_1/2 and 0.1242 / 0.1241 for the two
+        2p levels, where it must be 1 -- norms wrong by factors of 3 to 9.  NO choice of transition operator repairs that, which
+        is why this check belongs in front of the operator question of item 98 rather than after it.
+        Only clearly BOUND orbitals are tested and the tolerance is loose, because a continuum orbital follows a different
+        normalisation convention entirely (see `Continuum.checkContinuumAmplitude`) and a bound orbital may legitimately be a
+        box-confined pseudostate.  Calibrated by mutation: on the two-grid case every one of the four bound shells is reported,
+        and on the same case with one grid nothing is.
+"""
+function checkGreenSpaceOnGrid(gMultiplet::Multiplet, grid::Radial.Grid)
+    problems = String[]
+    if  length(gMultiplet.levels) == 0      return( problems )      end
+    for  (sh, orb)  in  gMultiplet.levels[1].basis.orbitals
+        orb.isBound  ||  continue
+        ovl = try   RadialIntegrals.overlap(orb, orb, grid)   catch   NaN   end
+        if  isnan(ovl)  ||  abs(ovl - 1.) > 0.05
+            push!( problems, "the gMultiplet orbital $(string(sh)) has <a|a> = $(round(ovl, digits=6)) on the grid this " *
+                             "computation runs on, where it must be 1.  The Green space was almost certainly built on a " *
+                             "DIFFERENT grid:  give the `Representation` that builds `settings.gMultiplet` the SAME grid as " *
+                             "the `Atomic.Computation`, or call setDefaults(\"standard grid\", grid) before building it.  " *
+                             "Every matrix element through this orbital is otherwise read against the wrong radii." )
+        end
+    end
+
+    return( problems )
+end
+
+
+"""
+`PhotoDoubleIonization.checkSecondOrderConditions(initialMultiplet::Multiplet, gMultiplet::Multiplet, grid::Radial.Grid)`
+    ... tests whether the Green space and the initial state are built on ONE orbital set, and returns a list::Array{String,1} of the
+        problems found -- empty where they are.  This is the precondition under which the one-orbital junctions of the second-order sum
+        in `PhotoDoubleIonization.amplitude` mean what they say, and it is a property of the CALLER's input rather than of this module.
+
+        WHY IT IS CHECKED HERE AND WHY THE SUM NEVERTHELESS USES `ManyElectron.matrixElement_Vee`.  The operator a one-orbital junction
+        requires is `H - E`, and `ManyElectron.matrixElement_HminusE` computes it under a stated orthonormality assumption: it drops the
+        overlap term `-E <r|s>`, which vanishes identically on one orbital set.  Where the Green space carries its own SCF orbitals that
+        term does not vanish, and on this module's own example it is the LARGEST piece of all.  Measured 02-Nov-2026 on
+        `examples/example-Dj.jl` -- Green space [1s, 2s, 2p] of Be^3+, initial state 1s^2, each from its own SCF, both on the one grid
+        that branch now uses -- at the junction whose Green core is `1s`, omega = 400 eV and equal sharing:
+
+            V_ee  = +2.470622e-01        H - E = +1.560546e-01        one-body part = -9.100758e-02        V_ee/(H-E) = 1.583
+            <1s_green|1s_initial> = +0.994787      <2s_green|1s_initial> = +0.081996      worst departure 8.2e-02
+            <101s_1/2(eps = 0.5076)|1s_initial> = -0.023524, so  |E_i <r|s>| ~ 3.2e-01 = 2.05 x the whole H - E element
+
+        The one-body part has the right sign and a sensible size, so this is NOT the sign flip measured for
+        `TwoElectronOnePhoton`;  it fails the other way.  The continuum orbital is generated in the field of the GREEN level, hence
+        orthogonal to the GREEN bound set and not to the initial state's, and that single overlap of -0.0235 times `E_i` is twice the
+        matrix element it would correct.  Migrating this module's junctions to `H - E` would therefore ADD a 0.091 correction while
+        SILENTLY OMITTING a 0.32 term of the same origin -- a known factor 1.583 traded for an unquantified larger one.  So the sum
+        keeps `V_ee`, the ratio is recorded at the junction itself, and the migration waits for a case that satisfies this condition.
+        Building one needs the three multiplets on one frozen orbital set, which `Atomic.Computation` + `perform` cannot express today.
+
+        Only clearly BOUND orbitals are compared, since a continuum orbital follows a different normalisation convention entirely;  the
+        continuum-bound overlap above is the dominant term but is not reachable once per computation, as those orbitals are generated per
+        energy sharing and partial-wave pair.  Calibrated by mutation: the example-Dj case is reported, and the same case with the Green
+        multiplet replaced by the initial state's own basis is not.
+"""
+function checkSecondOrderConditions(initialMultiplet::Multiplet, gMultiplet::Multiplet, grid::Radial.Grid)
+    problems = String[]
+    if  length(gMultiplet.levels) == 0  ||  length(initialMultiplet.levels) == 0    return( problems )      end
+    gBasis = gMultiplet.levels[1].basis;        iBasis = initialMultiplet.levels[1].basis
+    worst  = 0.;                                worstName = ""
+    for  (sha, orba)  in  gBasis.orbitals,  (shb, orbb)  in  iBasis.orbitals
+        if  sha.kappa != shb.kappa                  continue     end
+        if  !(orba.isBound  &&  orbb.isBound)       continue     end
+        ovl = try   RadialIntegrals.overlap(orba, orbb, grid)   catch   NaN   end
+        dev = sha == shb  ?  abs(abs(ovl) - 1.)  :  abs(ovl)
+        if  !isnan(dev)  &&  dev > worst
+            worst = dev;    worstName = "<$(string(sha))_green | $(string(shb))_initial> = $(round(ovl, digits=6))"
+        end
+    end
+    if  worst > 1.0e-4
+        push!( problems, "the Green space and the initial state are not built on one orbital set -- worst departure "                  *
+                         "$(round(worst, digits=6)) at $worstName.  The one-orbital junctions of the second-order sum are then "        *
+                         "inexact by a factor of order unity, and the overlap term that would correct them is not available:  see "    *
+                         "PhotoDoubleIonization.checkSecondOrderConditions, where this is measured.  Build the Green space on the "    *
+                         "initial state's own orbitals with Hamiltonian.performCIwithFrozenOrbitals to remove this." )
+    end
+
+    return( problems )
+end
+
+
+"""
+`PhotoDoubleIonization.computeAmplitudesProperties(line::PhotoDoubleIonization.Line, nm::Nuclear.Model, grid::Radial.Grid,
+        nrContinuum::Int64, settings::PhotoDoubleIonization.Settings; nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+        primitives::Union{Nothing,Bsplines.Primitives}=nothing, printout::Bool=false)`
+    ... computes the amplitudes of every partial-wave pair of the given line, at every energy sharing, and from them the energy-differential
+        cross section of each sharing. TWO continuum orbitals are generated per pair -- one for each emitted electron, at the energies the
+        pair carries -- and they are shared by all channels of that pair, which is what the pair layer is for.
+
+        The two electrons are coupled in sequence: the first to the final ion, giving the intermediate xSymmetry, and the second to that,
+        giving the total symmetry of the channel. An electric multipole is evaluated once per gauge into a single EmPropertyC, a magnetic
+        one once into an EmPropertyC with equal components, so that no gauge is iterated over here.
+
+        The energy-differential cross section dsigma/depsilon1 of each sharing is the INCOHERENT sum of abs2 over pairs, channels and
+        multipoles, times the same prefactor 4 pi^2 alpha omega / (2 (2J_i+1)) that photoionization uses -- the operator and the per-energy
+        normalization of the continuum orbitals are the same, and here BOTH outgoing electrons carry it. The total cross section is the
+        sharing-integrated differential one; the exchange double counting is already handled by Basics.determineEnergySharings and is not
+        applied again. A newLine::PhotoDoubleIonization.Line with all amplitudes and both cross sections evaluated is returned.
+"""
+function  computeAmplitudesProperties(line::PhotoDoubleIonization.Line, nm::Nuclear.Model, grid::Radial.Grid,
+                                            nrContinuum::Int64, settings::PhotoDoubleIonization.Settings;
+                                            nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                            primitives::Union{Nothing,Bsplines.Primitives}=nothing, printout::Bool=false)
+    newSharings  = PhotoDoubleIonization.Sharing[]
+    contSettings = Continuum.Settings(isnothing(settings.continuumExchange) ? false : settings.continuumExchange, nrContinuum)
+    symi         = LevelSymmetry(line.initialLevel.J, line.initialLevel.parity)
+    # The sum over intermediate states is an integral over the intermediate electron energy, because those states
+    # are normalized per energy interval.  ITS NUMBER OF POINTS IS ITS OWN SETTING -- until 30-Sep-2026 it was taken
+    # from `NoEnergySharings`, which tied two unrelated convergence questions together: the outer integral over the
+    # energy SHARING, and the completeness of the second-order sum.  Measured consequence, He at 200 eV, maxKappa = 2:
+    # dsigma/deps_1 AT EQUAL SHARING grew 7.30e-06 -> 2.00e-05, a factor 2.7, from 3 to 41 sharings, with the eight
+    # partial-wave pairs unchanged -- so the differential cross section was not a function of the sharing at all, and
+    # a convergence scan in `NoEnergySharings` was really watching the intermediate sum move.  See priority item 33.
+    Ji2          = Basics.twice(line.initialLevel.J)
+    # THE SAME WRONG PREFACTOR THAT WAS ALREADY FOUND AND CORRECTED IN PhotoIonization.  Until
+    # 6-Sep-2026 this read  4 pi^2 alpha omega / (2 (2J_i+1)), which is character for character the
+    # expression measured to be wrong at module-PhotoIonization.jl:466-478: there the same amplitudes
+    # gave 0.001311 Mb with it and 0.2291 Mb with 8 pi^3/(alpha omega), and only the second is the
+    # right order for a K-shell edge.  The two differ by 4 pi / (alpha^2 omega^2), i.e. by two powers
+    # of omega -- which is the energy trend this module could not explain -- and by 1/alpha^2 = 18779.
+    # The dimensions agree between the two modules although they compute different things: PDI forms a
+    # cross section PER UNIT ENERGY, and the extra inverse energy comes from the final state carrying
+    # TWO continuum orbitals normalized per unit energy where photoionization carries one.
+    csFactor     = 8 * pi^3 / Defaults.getDefaults("alpha") / line.photonEnergy / (2*(Ji2 + 1))
+    # THE INTERMEDIATE ELECTRON IS ONE ELECTRON, NOT TWO.  Until 6-Sep-2026 this limit was
+    # maximum(sh.epsilon1 + sh.epsilon2), i.e. the energy shared by the two FINAL electrons,
+    # omega - I_double.  But the intermediate state carries a SINGLE continuum electron, whose
+    # energy runs to omega - I_single: for helium the two differ by |E(He+)| = 54.4 eV, and the
+    # on-shell point of the second-order sum -- one electron photoionized, the other still bound,
+    # which IS the TS1 mechanism this module describes -- lay ABOVE the top of the integration
+    # range at every photon energy.  Measured 6-Sep-2026: 176.7 eV against a grid ending at
+    # 122.2 eV at omega = 200 eV, and 776.7 against 722.2 at 800 eV, so 45 % of the range was
+    # missing at 200 eV and 7.5 % at 800 eV.  The correction is required on its own terms.  It is
+    # however NOT numerically large as the code stands -- measured against the committed tree it
+    # moves sigma(2+) by +3.2 % at 200 eV, +1.1 % at 400 eV and -0.2 % at 800 eV -- and it does
+    # NOT explain the energy trend of the STATUS block, which is a factor of six.  The added
+    # region only carries weight once the second-order denominator has the sign that puts the
+    # on-shell point inside it; see the note at that denominator.
+    #
+    # AND THE LIMIT MUST LIE ABOVE THE ON-SHELL POINT, NOT AT IT -- found 05-Oct-2026, and it is why priority
+    # item 33's three proposed remedies could not work.  `onShellEnergy` below is exactly the limit this code used
+    # until today, so for the LOWEST Green level the pole of the photon-first ordering sat precisely ON the upper
+    # endpoint.  An endpoint pole is not a principal value and has no value at all: the integral diverges
+    # logarithmically from one side, and no symmetric node placement, no subtraction and no splitting AT the pole
+    # can regularize what has no other side.  Measured: subtracting the singular part on the old range left the
+    # divergence untouched -- the totals merely shifted by a constant -2.37e-05 (the dropped residue) while the
+    # increments stayed at +26, +30, +29, +23 % for 15, 25, 41, 61 points.
+    #
+    # THE PHYSICAL POINT IS THAT AN INTERMEDIATE STATE IS VIRTUAL.  The second-order sum runs over a COMPLETE set,
+    # and the intermediate electron's energy is not restricted by energy conservation -- only the FINAL state's is.
+    # Cutting the integral off at the energetically allowed maximum is therefore wrong on its own terms, quite
+    # apart from where it puts the pole.  `intermediateEnergyFactor` extends the range beyond it; it must exceed 1,
+    # and because it truncates a complete set it is a convergence parameter like `NoIntermediateEnergies`.
+    # PRIORITY ITEM 33 WAS CLOSED HERE, 05-Oct-2026.  Should the intermediate sum again fail to converge, the
+    # quadrature RULE is not the place to look: subtraction of the singular part was implemented first, on the old
+    # range, and left a divergent sequence shifted by a constant.  What matters is that the pole stays INSIDE the
+    # interval, i.e. that `intermediateEnergyFactor` exceeds 1 -- and that factor is itself unconverged at its
+    # default of 3, which is 1.7 % below its factor-8 value.
+    eGreenMin      = minimum(lv.energy for lv in settings.gMultiplet.levels)
+    onShellEnergy  = line.initialLevel.energy + line.photonEnergy - eGreenMin
+    intFactor      = settings.intermediateEnergyFactor > 1. ? settings.intermediateEnergyFactor : 3.
+    maxIntEnergy   = intFactor * onShellEnergy
+    noIntEnergies    = settings.NoIntermediateEnergies > 0 ? settings.NoIntermediateEnergies : settings.NoEnergySharings
+    intermediateGrid = Radial.GridGL(Radial.GridGaussLegendreFinite(), 0.01, maxIntEnergy, noIntEnergies; printout=false)
+
+    for  sharing in line.sharings
+        newPairs = PhotoDoubleIonization.PartialWavePair[]
+        for  pw in sharing.partialWavePairs
+            sh1 = Subshell(101, pw.kappa1);    sh2 = Subshell(102, pw.kappa2)
+            # A fresh subshell list: appending to the level's own list would mutate the level that was passed in.
+            subshells = copy(line.initialLevel.basis.subshells);    push!(subshells, sh1);    push!(subshells, sh2)
+            newiLevel = Basics.generateLevelWithSymmetryReducedBasis(line.initialLevel, subshells)
+            redFLevel = Basics.generateLevelWithSymmetryReducedBasis(line.finalLevel,   subshells[1:end-2])
+
+            # Electron 1 couples to the final ion and gives the intermediate symmetry of the pair.
+            cOrbital1, phase1 = Continuum.generateOrbitalForLevel(pw.energy1, sh1, line.finalLevel, nm, grid, contSettings;
+                                                                 nuclearPot=nuclearPot, primitives=primitives)
+            xLevel            = Basics.generateLevelWithExtraElectron(cOrbital1, pw.xSymmetry, redFLevel)
+            # Electron 2 couples to that intermediate symmetry and gives the total symmetry of each channel.
+            cOrbital2, phase2 = Continuum.generateOrbitalForLevel(pw.energy2, sh2, line.finalLevel, nm, grid, contSettings;
+                                                                 nuclearPot=nuclearPot, primitives=primitives)
+
+            newChannels = PhotoDoubleIonization.Channel[]
+            for  ch in pw.channels
+                cLevel  = Basics.generateLevelWithExtraElectron(cOrbital2, ch.symmetry, xLevel)
+                # The intermediate states of the second-order sum carry ONE continuum electron and are built here,
+                # for the two symmetries the two time orderings require: symi for the ordering in which the photon
+                # is absorbed last, and the total symmetry of this channel for the ordering in which it is absorbed
+                # first.  They come with the quadrature weights of their per-energy normalization.
+                # Only the photon-first ordering has a pole: its denominator E_i + omega - E_n crosses zero at the
+                # sequential point, one electron ejected and the other still bound.  The other ordering's denominator
+                # is E_i - E_n, which stays negative and far from zero, so it is given no on-shell energy.
+                nLevelsI, nWeightsI, nOnShellI, nBlockI, nEnergyI = PhotoDoubleIonization.generateIntermediateLevels(symi, settings.gMultiplet, nm, grid,
+                                            intermediateGrid, contSettings, settings.maxKappa;
+                                            nuclearPot=nuclearPot, primitives=primitives,
+                                            spectators=[(sh1, pw.energy1), (sh2, pw.energy2)])
+                nLevelsF, nWeightsF, nOnShellF, nBlockF, nEnergyF = PhotoDoubleIonization.generateIntermediateLevels(ch.symmetry, settings.gMultiplet, nm, grid,
+                                            intermediateGrid, contSettings, settings.maxKappa;
+                                            nuclearPot=nuclearPot, primitives=primitives,
+                                            onShellTotalEnergy = line.initialLevel.energy + line.photonEnergy)
+                nLevels  = vcat(nLevelsI,  nLevelsF)
+                nWeights = vcat(nWeightsI, nWeightsF)
+                nOnShell = vcat(nOnShellI, nOnShellF)
+                # The two sets are assembled as ONE sum, so the second set's group labels are offset: a group is
+                # the set of levels sharing one pole, and a label reused across the two sets would subtract one
+                # group's on-shell numerator from the other group's nodes.
+                nOffset  = isempty(nBlockI) ? 0 : maximum(nBlockI)
+                nBlock   = vcat(nBlockI,  nBlockF .+ nOffset)
+                nEnergy  = vcat(nEnergyI, nEnergyF)
+                newAmps  = MultipoleAmplitude[]
+                for  ma in ch.amplitudes
+                    mp = ma.multipole
+                    if  string(mp)[1] == 'E'
+                        ampC = PhotoDoubleIonization.amplitude(Absorption(), mp, Basics.Coulomb,   line.photonEnergy, cLevel,
+                                                               newiLevel, nLevels, nWeights, grid; printout=printout, nOnShell=nOnShell,
+                                                               nBlock=nBlock, nEnergy=nEnergy, energyRange=(0.01, maxIntEnergy))
+                        ampB = PhotoDoubleIonization.amplitude(Absorption(), mp, Basics.Babushkin, line.photonEnergy, cLevel,
+                                                               newiLevel, nLevels, nWeights, grid; printout=printout, nOnShell=nOnShell,
+                                                               nBlock=nBlock, nEnergy=nEnergy, energyRange=(0.01, maxIntEnergy))
+                        push!(newAmps, MultipoleAmplitude(mp, EmPropertyC(ampC, ampB)))
+                    else
+                        ampM = PhotoDoubleIonization.amplitude(Absorption(), mp, Basics.Magnetic,  line.photonEnergy, cLevel,
+                                                               newiLevel, nLevels, nWeights, grid; printout=printout, nOnShell=nOnShell,
+                                                               nBlock=nBlock, nEnergy=nEnergy, energyRange=(0.01, maxIntEnergy))
+                        push!(newAmps, MultipoleAmplitude(mp, EmPropertyC(ampM, ampM)))
+                    end
+                end
+                push!(newChannels, PhotoDoubleIonization.Channel(ch.symmetry, newAmps))
+            end
+            push!(newPairs, PhotoDoubleIonization.PartialWavePair(pw.kappa1, pw.energy1, phase1, pw.xSymmetry,
+                                                                 pw.kappa2, pw.energy2, phase2, newChannels))
+        end
+
+        # Incoherent over pairs, channels and multipoles; abs2 of an EmPropertyC keeps the two gauges apart by itself.
+        dcs = EmProperty(0., 0.)
+        for  pw in newPairs,  ch in pw.channels,  ma in ch.amplitudes    dcs = dcs + abs2(ma.amplitude)    end
+        # The same prefactor as for photoionization: the electron-photon operator and the per-energy
+        # normalization of the continuum orbitals are the same, and BOTH outgoing electrons already carry it.
+        dcs = csFactor * dcs
+        push!(newSharings, PhotoDoubleIonization.Sharing(sharing.omega, sharing.epsilon1, sharing.epsilon2,
+                                                         sharing.weight, dcs, newPairs))
+    end
+
+    # The total is the sharing-integrated differential cross section.  The exchange double counting of
+    # eps1 <-> eps2 is already handled inside Basics.determineEnergySharings and must NOT be applied again.
+    crossSection = EmProperty(0., 0.)
+    for  sh in newSharings   crossSection = crossSection + sh.weight * sh.differentialCs   end
+
+    newLine = PhotoDoubleIonization.Line(line.initialLevel, line.finalLevel, line.photonEnergy, crossSection, newSharings)
+
+    return( newLine )
+end
 
 
 """
@@ -351,23 +1002,43 @@ function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, n
     printstyled("PhotoDoubleIonization.computeLines(): The computation of photo-double ionization properties starts now ... \n", color=:light_green)
     printstyled("---------------------------------------------------------------------------------------------------------- \n", color=:light_green)
     println("")
-    # Generate orbitals for all quasi-subshells
-    quasiSubshells = Basics.generateSubshellList(settings.quasiShells)
-    meanPot        = Basics.computePotentialDFS(grid, finalMultiplet.levels[1].basis)
-    quasiOrbitals  = Basics.generateOrbitalsForPotential(grid, meanPot, quasiSubshells)
+    # The 15-Aug-2026 barrier was removed on 15-Sep-2026 when the maintainer lifted the parking. It is replaced
+    # by a WARNING and not by silence: the module is usable for shapes, ratios and trends, and is not usable for
+    # a bare cross section. Saying so on every run is cheaper than a reader discovering it from a wrong number.
+    printstyled(">>> PhotoDoubleIonization: the SHARING INTEGRAL IS NOT CONVERGED -- measured 15-Sep-2026, the total\n" *
+                ">>> drifts +29 % between 3 and 21 Gauss-Legendre points and is still rising. Treat the first digit\n" *
+                ">>> only, and state the number of sharings with any number taken from here.\n" *
+                ">>> The COULOMB (velocity) form is the stable one: quadrupling the intermediate set moves it by\n" *
+                ">>> under 1 % while the Babushkin (length) one nearly doubles. Prefer velocity, and do not read\n" *
+                ">>> the gauge ratio as a convergence indicator. See the STATUS block in the module docstring.\n",
+                color=:yellow)
+
+    # The nuclear potential and the B-spline primitives are constant for the whole computation and are built once.
+    nuclearPot = Nuclear.nuclearPotential(nm, grid)
+    primitives = Bsplines.generatePrimitives(grid)
     #
+    # ONCE PER COMPUTATION, not once per amplitude.  The first version of this check sat inside `amplitude` and fired 6656
+    # times on one run of `examples/example-Dj.jl`, which is noise rather than a guard.
+    for  problem in PhotoDoubleIonization.checkGreenSpaceOnGrid(settings.gMultiplet, grid)
+        @warn("PhotoDoubleIonization.computeLines(): " * problem)
+    end
+    for  problem in PhotoDoubleIonization.checkSecondOrderConditions(initialMultiplet, settings.gMultiplet, grid)
+        @warn("PhotoDoubleIonization.computeLines(): " * problem)
+    end
     lines = PhotoDoubleIonization.determineLines(finalMultiplet, initialMultiplet, settings)
     # Display all selected lines before the computations start
     if  settings.printBefore    PhotoDoubleIonization.displayLines(stdout, lines)    end
     # Determine maximum energy and check for consistency of the grid
-    maxEnergy = 0.;   for  line in lines   maxEnergy = max(maxEnergy, line.electronEnergy)   end
+    maxEnergy = 0.
+    for  line in lines,  sh in line.sharings   maxEnergy = max(maxEnergy, sh.epsilon1, sh.epsilon2)   end
     nrContinuum = Continuum.gridConsistency(maxEnergy, grid)
     # Calculate all amplitudes and requested properties
     newLines = PhotoDoubleIonization.Line[]
     for  line in lines
         println("\n>> Calculate photo-double ionization amplitudes and properties for line: $(line.initialLevel.index) - $(line.finalLevel.index) " *
                 "for the photon energy $(Defaults.convertUnits("energy: from atomic", line.photonEnergy)) " * Defaults.GBL_ENERGY_UNIT)
-        newLine = PhotoDoubleIonization.computeAmplitudesProperties(line, nm, quasiOrbitals, grid, nrContinuum, settings) 
+        newLine = PhotoDoubleIonization.computeAmplitudesProperties(line, nm, grid, nrContinuum, settings;
+                                                                    nuclearPot=nuclearPot, primitives=primitives) 
         push!( newLines, newLine)
     end
     # Print all results to screen
@@ -396,12 +1067,10 @@ function  determineLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet,
                 for  omega in settings.photonEnergies
                     # Photon energies are still in 'pre-defined' units; convert to Hartree
                     omega_au = Defaults.convertUnits("energy: to atomic", omega)
-                    energy   = omega_au - (fLevel.energy - iLevel.energy)
-                    @show omega, energy
-                    if  energy < 0.    continue   end  
-                    sharings = PhotoDoubleIonization.determineSharingsAndChannels(fLevel, iLevel, omega, energy, settings) 
-                    @show sharings
-                    push!( lines, PhotoDoubleIonization.Line(iLevel, fLevel, energy, omega_au, EmProperty(0., 0.), sharings) )
+                    excess   = omega_au - (fLevel.energy - iLevel.energy)
+                    if  excess < 0.    continue   end  
+                    sharings = PhotoDoubleIonization.determineSharingsAndChannels(fLevel, iLevel, omega_au, settings) 
+                    push!( lines, PhotoDoubleIonization.Line(iLevel, fLevel, omega_au, EmProperty(0., 0.), sharings) )
                 end
             end
         end
@@ -411,57 +1080,161 @@ end
 
 
 """
-`PhotoDoubleIonization.determineSharingsAndChannels(finalLevel::Level, initialLevel::Level, omega::Float64, energy::Float64,
-                                                    settings::PhotoDoubleIonization.Settings)`  
-    ... to determine a list of PhotoDoubleIonization Sharing's and Channel's for a transitions from the initial to final level 
-        and by taking into account the particular settings of for this computation; an Array{PhotoDoubleIonization.Sharing,1} 
-        is returned.
+`PhotoDoubleIonization.determineSharingsAndChannels(finalLevel::Level, initialLevel::Level, omega::Float64,
+                                                          settings::PhotoDoubleIonization.Settings)`
+    ... determines the energy sharings of the two emitted electrons and, for each of them, the pairs of outgoing partial waves together
+        with the total symmetries they serve. The coupling is read off the types: the first electron couples to the final ion to give
+        xSymmetry, the second couples to that to give the total symmetry of a channel, and that total symmetry is what a multipole must
+        reach from the initial level. Every kappa with abs(kappa) > settings.maxKappa is discarded.
+
+        The distinct pairs (kappa1, xSymmetry, kappa2) are collected FIRST and every multipole that reaches one of their total symmetries
+        is then attached, so that a pair which serves several symmetries appears once and its two continuum orbitals are generated once.
+        The gauge is not iterated over at all: an electric multipole yields one EmPropertyC holding both gauges, a magnetic one an
+        EmPropertyC with equal components.
+
+        An Array{PhotoDoubleIonization.Sharing,1} is returned, with all amplitudes and cross sections still zero.
 """
-function determineSharingsAndChannels(finalLevel::Level, initialLevel::Level, omega::Float64, energy::Float64,
-                                        settings::PhotoDoubleIonization.Settings)
-    symi = LevelSymmetry(initialLevel.J, initialLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity) 
-    subshellList = Basics.generateSubshellList(settings.quasiShells)
-    if  Basics.UseCoulomb  in  settings.gauges   gaugeM = Basics.UseCoulomb    else   gaugeM = Basics.UseBabushkin    end
-        
-    sharings  = PhotoDoubleIonization.Sharing[]
-    eSharings = Basics.determineEnergySharings(omega - energy, settings.NoEnergySharings) 
+function determineSharingsAndChannels(finalLevel::Level, initialLevel::Level, omega::Float64,
+                                            settings::PhotoDoubleIonization.Settings)
+    symi     = LevelSymmetry(initialLevel.J, initialLevel.parity)
+    symf     = LevelSymmetry(finalLevel.J,   finalLevel.parity)
+    shift_au = Defaults.convertUnits("energy: to atomic", settings.electronEnergyShift)
+    sharings = PhotoDoubleIonization.Sharing[]
+
+    # The excess energy is what remains of the photon energy after the two electrons have been removed.
+    eSharings = Basics.determineEnergySharings(omega - (finalLevel.energy - initialLevel.energy), settings.NoEnergySharings)
+
     for  es in eSharings
-        epsilon1  = es[1];    epsilon2 = es[2];    weight = es[3];    channels = PhotoDoubleIonization.Channel[]
+        epsilon1 = es[1];    epsilon2 = es[2];    weight = es[3]
+
+        # Collect, for every distinct pair of partial waves, which total symmetry is reached by which multipole.
+        pairs = Dict{Tuple{Int64,LevelSymmetry,Int64}, Dict{LevelSymmetry,Array{EmMultipole,1}}}()
         for  mp in settings.multipoles
-            for  subsh in subshellList
-                xSymmetries = AngularMomentum.allowedTotalSymmetries(symf, subsh.kappa)
-                for  symx in xSymmetries
-                    tSymmetries = AngularMomentum.allowedMultipoleSymmetries(symi, mp)
-                    for  symt in tSymmetries
-                        kappaList = AngularMomentum.allowedKappaSymmetries(symt, symx)
-                        for  kappa in kappaList
-                            for  gauge in settings.gauges
-                                # Include further restrictions if appropriate
-                                if     string(mp)[1] == 'E'  &&   gauge == Basics.UseCoulomb      
-                                    push!(channels, PhotoDoubleIonization.Channel(mp, Basics.Coulomb,   subsh, symx, kappa, symt, 0., Complex(0.)) )
-                                elseif string(mp)[1] == 'E'  &&   gauge == Basics.UseBabushkin    
-                                    push!(channels, PhotoDoubleIonization.Channel(mp, Basics.Babushkin, subsh, symx, kappa, symt, 0., Complex(0.)) )  
-                                elseif string(mp)[1] == 'M'  &&   gauge == gaugeM                               
-                                    push!(channels, PhotoDoubleIonization.Channel(mp, Basics.Magnetic,  subsh, symx, kappa, symt, 0., Complex(0.)) ) 
-                                end
-                            end
-                        end 
+            for  symt in AngularMomentum.allowedMultipoleSymmetries(symi, mp)
+                for  kappa1 = -settings.maxKappa-1:settings.maxKappa
+                    if  kappa1 == 0  ||  abs(kappa1) > settings.maxKappa    continue    end
+                    for  symx in AngularMomentum.allowedTotalSymmetries(symf, kappa1)
+                        for  kappa2 in AngularMomentum.allowedKappaSymmetries(symt, symx)
+                            if  abs(kappa2) > settings.maxKappa    continue    end
+                            key = (kappa1, symx, kappa2)
+                            haskey(pairs, key)         ||  (pairs[key] = Dict{LevelSymmetry,Array{EmMultipole,1}}())
+                            haskey(pairs[key], symt)   ||  (pairs[key][symt] = EmMultipole[])
+                            mp in pairs[key][symt]     ||  push!(pairs[key][symt], mp)
+                        end
                     end
                 end
             end
         end
-        push!(sharings, PhotoDoubleIonization.Sharing(omega, epsilon1, epsilon2, weight, EmProperty(0., 0.), channels) )
+
+        newPairs = PhotoDoubleIonization.PartialWavePair[]
+        for  (key, symtDict) in pairs
+            kappa1, symx, kappa2 = key
+            newChannels = PhotoDoubleIonization.Channel[]
+            for  (symt, mpList) in symtDict
+                amplitudes = MultipoleAmplitude[]
+                for  mp in mpList   push!(amplitudes, MultipoleAmplitude(mp, EmPropertyC(0.)))    end
+                push!(newChannels, PhotoDoubleIonization.Channel(symt, amplitudes))
+            end
+            push!(newPairs, PhotoDoubleIonization.PartialWavePair(kappa1, epsilon1 + shift_au, 0., symx,
+                                                                 kappa2, epsilon2 + shift_au, 0., newChannels))
+        end
+        push!(sharings, PhotoDoubleIonization.Sharing(omega, epsilon1, epsilon2, weight, EmProperty(0., 0.), newPairs))
     end
-    return( sharings )  
+
+    return( sharings )
 end
 
 
 """
-`PhotoDoubleIonization.displayLines(iostream::IO, lines::Array{PhotoDoubleIonization.Line,1})`  
+`PhotoDoubleIonization.displayResults(stream::IO, lines::Array{PhotoDoubleIonization.Line,1},`
+        `settings::PhotoDoubleIonization.Settings)`
+    ... to display the total photo-double ionization cross sections and, for each line, the energy-sharing distribution from which they
+        were obtained.  A neat table is printed to stream; nothing::Nothing is returned.
+
+        TWO TABLES, because the two quantities are not equally trustworthy.  The total cross section is the sharing integral
+        sigma = SUM_k w_k (dsigma/d eps_1)_k over the Gauss-Legendre points, and it is a single number per line.  The DISTRIBUTION is the
+        primary observable of this process and is what a reader must see in order to judge the integral: an integrand that is not smooth
+        across the sharing coordinate, or that fails to fall towards the two ends, says that the quadrature is not converged whatever the
+        total happens to be.  The second table therefore prints the integrand and its weights rather than only their sum.
+
+        The symmetry of the distribution about equal sharing is a property of the pair set rather than of the physics, and is the internal
+        check that costs nothing to look at here: eps_1 <-> eps_2 must give the same differential cross section when the pair set is
+        exchange-closed.
+"""
+function  displayResults(stream::IO, lines::Array{PhotoDoubleIonization.Line,1}, settings::PhotoDoubleIonization.Settings)
+    #
+    # First table: the sharing-integrated total cross section, one row per line
+    nx = 108
+    println(stream, " ")
+    println(stream, "  Total photo-double ionization cross sections:")
+    println(stream, " ")
+    println(stream, "  ", TableStrings.hLine(nx))
+    sa = "  ";   sb = "  "
+    sa = sa * TableStrings.center(18, "i-level-f"; na=0);                         sb = sb * TableStrings.hBlank(18)
+    sa = sa * TableStrings.center(18, "i--J^P--f"; na=2);                         sb = sb * TableStrings.hBlank(20)
+    sa = sa * TableStrings.center(12, "omega";      na=4)
+    sb = sb * TableStrings.center(12, TableStrings.inUnits("energy"); na=4)
+    sa = sa * TableStrings.center(10, "sharings";   na=3);                        sb = sb * TableStrings.hBlank(13)
+    sa = sa * TableStrings.center(30, "Cou -- Cross section -- Bab"; na=3)
+    sb = sb * TableStrings.center(30, TableStrings.inUnits("cross section") * "          " *
+                                      TableStrings.inUnits("cross section"); na=3)
+    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx))
+    #
+    for  line in lines
+        sa   = "";     isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
+                       fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
+        sa = sa * TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
+        sa = sa * TableStrings.center(18, TableStrings.symmetries_if(isym, fsym); na=3)
+        sa = sa * @sprintf("%.5e", Defaults.convertUnits("energy: from atomic", line.photonEnergy))          * "    "
+        sa = sa * TableStrings.center(10, string(length(line.sharings)); na=3)
+        sa = sa * @sprintf("%.6e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Coulomb))   * "    "
+        sa = sa * @sprintf("%.6e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Babushkin))
+        println(stream, sa)
+    end
+    println(stream, "  ", TableStrings.hLine(nx))
+    #
+    # Second table: the energy-sharing distribution, i.e. the integrand of the number above
+    nx = 118
+    println(stream, " ")
+    println(stream, "  Energy-sharing distributions   ... the integrand of the totals above; sigma = SUM_k weight_k * dsigma/d eps_1")
+    println(stream, " ")
+    println(stream, "  ", TableStrings.hLine(nx))
+    sa = "  ";   sb = "  "
+    sa = sa * TableStrings.center(18, "i-level-f"; na=2);                         sb = sb * TableStrings.hBlank(20)
+    sa = sa * TableStrings.center(12, "epsilon_1"; na=2)
+    sb = sb * TableStrings.center(12, TableStrings.inUnits("energy"); na=2)
+    sa = sa * TableStrings.center(12, "epsilon_2"; na=2)
+    sb = sb * TableStrings.center(12, TableStrings.inUnits("energy"); na=2)
+    sa = sa * TableStrings.center(12, "weight";    na=3);                         sb = sb * TableStrings.hBlank(15)
+    sa = sa * TableStrings.center(34, "Cou -- dsigma/d eps_1 -- Bab"; na=2)
+    sb = sb * TableStrings.center(34, TableStrings.inUnits("cross section") * "/" * TableStrings.inUnits("energy") *
+                                      "     " * TableStrings.inUnits("cross section") * "/" * TableStrings.inUnits("energy"); na=2)
+    println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx))
+    #
+    for  line in lines
+        sa = TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
+        for  (is, sharing)  in  enumerate(line.sharings)
+            if  is == 1     sb = sa     else    sb = TableStrings.hBlank( length(sa) )    end
+            sb = sb * @sprintf("%.5e", Defaults.convertUnits("energy: from atomic", sharing.epsilon1)) * "  "
+            sb = sb * @sprintf("%.5e", Defaults.convertUnits("energy: from atomic", sharing.epsilon2)) * "  "
+            sb = sb * @sprintf("%.5e", sharing.weight)                                                 * "   "
+            sb = sb * @sprintf("%.6e", Defaults.convertUnits("cross section: from atomic", sharing.differentialCs.Coulomb))   * "   "
+            sb = sb * @sprintf("%.6e", Defaults.convertUnits("cross section: from atomic", sharing.differentialCs.Babushkin))
+            println(stream, sb)
+        end
+    end
+    println(stream, "  ", TableStrings.hLine(nx))
+
+    return( nothing )
+end
+
+
+"""
+`PhotoDoubleIonization.displayLines(stream::IO, lines::Array{PhotoDoubleIonization.Line,1})`
     ... to display a list of lines, sharings and channels that have been selected due to the prior settings. A neat table 
         of all selected transitions and energies is printed but nothing is returned otherwise.
 """
-function  displayLines(iostream::IO, lines::Array{PhotoDoubleIonization.Line,1})
+function  displayLines(stream::IO, lines::Array{PhotoDoubleIonization.Line,1})
     #
     # First, print lines and sharings
     nx = 94
@@ -504,8 +1277,8 @@ function  displayLines(iostream::IO, lines::Array{PhotoDoubleIonization.Line,1})
     sa = "  ";   sb = "  "
     sa = sa * TableStrings.center(18, "i-level-f"; na=0);                         sb = sb * TableStrings.hBlank(18)
     sa = sa * TableStrings.center(18, "i--J^P--f"; na=4);                         sb = sb * TableStrings.hBlank(22)
-    sa = sa * TableStrings.flushleft(100, "Channels (all energies in " * TableStrings.inUnits("energy") * ")" ; na=5);              
-    sb = sb * TableStrings.flushleft(100, "Multipole  Gauge      quasi-Subshell   J^P_x   kappa   -->    J^P_t"; na=5)
+    sa = sa * TableStrings.flushleft(100, "Partial-wave pairs and the total symmetries they serve"; na=5);              
+    sb = sb * TableStrings.flushleft(100, "kappa_1 + kappa_2    J^P_x        -->   J^P_total   multipoles"; na=5)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
     #
     for  line in lines
@@ -513,13 +1286,19 @@ function  displayLines(iostream::IO, lines::Array{PhotoDoubleIonization.Line,1})
                        fsym = LevelSymmetry( line.finalLevel.J,   line.finalLevel.parity)
         sa = sa * TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
         sa = sa * TableStrings.center(18, TableStrings.symmetries_if(isym, fsym); na=4)
-        for (ic, ch) in enumerate(line.sharings[1].channels)
-            if  ic == 1     sb = sa     else    sb = TableStrings.hBlank( length(sa) )    end
-            sb = sb * string(ch.multipole) * "         " * string(ch.gauge)[1:3] * "            " 
-            sb = sb * string(ch.quasiSubshell) * "       " * string(ch.xSymmetry) * "   "
-            sb = sb * string(Subshell(1,ch.kappa))[end-4:end] * "   -->    "
-            sb = sb * string(ch.tSymmetry)
-            println(stream,  sb )
+        if  length(line.sharings) == 0      println(stream, sa * "  (no sharings)");     continue    end
+        ic = 0
+        for  pair  in  line.sharings[1].partialWavePairs
+            for  ch  in  pair.channels
+                ic = ic + 1
+                if  ic == 1     sb = sa     else    sb = TableStrings.hBlank( length(sa) )    end
+                sb = sb * string(Subshell(1, pair.kappa1))[end-4:end] * " + " *
+                          string(Subshell(1, pair.kappa2))[end-4:end] * "      "
+                sb = sb * TableStrings.center(10, string(pair.xSymmetry); na=3)
+                sb = sb * "-->   " * TableStrings.center(10, string(ch.symmetry); na=3)
+                sb = sb * join([string(ma.multipole) for ma in ch.amplitudes], ", ")
+                println(stream,  sb )
+            end
         end
     end
     println(stream, "  ", TableStrings.hLine(nx))

@@ -1,0 +1,816 @@
+
+# Hyperfine-resolved dielectronic recombination -- a strict analogue of the fine-structure route in
+# module-DielectronicRecombination-inc-FS-resolved.jl.
+#
+# THE IDEA. Both operators of DR are purely ELECTRONIC -- the Coulomb interaction for the capture step, the
+# multipole field for the photon step -- so neither touches the nuclear spin. The nucleus is a spectator, and a
+# hyperfine amplitude is therefore the corresponding ELECTRONIC amplitude times a recoupling coefficient. No
+# electronic amplitude is ever recomputed here: this file runs the fine-structure route to obtain them, builds
+# the hyperfine multiplets, and recouples. That is what keeps the hyperfine route affordable, and it is also
+# what makes it a genuine analogue rather than a second implementation that can drift out of step.
+#
+# WHERE THE PHYSICS ACTUALLY IS. The INITIAL ion carries the full nuclear moments: its hyperfine splitting is
+# observable, the capture resonances split by F_i, and their strengths carry (2F_i+1) in place of (2J_i+1). The
+# intermediate and final levels split too, but negligibly, which is imitated by mu = Q = 0. That is not an
+# approximation coded around: with mu = Q = 0 the hyperfine Hamiltonian vanishes identically, so
+# Hfs.computeHyperfineRepresentation returns pure |(I J) F> states with mc = [.. 1.0 ..] of its own accord.
+# Their F is then pure bookkeeping and is summed over before anything is displayed.
+
+
+
+"""
+`struct  DielectronicRecombination.HfCaptureLine`
+    ... defines a type for a hyperfine-resolved dielectronic capture line, i.e. the step i + e- --> m between two
+        hyperfine levels, together with the two total widths of the intermediate hyperfine level. It is the exact
+        pendant of DielectronicRecombination.CaptureLine, with Hfs.HfLevel in place of Level.
+
+    + initialLevel      ::Hfs.HfLevel   ... initial hyperfine level
+    + intermediateLevel ::Hfs.HfLevel   ... intermediate (resonant) hyperfine level
+    + electronEnergy    ::Float64       ... energy of the captured electron
+    + captureRate       ::Float64       ... A_a(m --> i) for THIS channel only
+    + totalAugerRate    ::Float64       ... Gamma_a(m), summed over all initial hyperfine levels
+    + totalPhotonRate   ::EmProperty    ... Gamma_r(m), summed over all final hyperfine levels
+    + resonanceStrength ::EmProperty    ... S(i,m)
+
+        Unlike CaptureLine this type carries NO channel list. The channels live on the electronic capture line
+        from which this one was recoupled; keeping a second copy here would duplicate state that cannot be kept
+        consistent, which is the failure mode this whole re-structuring exists to remove.
+"""
+struct  HfCaptureLine
+    initialLevel        ::Hfs.HfLevel
+    intermediateLevel   ::Hfs.HfLevel
+    electronEnergy      ::Float64
+    captureRate         ::Float64
+    totalAugerRate      ::Float64
+    totalPhotonRate     ::EmProperty
+    resonanceStrength   ::EmProperty
+end
+
+
+"""
+`DielectronicRecombination.HfCaptureLine()`  ... constructor for an 'empty' HfCaptureLine.
+"""
+function HfCaptureLine()
+    em = EmProperty(0., 0.)
+    HfCaptureLine(Hfs.HfLevel(), Hfs.HfLevel(), 0., 0., 0., em, em)
+end
+
+
+"""
+`Base.show(io::IO, line::DielectronicRecombination.HfCaptureLine)`
+    ... prepares a proper printout; nothing is returned.
+"""
+function Base.show(io::IO, line::DielectronicRecombination.HfCaptureLine)
+    println(io, "initialLevel (F):           $(line.initialLevel.F)  ")
+    println(io, "intermediateLevel (F):      $(line.intermediateLevel.F)  ")
+    println(io, "electronEnergy:             $(line.electronEnergy)  ")
+    println(io, "captureRate:                $(line.captureRate)  ")
+    println(io, "totalAugerRate:             $(line.totalAugerRate)  ")
+    println(io, "totalPhotonRate:            $(line.totalPhotonRate)  ")
+    println(io, "resonanceStrength:          $(line.resonanceStrength)  ")
+end
+
+
+"""
+`struct  DielectronicRecombination.HfPhotonLine`
+    ... defines a type for one hyperfine-resolved radiative stabilization m --> f + hv; the pendant of
+        DielectronicRecombination.PhotonLine.
+
+    + intermediateLevel ::Hfs.HfLevel   ... intermediate (resonant) hyperfine level
+    + finalLevel        ::Hfs.HfLevel   ... final hyperfine level
+    + photonEnergy      ::Float64       ... energy of the emitted photon
+    + photonRate        ::EmProperty    ... A_r(m,f)
+"""
+struct  HfPhotonLine
+    intermediateLevel   ::Hfs.HfLevel
+    finalLevel          ::Hfs.HfLevel
+    photonEnergy        ::Float64
+    photonRate          ::EmProperty
+end
+
+
+"""
+`DielectronicRecombination.HfPhotonLine()`  ... constructor for an 'empty' HfPhotonLine.
+"""
+function HfPhotonLine()
+    HfPhotonLine(Hfs.HfLevel(), Hfs.HfLevel(), 0., EmProperty(0., 0.))
+end
+
+
+"""
+`Base.show(io::IO, line::DielectronicRecombination.HfPhotonLine)`
+    ... prepares a proper printout; nothing is returned.
+"""
+function Base.show(io::IO, line::DielectronicRecombination.HfPhotonLine)
+    println(io, "intermediateLevel (F):      $(line.intermediateLevel.F)  ")
+    println(io, "finalLevel (F):             $(line.finalLevel.F)  ")
+    println(io, "photonEnergy:               $(line.photonEnergy)  ")
+    println(io, "photonRate:                 $(line.photonRate)  ")
+end
+
+
+"""
+`DielectronicRecombination.computeHfCaptureAmplitudes(hfLine::DielectronicRecombination.HfCaptureLine,
+                            eCaptureLines::Dict{Tuple{Int64,Int64},DielectronicRecombination.CaptureLine},
+                            spinI::AngularJ64)`
+    ... to obtain the capture rate of one hyperfine capture line by RECOUPLING the electronic capture amplitudes
+        that the fine-structure route has already computed. A new HfCaptureLine is returned.
+
+        For each partial wave kappa separately -- different kappa are distinct, incoherent channels -- the
+        components of the two hyperfine levels are summed COHERENTLY:
+
+            A(kappa) = sum_{p,q} mc_i[p] mc_m[q] * <((I J_i^p) F_i, j_e) F_m | (I,(J_i^p j_e) J_m^q) F_m>
+                                                 * A_electronic(i^p, kappa --> m^q)
+            captureRate = 2 pi * sum_kappa |A(kappa)|^2
+
+        The 2 pi and the sum over kappa are exactly as in the fine-structure computeCaptureAmplitudes, so that the
+        two routes coincide term by term when I = 0.
+"""
+function  computeHfCaptureAmplitudes(hfLine::DielectronicRecombination.HfCaptureLine,
+                                     eCaptureLines::Dict{Tuple{Int64,Int64},DielectronicRecombination.CaptureLine},
+                                     spinI::AngularJ64)
+    iComps = DielectronicRecombination.electronicComponents(hfLine.initialLevel)
+    mComps = DielectronicRecombination.electronicComponents(hfLine.intermediateLevel)
+    Fi     = hfLine.initialLevel.F;      Fm = hfLine.intermediateLevel.F
+    # Collect the partial waves that occur in any of the contributing electronic lines
+    kappas = Int64[]
+    for  (mci, iLev) in iComps,  (mcm, mLev) in mComps
+        eLine = get(eCaptureLines, (iLev.index, mLev.index), nothing)
+        if  eLine === nothing    continue    end
+        for  pw in eLine.capturePartialWaves    if  !(pw.kappa in kappas)    push!(kappas, pw.kappa)    end    end
+    end
+    rateA = 0.
+    for  kappa in kappas
+        je  = Basics.subshell_j( Subshell(101, kappa) )
+        amp = ComplexF64(0.)
+        for  (mci, iLev) in iComps,  (mcm, mLev) in mComps
+            eLine = get(eCaptureLines, (iLev.index, mLev.index), nothing)
+            if  eLine === nothing    continue    end
+            wa = DielectronicRecombination.hfCaptureRecoupling(spinI, iLev.J, Fi, je, mLev.J, Fm)
+            if  wa == 0.    continue    end
+            for  pw in eLine.capturePartialWaves
+                if  pw.kappa != kappa    continue    end
+                amp = amp + mci * mcm * wa * pw.amplitude
+            end
+        end
+        rateA = rateA + abs(amp)^2
+    end
+    return( DielectronicRecombination.HfCaptureLine(hfLine.initialLevel, hfLine.intermediateLevel,
+                                                    hfLine.electronEnergy, 2pi * rateA, 0., EmProperty(0., 0.),
+                                                    EmProperty(0., 0.)) )
+end
+
+
+"""
+`DielectronicRecombination.hfDrivenAugerAmplitude(iLevel::Level, mLevel::Level, kappa::Int64, eEnergy::Float64,
+                            nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
+                            settings::DielectronicRecombination.Settings;
+                            nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                            primitives::Union{Nothing,Bsplines.Primitives}=nothing)`  
+    ... the electronic capture amplitude of one partial wave for a HYPERFINE-DRIVEN resonance, with the
+        mean-field (spectator-direct) terms EXCLUDED; an amplitude::ComplexF64 is returned.
+
+        WHY THIS DIFFERS FROM `AutoIonization.amplitude`, AND IT IS THE WHOLE POINT OF THE MODE.  In a
+        hyperfine-driven capture the core is electronically UNCHANGED -- the free electron drops into nl and the
+        energy goes into the core's F' -> F flip -- so the two-particle sum contains a term in which one electron
+        keeps its orbital.  Measured on 1s + e(s) -> 1s 10s in H-like Bi, the four coefficients are
+
+            nu  bra (a,b)        ket (c,d)        V       R^nu          V R^nu
+             0  (1s, eps s)      (1s,  10s)     +0.5   1.619259e-01   +8.096e-02     <- spectator direct
+             0  (1s, eps s)      (10s, 1s )     -0.5   1.194135e-02   -5.971e-03     <- exchange
+             1  (1s, eps s)      (1s,  10s)     -0.167 0.0            0
+             1  (1s, eps s)      (10s, 1s )     +0.167 0.0            0
+
+        and the first is 13.6 times the second.  But R^0(1s, eps s; 1s, 10s) with the 1s unchanged is nothing but
+        the matrix element of the 1s MONOPOLE POTENTIAL between eps s and 10s -- and that potential is already in
+        the DFS mean field that generated both orbitals.  The autoionization operator is V_ee - U, and this term
+        IS U.  Keeping it double counts.  For an ORDINARY Auger transition the core orbital changes, no such term
+        arises, and `AutoIonization.amplitude` is right as it stands; that path is untouched.
+
+        MEASURED, AND THE SCALING IS THE PROOF.  A genuine two-electron Auger rate into a Rydberg state must fall
+        as 1/n^3, because that is how the Rydberg electron's density at the core falls.  At eps = 0.2 eV:
+
+            n            full (as AutoIonization)        exchange only
+            20     2.661489e-02                     5.420412e-05
+            28     1.528247e-02   p = 1.649         1.957580e-05   p = 3.027
+            40     8.479111e-03   p = 1.652         6.669699e-06   p = 3.019
+            60     4.320206e-03   p = 1.663         1.966046e-06   p = 3.013
+
+        1.66 against 3.02.  The spurious term is not a small correction -- it is 99.95 % of the rate at n = 60 --
+        and only without it does the answer obey the law it must obey.  This is also what the source literature
+        says: for a core that is electronically unchanged the direct Coulomb contribution drops out and the
+        exchange integral is the whole amplitude.
+
+        THE TEST IS ON THE COEFFICIENT, NOT ON THE ORBITAL NAMES: a term is excluded when one electron keeps its
+        orbital, `coeff.a == coeff.c` or `coeff.b == coeff.d`, which is exactly the statement that that electron
+        is a spectator and its interaction is already in the mean field.
+"""
+function  hfDrivenAugerAmplitude(iLevel::Level, mLevel::Level, kappa::Int64, eEnergy::Float64, nm::Nuclear.Model,
+                                 grid::Radial.Grid, nrContinuum::Int64,
+                                 settings::DielectronicRecombination.Settings;
+                                 nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                 primitives::Union{Nothing,Bsplines.Primitives}=nothing)
+    contSettings = Continuum.Settings(isnothing(settings.continuumExchange) ? false : settings.continuumExchange, nrContinuum)
+    redNLevel    = Basics.generateLevelWithSymmetryReducedBasis(mLevel, mLevel.basis.subshells)
+    newiLevel    = Basics.generateLevelWithSymmetryReducedBasis(iLevel, redNLevel.basis.subshells)
+    symn         = LevelSymmetry(mLevel.J, mLevel.parity)
+    newnLevel    = Basics.generateLevelWithExtraSubshell(Subshell(101, kappa), redNLevel)
+    cOrbital, phase = Continuum.generateOrbitalForLevel(eEnergy, Subshell(101, kappa), newiLevel, nm, grid,
+                                            contSettings; nuclearPot=nuclearPot, primitives=primitives)
+    newcLevel    = Basics.generateLevelWithExtraElectron(cOrbital, symn, newiLevel)
+    nt = length(newcLevel.basis.csfs);    nn = length(newnLevel.basis.csfs)
+    matrix = zeros(nt, nn)
+    for  r = 1:nt
+        for  s = 1:nn
+            opa    = SpinAngular.TwoParticleOperator(0, plus)
+            coeffs = SpinAngular.computeCoefficients(opa, newcLevel.basis.csfs[r], newnLevel.basis.csfs[s],
+                                                     newcLevel.basis.subshells)
+            me = 0.
+            for  coeff in coeffs
+                # one electron keeping its orbital is a spectator, and its direct interaction is the mean field
+                if  coeff.a == coeff.c   ||   coeff.b == coeff.d       continue    end
+                me = me + coeff.V * InteractionStrength.XL_Coulomb(coeff.nu,
+                                        newcLevel.basis.orbitals[coeff.a], newcLevel.basis.orbitals[coeff.b],
+                                        newnLevel.basis.orbitals[coeff.c], newnLevel.basis.orbitals[coeff.d], grid)
+            end
+            matrix[r,s] = me
+        end
+    end
+    amplitude = transpose(newcLevel.mc) * matrix * newnLevel.mc
+    amplitude = im^Basics.subshell_l(Subshell(101, kappa)) * exp( -im*phase ) * amplitude
+
+    return( amplitude )
+end
+
+
+"""
+`DielectronicRecombination.computeHfDrivenCaptureAmplitudes(hfLine::DielectronicRecombination.HfCaptureLine,
+                            nm::Nuclear.Model, grid::Radial.Grid, nrContinuum::Int64,
+                            settings::DielectronicRecombination.Settings;
+                            nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                            primitives::Union{Nothing,Bsplines.Primitives}=nothing)`  
+    ... obtains the capture rate of one hyperfine capture line whose resonance exists ONLY because the core flips
+        F' -> F, by COMPUTING the electronic capture amplitudes at the hyperfine resonance energy and recoupling
+        them. A new HfCaptureLine is returned.
+
+        WHY THIS CANNOT LOOK THE AMPLITUDES UP, which is what `computeHfCaptureAmplitudes` does.  That function
+        takes the electronic capture amplitude from the fine-structure route, and for a hyperfine-driven resonance
+        the fine-structure route HAS NO SUCH LINE: the intermediate 1s(F) nl is electronically BOUND with respect
+        to 1s + e, so `determineCaptureLines` computes a negative electron energy and skips the pair. Measured on
+        H-like Bi: a core-excited 2p 3s intermediate sits +66 156 eV above the initial state and yields a line,
+        while the core-unchanged 1s 3s sits -11 337 eV and yields none. The only thing that lifts the intermediate
+        above threshold is E_HFS = 5.167 eV, and the lookup route cannot supply it, so the rate came out ZERO --
+        silently, which was half the defect.
+
+        WHERE THE ENERGY COMES FROM.  The resonance condition is read off the HYPERFINE levels rather than the
+        electronic ones,  E_res = E(m; F_m) - E(i; F_i),  which for a core hyperfine transition is
+        E_HFS - E_b(nlj): positive, and so a real resonance, only for n high enough that the Rydberg electron is
+        bound by less than the hyperfine splitting. `determineHfCaptureLines` already forms exactly this
+        difference and already discards the closed pairs, so nothing here re-derives it -- but it is only correct
+        once the intermediate carries its FULL nuclear moments, which is what `hfDrivenCapture` arranges.
+
+        THE OPERATOR IS PURELY ELECTRONIC AND NO NEW ONE IS INTRODUCED.  The capture is driven by the
+        electron-electron interaction as always, and the nucleus enters only through the recoupling coefficient,
+        the same `hfCaptureRecoupling` the ordinary route uses, verified unitary over 515 combinations.  Two
+        things differ from the ordinary route: the ENERGY at which the electronic amplitude is evaluated, each
+        hyperfine pair needing its own;  and the amplitude itself, which must EXCLUDE the spectator-direct terms
+        because the core is electronically unchanged and their interaction is already in the mean field --
+        `hfDrivenAugerAmplitude` does that, and its docstring carries the measurement that forced it.
+
+            A(kappa) = sum_{p,q} mc_i[p] mc_m[q] * <((I J_i^p) F_i, j_e) F_m | (I,(J_i^p j_e) J_m^q) F_m>
+                                                 * A_electronic(i^p, kappa --> m^q;  E_res)
+            captureRate = 2 pi * sum_kappa |A(kappa)|^2
+
+        identical in form to the lookup route, with the electronic amplitude supplied by
+        `hfDrivenAugerAmplitude` rather than taken from the fine-structure route.
+
+        THE COST IS ONE CONTINUUM ORBITAL PER HYPERFINE PAIR, not per electronic pair, because every hyperfine
+        pair has its own E_res. That is why this is a declared mode rather than a generalization of the default.
+"""
+function  computeHfDrivenCaptureAmplitudes(hfLine::DielectronicRecombination.HfCaptureLine, nm::Nuclear.Model,
+                                           grid::Radial.Grid, nrContinuum::Int64,
+                                           settings::DielectronicRecombination.Settings;
+                                           nuclearPot::Union{Nothing,Radial.Potential}=nothing,
+                                           primitives::Union{Nothing,Bsplines.Primitives}=nothing)
+    # AND THE GRID IS THE REMAINING OBSTACLE, not this routine (priority item 34).  The channel needs
+    # E_b(nlj) < E_HFS, and for H-like Bi that is n >= 133: E_HFS = 5.196 eV computed here against 5.084
+    # measured, with the captured electron seeing q = 82.  A 133s orbital reaches ~216 a.u., so a grid that also
+    # resolves 1s at Z = 83 would need some 2200 splines.  Compute a few feasible n and extrapolate the 1/n^3
+    # strength rather than attempting n = 133 directly.
+    iComps = DielectronicRecombination.electronicComponents(hfLine.initialLevel)
+    mComps = DielectronicRecombination.electronicComponents(hfLine.intermediateLevel)
+    Fi     = hfLine.initialLevel.F;      Fm = hfLine.intermediateLevel.F
+    eEnergy = hfLine.electronEnergy
+    # The electronic amplitudes AT THIS resonance energy, one set per pair of electronic parents.  A CaptureLine
+    # is formed only to carry the energy and the partial waves into the existing fine-structure routine; it is
+    # never returned, so no electronic line is invented that the fine-structure route would then display.
+    ampDict = Dict{Tuple{Int64,Int64,Int64},ComplexF64}()
+    for  (mci, iLev) in iComps,  (mcm, mLev) in mComps
+        pws = DielectronicRecombination.determineCaptureChannels(mLev, iLev, settings)
+        if  isempty(pws)    continue    end
+        for  pw in pws
+            ampDict[(iLev.index, mLev.index, pw.kappa)] =
+                DielectronicRecombination.hfDrivenAugerAmplitude(iLev, mLev, pw.kappa, eEnergy, nm, grid,
+                                        nrContinuum, settings; nuclearPot=nuclearPot, primitives=primitives)
+        end
+    end
+    kappas = unique( [key[3] for key in keys(ampDict)] )
+    rateA  = 0.
+    for  kappa in kappas
+        je  = Basics.subshell_j( Subshell(101, kappa) )
+        amp = ComplexF64(0.)
+        for  (mci, iLev) in iComps,  (mcm, mLev) in mComps
+            amplitude = get(ampDict, (iLev.index, mLev.index, kappa), nothing)
+            if  amplitude === nothing    continue    end
+            wa = DielectronicRecombination.hfCaptureRecoupling(nm.spinI, iLev.J, Fi, je, mLev.J, Fm)
+            if  wa == 0.    continue    end
+            amp = amp + mci * mcm * wa * amplitude
+        end
+        rateA = rateA + abs(amp)^2
+    end
+
+    return( DielectronicRecombination.HfCaptureLine(hfLine.initialLevel, hfLine.intermediateLevel,
+                                                    eEnergy, 2pi * rateA, 0., EmProperty(0., 0.),
+                                                    EmProperty(0., 0.)) )
+end
+
+
+"""
+`DielectronicRecombination.computeHfCaptureLines(finalMultiplet::Multiplet, intermediateMultiplet::Multiplet,
+                            initialMultiplet::Multiplet, nm::Nuclear.Model, grid::Radial.Grid,
+                            settings::DielectronicRecombination.Settings; output::Bool=true)`
+    ... to compute hyperfine-resolved dielectronic recombination. The driver of this file and the analogue of
+        computeCaptureLines. A tuple (hfCaptureLines, hfPhotonLines) is returned if output = true.
+
+        The three ELECTRONIC multiplets are passed in exactly as for the fine-structure route; the hyperfine
+        multiplets are built here. The initial ion keeps the full nuclear moments of nm, whereas the intermediate
+        and final ions are given mu = Q = 0, so that their hyperfine Hamiltonian vanishes and their levels come
+        out as pure |(I J) F> degenerate with their electronic parents. Their F is retained because it carries the
+        angular factors, and summed over on display.
+"""
+function  computeHfCaptureLines(finalMultiplet::Multiplet, intermediateMultiplet::Multiplet, initialMultiplet::Multiplet,
+                                nm::Nuclear.Model, grid::Radial.Grid, settings::DielectronicRecombination.Settings;
+                                output::Bool=true)
+    println("")
+    printstyled("DielectronicRecombination.computeHfCaptureLines(): The computation of hyperfine-resolved DR starts now ... \n",
+                color=:light_green)
+    printstyled("----------------------------------------------------------------------------------------------------------- \n",
+                color=:light_green)
+    println("")
+    if  length(settings.corrections) > 0
+        error("\n\nDielectronicRecombination.computeHfCaptureLines():  STOP -- the hyperfine-resolved route does not \n" *
+              "implement the high-n corrections; they were requested as\n\n    $(settings.corrections)\n\n"             *
+              ">>> Drop them, or use the fine-structure route, where they are implemented and verified.\n")
+    end
+    if  nm.spinI == AngularJ64(0)
+        @warn("computeHfCaptureLines(): the nuclear spin is 0, so every hyperfine level coincides with its " *
+              "electronic parent and this route can only reproduce the fine-structure one.")
+    end
+    # (1) THE ELECTRONIC SIDE, through the fine-structure machinery. Nothing is recomputed afterwards.
+    DielectronicRecombination.checkConsistentMultiplets(finalMultiplet, intermediateMultiplet, initialMultiplet)
+    DielectronicRecombination.checkOrbitalRepresentation(finalMultiplet, intermediateMultiplet, initialMultiplet)
+    eCaptureLines = DielectronicRecombination.determineCaptureLines(finalMultiplet, intermediateMultiplet,
+                                                                    initialMultiplet, settings)
+    ePhotonLines  = DielectronicRecombination.determinePhotonLines( finalMultiplet, intermediateMultiplet,
+                                                                    initialMultiplet, settings)
+    maxEnergy = 0.;   for cLine in eCaptureLines   maxEnergy = max(maxEnergy, cLine.electronEnergy)   end
+    nrContinuum = Continuum.gridConsistency(maxEnergy, grid)
+    newEPhotonLines = Vector{DielectronicRecombination.PhotonLine}(undef, length(ePhotonLines))
+    @threads for  p in eachindex(ePhotonLines)
+        newEPhotonLines[p] = DielectronicRecombination.computePhotonAmplitudes(ePhotonLines[p], grid)
+    end
+    newECaptureLines = Vector{DielectronicRecombination.CaptureLine}(undef, length(eCaptureLines))
+    @threads for  c in eachindex(eCaptureLines)
+        newECaptureLines[c] = DielectronicRecombination.computeCaptureAmplitudes(eCaptureLines[c], nm, grid,
+                                                                                 nrContinuum, settings)
+    end
+    # The electronic lines are aggregated too, so that their resonance strengths exist and can serve as the
+    # reference of the F-sum rule below. Without this they carry zero strength and the sum rule compares
+    # against nothing -- which is exactly what happened on the first run of this route.
+    empTreatment     = DielectronicRecombination.determineEmpiricalTreatment(finalMultiplet, intermediateMultiplet,
+                                                                             nm, initialMultiplet, settings)
+    newECaptureLines = DielectronicRecombination.setTotalRates(newECaptureLines, newEPhotonLines, empTreatment)
+    eCapDict = Dict{Tuple{Int64,Int64},DielectronicRecombination.CaptureLine}()
+    for  cLine in newECaptureLines   eCapDict[(cLine.initialLevel.index, cLine.intermediateLevel.index)] = cLine   end
+    ePhoDict = Dict{Tuple{Int64,Int64},DielectronicRecombination.PhotonLine}()
+    for  pLine in newEPhotonLines    ePhoDict[(pLine.intermediateLevel.index, pLine.finalLevel.index)]   = pLine   end
+    println(">>> $(length(newECaptureLines)) electronic capture lines and $(length(newEPhotonLines)) electronic " *
+            "photon lines computed; these are now recoupled.")
+    # (2) THE HYPERFINE MULTIPLETS. Full moments for the initial ion, mu = Q = 0 for the other two -- UNLESS
+    # hfDrivenCapture is declared, in which case all three keep their full moments, because it is the
+    # INTERMEDIATE's hyperfine structure that lifts it above threshold and mu = Q = 0 removes exactly that.
+    nmZero  = settings.hfDrivenCapture ? nm : Nuclear.Model(nm; mu=0., Q=0.)
+    if  settings.hfDrivenCapture
+        println(">>> hfDrivenCapture: the intermediate and final ions keep their FULL nuclear moments, and each " *
+                "hyperfine capture amplitude is computed at its own resonance energy E_HFS - E_b(nlj).")
+    end
+    iHfMult = Hfs.computeHyperfineRepresentation(Hfs.defineHyperfineBasis(initialMultiplet, nm; printout=false), grid)
+    mHfMult = Hfs.computeHyperfineRepresentation(Hfs.defineHyperfineBasis(intermediateMultiplet, nmZero; printout=false), grid)
+    fHfMult = Hfs.computeHyperfineRepresentation(Hfs.defineHyperfineBasis(finalMultiplet, nmZero; printout=false), grid)
+    println(">>> hyperfine levels:  initial $(length(iHfMult.hfLevels)),  intermediate $(length(mHfMult.hfLevels)), " *
+            " final $(length(fHfMult.hfLevels));   nuclear spin I = $(nm.spinI)")
+    # (3) RECOUPLE
+    hfCaptureLines = DielectronicRecombination.determineHfCaptureLines(mHfMult, iHfMult, settings)
+    hfPhotonLines  = DielectronicRecombination.determineHfPhotonLines(fHfMult, mHfMult, settings)
+    newHfPhoton    = Vector{DielectronicRecombination.HfPhotonLine}(undef, length(hfPhotonLines))
+    @threads for  p in eachindex(hfPhotonLines)
+        newHfPhoton[p] = DielectronicRecombination.computeHfPhotonAmplitudes(hfPhotonLines[p], ePhoDict, nm.spinI)
+    end
+    newHfCapture   = Vector{DielectronicRecombination.HfCaptureLine}(undef, length(hfCaptureLines))
+    if  settings.hfDrivenCapture
+        maxHfEnergy = 0.;   for hl in hfCaptureLines   maxHfEnergy = max(maxHfEnergy, hl.electronEnergy)   end
+        nrHfContinuum = Continuum.gridConsistency(maxHfEnergy, grid)
+        nucPot = Nuclear.nuclearPotential(nm, grid);    prims = Bsplines.generatePrimitives(grid)
+        @threads for  c in eachindex(hfCaptureLines)
+            newHfCapture[c] = DielectronicRecombination.computeHfDrivenCaptureAmplitudes(hfCaptureLines[c], nm, grid,
+                                            nrHfContinuum, settings; nuclearPot=nucPot, primitives=prims)
+        end
+    else
+        @threads for  c in eachindex(hfCaptureLines)
+            newHfCapture[c] = DielectronicRecombination.computeHfCaptureAmplitudes(hfCaptureLines[c], eCapDict, nm.spinI)
+        end
+        # THE SILENCE WAS HALF THE DEFECT (priority item 34).  The lookup route returns zero for every line whose
+        # electronic capture line does not exist, which is precisely the hyperfine-DRIVEN resonance: the
+        # intermediate is electronically bound, so the fine-structure route formed no line to look up.  A caller
+        # who asks for such a case used to get zeros and no indication of why.
+        if  isempty(newHfCapture)  ||  all(hl -> hl.captureRate == 0., newHfCapture)
+            sa = isempty(newHfCapture) ? "no hyperfine capture line was formed AT ALL" :
+                                         "every one of $(length(newHfCapture)) hyperfine capture rates came out EXACTLY zero"
+            error("\n\nDielectronicRecombination.computeHfCaptureLines():  STOP -- $sa.\n"                          *
+                  "This route RECOUPLES the electronic capture amplitudes of the fine-structure route, and those "  *
+                  "amplitudes do not exist here: $(length(newECaptureLines)) electronic capture lines were found, " *
+                  "so for every hyperfine pair the lookup found nothing.\n"                                         *
+                  ">>> That is the signature of a resonance DRIVEN BY the core hyperfine transition itself, where " *
+                  "the intermediate is electronically BOUND and only E_HFS lifts it above threshold.  Set "         *
+                  "hfDrivenCapture = true, which keeps the full nuclear moments of the intermediate and computes " *
+                  "each amplitude at its own resonance energy E_HFS - E_b(nlj).\n"                                  *
+                  ">>> If instead the case is an ordinary, electronically driven resonance, then the intermediate " *
+                  "multiplet does not autoionize into the initial one and the pathway selection is at fault.\n")
+        end
+    end
+    newHfCapture = DielectronicRecombination.setHfTotalRates(newHfCapture, newHfPhoton)
+    # (4) DISPLAY, resolved in F_i and summed over F_m and F_f
+    DielectronicRecombination.displayHfResults(stdout, newHfCapture, newECaptureLines, nm, settings.hfDrivenCapture)
+    printSummary, iostream = Defaults.getDefaults("summary flag/stream")
+    if  printSummary    DielectronicRecombination.displayHfResults(iostream, newHfCapture, newECaptureLines, nm,
+                                                                  settings.hfDrivenCapture)   end
+    if  output    return( (newHfCapture, newHfPhoton) )
+    else          return( nothing )
+    end
+end
+
+
+"""
+`DielectronicRecombination.computeHfPhotonAmplitudes(hfLine::DielectronicRecombination.HfPhotonLine,
+                            ePhotonLines::Dict{Tuple{Int64,Int64},DielectronicRecombination.PhotonLine},
+                            spinI::AngularJ64)`
+    ... to obtain the radiative rate of one hyperfine photon line by recoupling the electronic photon amplitudes
+        already computed by the fine-structure route. A new HfPhotonLine is returned.
+
+        Each (multipole, gauge) is an incoherent channel; within one, the components of the two hyperfine levels
+        are summed coherently with the rank-L recoupling factor. The Einstein prefactor is that of the
+        fine-structure route with (2J_m+1) replaced by (2F_m+1), the statistical weight of the EMITTING level:
+
+            Gamma_r contribution = 8 pi alpha omega / (2F_m + 1) * |A|^2
+
+        Together with the identity sum_{F_f} |recoupling|^2 = (2F_m+1)/(2J_m+1) this gives Gamma_r(F_m) =
+        Gamma_r(J_m), i.e. hyperfine coupling leaves the radiative width of a level untouched -- which is the
+        first thing to check if this route is ever in doubt.
+"""
+function  computeHfPhotonAmplitudes(hfLine::DielectronicRecombination.HfPhotonLine,
+                                    ePhotonLines::Dict{Tuple{Int64,Int64},DielectronicRecombination.PhotonLine},
+                                    spinI::AngularJ64)
+    mComps = DielectronicRecombination.electronicComponents(hfLine.intermediateLevel)
+    fComps = DielectronicRecombination.electronicComponents(hfLine.finalLevel)
+    Fm     = hfLine.intermediateLevel.F;    Ff = hfLine.finalLevel.F
+    # Collect the (multipole, gauge) channels that occur
+    # Multipoles only: the gauge is no longer a label on an amplitude, it rides inside it.  The recoupling
+    # below depends on mp.L alone, so it was never a function of the gauge -- the flat form simply had to
+    # enumerate the pairs because that was how amplitudes were stored.
+    multipoles = EmMultipole[]
+    for  (mcm, mLev) in mComps,  (mcf, fLev) in fComps
+        eLine = get(ePhotonLines, (mLev.index, fLev.index), nothing)
+        if  eLine === nothing    continue    end
+        for  ma in eLine.photonAmplitudes
+            if  !(ma.multipole in multipoles)    push!(multipoles, ma.multipole)    end
+        end
+    end
+    rate = EmProperty(0., 0.)
+    for  mp in multipoles
+        amp = EmPropertyC(0.0im)
+        for  (mcm, mLev) in mComps,  (mcf, fLev) in fComps
+            eLine = get(ePhotonLines, (mLev.index, fLev.index), nothing)
+            if  eLine === nothing    continue    end
+            wa = DielectronicRecombination.hfPhotonRecoupling(spinI, mLev.J, Fm, fLev.J, Ff, mp.L)
+            if  wa == 0.    continue    end
+            for  ma in eLine.photonAmplitudes
+                if  ma.multipole != mp    continue    end
+                amp = amp + mcm * mcf * wa * ma.amplitude
+            end
+        end
+        # abs2 of an EmPropertyC is an EmProperty, and a magnetic amplitude has equal components, so it
+        # enters both sums by itself -- which is what the three-way `if` here used to say by hand.
+        rate = rate + abs2(amp)
+    end
+    wa = 8.0pi * Defaults.getDefaults("alpha") * hfLine.photonEnergy / (Basics.twice(Fm) + 1)
+    return( DielectronicRecombination.HfPhotonLine(hfLine.intermediateLevel, hfLine.finalLevel,
+                                                  hfLine.photonEnergy, wa * rate) )
+end
+
+
+"""
+`DielectronicRecombination.determineHfCaptureLines(intermediateHfMultiplet::Hfs.HfMultiplet,
+                            initialHfMultiplet::Hfs.HfMultiplet, settings::DielectronicRecombination.Settings)`
+    ... to determine the skeletons of all hyperfine capture lines (i,m) that are energetically allowed, i.e. for
+        which the captured electron has a positive energy. An Array{HfCaptureLine,1} is returned.
+        The pendant of DielectronicRecombination.determineCaptureLines.
+"""
+function  determineHfCaptureLines(intermediateHfMultiplet::Hfs.HfMultiplet, initialHfMultiplet::Hfs.HfMultiplet,
+                                  settings::DielectronicRecombination.Settings)
+    lines = DielectronicRecombination.HfCaptureLine[];    em = EmProperty(0., 0.)
+    eShift = Defaults.convertUnits("energy: to atomic", settings.electronEnergyShift)
+    for  iLevel in initialHfMultiplet.hfLevels
+        for  mLevel in intermediateHfMultiplet.hfLevels
+            energy = mLevel.energy - iLevel.energy + eShift
+            if  energy <= 0.    continue    end
+            push!( lines, DielectronicRecombination.HfCaptureLine(iLevel, mLevel, energy, 0., 0., em, em) )
+        end
+    end
+
+    return( lines )
+end
+
+
+"""
+`DielectronicRecombination.determineHfPhotonLines(finalHfMultiplet::Hfs.HfMultiplet,
+                            intermediateHfMultiplet::Hfs.HfMultiplet, settings::DielectronicRecombination.Settings)`
+    ... to determine the skeletons of all hyperfine radiative stabilization lines (m,f) with a positive photon
+        energy. An Array{HfPhotonLine,1} is returned. The pendant of determinePhotonLines.
+"""
+function  determineHfPhotonLines(finalHfMultiplet::Hfs.HfMultiplet, intermediateHfMultiplet::Hfs.HfMultiplet,
+                                 settings::DielectronicRecombination.Settings)
+    lines = DielectronicRecombination.HfPhotonLine[]
+    pShift = Defaults.convertUnits("energy: to atomic", settings.photonEnergyShift)
+    minEn  = Defaults.convertUnits("energy: to atomic", settings.mimimumPhotonEnergy)
+    for  mLevel in intermediateHfMultiplet.hfLevels
+        for  fLevel in finalHfMultiplet.hfLevels
+            energy = mLevel.energy - fLevel.energy + pShift
+            if  energy <= 0.  ||  energy < minEn    continue    end
+            push!( lines, DielectronicRecombination.HfPhotonLine(mLevel, fLevel, energy, EmProperty(0., 0.)) )
+        end
+    end
+
+    return( lines )
+end
+
+
+"""
+`DielectronicRecombination.displayHfResults(stream::IO, hfCaptureLines::Array{DielectronicRecombination.HfCaptureLine,1},
+                            eCaptureLines::Array{DielectronicRecombination.CaptureLine,1}, nm::Nuclear.Model,
+                            hfDriven::Bool=false)`
+    ... to list the hyperfine-resolved DR resonance strengths, resolved in F_i and SUMMED over F_m. Nothing is
+        returned.
+
+        Why summed over F_m (and, inside Gamma_r, over F_f): the intermediate and final levels were given
+        mu = Q = 0, so their hyperfine sublevels are exactly degenerate and their F is a bookkeeping label with
+        no observable consequence. Displaying it would suggest a structure that has been set to zero and would
+        bury the one splitting that IS observable, that of the initial ion.
+
+        THE SUM RULE is evaluated and printed here rather than left to a separate script, because it is the only
+        check that this route is right and it costs nothing once the numbers are in hand. With every hyperfine
+        level degenerate with its electronic parent,
+
+            sum_{F_i} (2F_i+1)/((2I+1)(2J_i+1)) * sum_{F_m} S(F_i --> F_m)   ==   sum_m S(J_i --> J_m)
+
+        i.e. the statistically averaged hyperfine strength must reproduce the fine-structure one EXACTLY -- it is
+        an identity among recoupling coefficients, not an approximation. A deviation localises immediately to a
+        wrong phase, a missing sqrt(2F+1) or a mis-ordered 6-j.
+"""
+function  displayHfResults(stream::IO, hfCaptureLines::Array{DielectronicRecombination.HfCaptureLine,1},
+                           eCaptureLines::Array{DielectronicRecombination.CaptureLine,1}, nm::Nuclear.Model,
+                           hfDriven::Bool=false)
+    # Aggregate over F_m, keeping F_i and the capture energy
+    byFi = Dict{Int64,EmProperty}();    enOf = Dict{Int64,Float64}();   nOf = Dict{Int64,Int64}()
+    for  cLine in hfCaptureLines
+        twoFi = Basics.twice(cLine.initialLevel.F)
+        byFi[twoFi] = get(byFi, twoFi, EmProperty(0., 0.)) + cLine.resonanceStrength
+        enOf[twoFi] = get(enOf, twoFi, cLine.electronEnergy)
+        nOf[twoFi]  = get(nOf, twoFi, 0) + 1
+    end
+    twoFis = sort(collect(keys(byFi)))
+    nx = 104
+    println(stream, " ")
+    println(stream, "  Hyperfine-resolved DR resonance strengths, summed over F_m and F_f:")
+    println(stream, " ")
+    println(stream, "  nuclear spin I = $(nm.spinI),  mu = $(nm.mu),  Q = $(nm.Q)")
+    println(stream, hfDriven ? "  hfDrivenCapture: all three ions carry their FULL nuclear moments, and each " *
+                              "amplitude was computed at its own resonance energy" :
+                              "  the intermediate and final levels carry mu = Q = 0, so their F is summed over")
+    println(stream, " ")
+    println(stream, "  ", TableStrings.hLine(nx))
+    sa = "  ";   sb = "  "
+    sa = sa * TableStrings.center(10, "F_i"; na=4);        sb = sb * TableStrings.center(10, "        "; na=4)
+    sa = sa * TableStrings.center(10, "lines"; na=4);      sb = sb * TableStrings.center(10, "        "; na=4)
+    sa = sa * TableStrings.center(16, "E_e  " * TableStrings.inUnits("energy"); na=4)
+    sb = sb * TableStrings.center(16, "                "; na=4)
+    sa = sa * TableStrings.center(18, "shift from lowest F_i"; na=2)
+    sb = sb * TableStrings.center(18, "[meV]"; na=2)
+    sa = sa * TableStrings.center(30, "Cou -- strength -- Bab"; na=4)
+    sb = sb * TableStrings.center(30, TableStrings.inUnits("strength"); na=4)
+    println(stream, sa);   println(stream, sb);   println(stream, "  ", TableStrings.hLine(nx))
+    twoI = Basics.twice(nm.spinI)
+    # The capture energy is E_m - E_i(F_i), so the resonances are shifted by MINUS the initial hyperfine
+    # splitting. Printing that shift separately, in meV, is the only way to see it: it sits many orders of
+    # magnitude below the resonance energy itself and cannot survive the %.4e of the energy column.
+    # An empty table is a legitimate outcome and must not crash the run: a hyperfine-DRIVEN case run on the
+    # lookup route produces no hyperfine capture line at all, and that is exactly when the user most needs to
+    # read the output.  Reducing over the empty list threw an ArgumentError three frames down instead.
+    if  isempty(twoFis)
+        println(stream, "  (no hyperfine capture line was formed)")
+        println(stream, "  ", TableStrings.hLine(nx))
+        return( nothing )
+    end
+    enRef = minimum([enOf[t] for t in twoFis])
+    for  twoFi in twoFis
+        shift = Defaults.convertUnits("energy: from atomic", enOf[twoFi] - enRef) * 1000.0
+        sa  = "  " * TableStrings.center(10, string(AngularJ64(twoFi//2)); na=4)
+        sa  = sa * TableStrings.center(10, string(nOf[twoFi]); na=4)
+        sa  = sa * @sprintf("%.4e", Defaults.convertUnits("energy: from atomic", enOf[twoFi]))            * "     "
+        sa  = sa * @sprintf("%12.6f", shift)                                                             * "        "
+        sa  = sa * @sprintf("%.4e", Defaults.convertUnits("strength: from atomic", byFi[twoFi].Coulomb))  * "   "
+        sa  = sa * @sprintf("%.4e", Defaults.convertUnits("strength: from atomic", byFi[twoFi].Babushkin))* "       "
+        println(stream, sa)
+    end
+    println(stream, "  ", TableStrings.hLine(nx))
+    if  length(twoFis) > 1
+        println(stream, ">>> The spread of the capture energies over F_i IS the hyperfine splitting of the INITIAL ion,")
+        println(stream, "    with reversed sign: a more strongly bound F_i needs a correspondingly larger electron energy.")
+    end
+    # THE SUM RULE.  The statistical weight of one hyperfine level within its electronic parent is
+    # (2F_i+1)/((2I+1)(2J_i+1)); summing the hyperfine strengths with that weight must return the electronic sum.
+    hfSumC = 0.;   hfSumB = 0.
+    for  cLine in hfCaptureLines
+        twoFi = Basics.twice(cLine.initialLevel.F)
+        # the electronic parent of this hyperfine level, i.e. its dominant component
+        comps = DielectronicRecombination.electronicComponents(cLine.initialLevel)
+        twoJi = length(comps) > 0 ? Basics.twice(comps[argmax([abs(c[1]) for c in comps])][2].J) : 0
+        w     = (twoFi + 1) / ((twoI + 1) * (twoJi + 1))
+        hfSumC = hfSumC + w * cLine.resonanceStrength.Coulomb
+        hfSumB = hfSumB + w * cLine.resonanceStrength.Babushkin
+    end
+    eSumC = 0.;   eSumB = 0.
+    for  cLine in eCaptureLines
+        eSumC = eSumC + cLine.resonanceStrength.Coulomb;    eSumB = eSumB + cLine.resonanceStrength.Babushkin
+    end
+    println(stream, " ")
+    # THE SUM RULE IS A CHECK IN THE DEFAULT MODE AND NOT IN THE OTHER ONE, so it must not be printed as though
+    # it were.  It holds because the hyperfine amplitudes there are RECOUPLED fine-structure amplitudes and the
+    # recoupling is unitary;  under hfDrivenCapture each hyperfine pair is evaluated at ITS OWN resonance energy
+    # and the energetically closed pairs are absent altogether, so neither premise survives.  Measured on the
+    # H-like Bi case of `example-Df.jl` branch (i): the ratio comes out 0.838, and that is the mode working as
+    # designed.  Printing the default wording there would make a correct run look like a defect.
+    if  hfDriven
+        println(stream, "  F-SUM RULE -- NOT APPLICABLE IN THIS MODE, and reported only for orientation:")
+        println(stream, "  each hyperfine pair is evaluated at its own resonance energy and the closed pairs are")
+        println(stream, "  absent, so the statistical average need not reproduce the fine-structure sum.")
+    else
+    println(stream, "  F-SUM RULE -- the statistically averaged hyperfine strength must reproduce the fine-structure one:")
+    end
+    println(stream, " ")
+    @printf(stream, "    sum_F (2F_i+1)/((2I+1)(2J_i+1)) * S(hyperfine)   Coulomb %.8e   Babushkin %.8e\n", hfSumC, hfSumB)
+    @printf(stream, "    sum   S(fine structure)                          Coulomb %.8e   Babushkin %.8e\n", eSumC, eSumB)
+    if  eSumC != 0.  &&  eSumB != 0.
+        @printf(stream, "    ratio                                            Coulomb %.10f   Babushkin %.10f\n",
+                hfSumC/eSumC, hfSumB/eSumB)
+        dev = max(abs(hfSumC/eSumC - 1.), abs(hfSumB/eSumB - 1.))
+        if  hfDriven
+            println(stream, "    >>> this ratio is NOT a check in this mode;  see the note above.")
+        elseif  dev < 1.0e-8
+            println(stream, "    >>> the sum rule holds to $(round(dev, sigdigits=2)); the recoupling is consistent.")
+        else
+            println(stream, "    >>> WARNING: the sum rule is violated by $(round(100*dev, digits=4)) %. This is an identity")
+            println(stream, "        among recoupling coefficients, so any deviation is a defect -- look for a wrong phase,")
+            println(stream, "        a missing sqrt(2F+1), or a mis-ordered 6-j, NOT for a physical explanation.")
+        end
+    end
+    println(stream, " ")
+
+    return( nothing )
+end
+
+
+"""
+`DielectronicRecombination.electronicComponents(hfLevel::Hfs.HfLevel)`
+    ... to return the list of (mc, electronic Level) pairs that make up the given hyperfine level, dropping the
+        components whose weight is numerically zero. An Array{Tuple{Float64,Level},1} is returned.
+
+        With mu = Q = 0 -- the intermediate and final levels of this route -- every hyperfine level is a pure
+        |(I J) F> and this returns exactly one component with mc = 1.
+"""
+function  electronicComponents(hfLevel::Hfs.HfLevel)
+    comps = Tuple{Float64,Level}[]
+    for  k in eachindex(hfLevel.mc)
+        if  abs(hfLevel.mc[k]) > 1.0e-10    push!(comps, (hfLevel.mc[k], hfLevel.hfBasisVectors[k].levelJ))    end
+    end
+    return( comps )
+end
+
+
+"""
+`DielectronicRecombination.hfCaptureRecoupling(spinI::AngularJ64, Ji::AngularJ64, Fi::AngularJ64,
+                            je::AngularJ64, Jm::AngularJ64, Fm::AngularJ64)`
+    ... to return the coefficient that connects the two ways of coupling nucleus, initial ion and free electron:
+
+            <((I J_i) F_i, j_e) F_m | (I, (J_i j_e) J_m) F_m>
+                = (-1)^(I+J_i+j_e+F_m) sqrt((2F_i+1)(2J_m+1)) {I J_i F_i; j_e F_m J_m}
+
+        A value::Float64 is returned. This is NOT an operator matrix element but a recoupling of three angular
+        momenta (Edmonds 6.1.5): the physical state has the free electron coupled to the hyperfine level F_i,
+        whereas the electronic capture amplitude is computed with it coupled to the electronic J_i to give J_m.
+
+        VERIFIED (work/diag-recoupling.jl, 05-Aug-2026) over 515 combinations: at FIXED F_m, the sum over J_m of
+        the squared coefficient is 1 to better than 1e-15, as it must be, since the two coupling schemes are
+        complete bases of the same space and the transformation between them is unitary. Note that summing over
+        F_m as well is NOT an identity -- that counts independent final states. For I = 0 the factor reduces to 1.
+"""
+function  hfCaptureRecoupling(spinI::AngularJ64, Ji::AngularJ64, Fi::AngularJ64,
+                              je::AngularJ64, Jm::AngularJ64, Fm::AngularJ64)
+    wa = AngularMomentum.phaseFactor([spinI, +1, Ji, +1, je, +1, Fm])
+    wb = sqrt( (Basics.twice(Fi) + 1) * (Basics.twice(Jm) + 1) )
+    wc = AngularMomentum.Wigner_6j(spinI, Ji, Fi, je, Fm, Jm)
+    return( wa * wb * wc )
+end
+
+
+"""
+`DielectronicRecombination.hfPhotonRecoupling(spinI::AngularJ64, Ja::AngularJ64, Fa::AngularJ64,
+                            Jb::AngularJ64, Fb::AngularJ64, L::Int64)`
+    ... to return the factor that converts an ELECTRONIC reduced matrix element of rank L into the corresponding
+        hyperfine one, for an operator that acts on the electrons alone:
+
+            <(I J_b) F_b || T^L || (I J_a) F_a>
+                = (-1)^(I+J_b+F_a+L) sqrt((2F_a+1)(2F_b+1)) {J_b F_b I; F_a J_a L} <J_b || T^L || J_a>
+
+        A value::Float64 is returned. Derived from the standard result for a tensor acting on one part of a
+        coupled system (Edmonds 7.1.7), with the nucleus as the untouched spectator.
+
+        VERIFIED (work/diag-recoupling.jl, 05-Aug-2026) over 454 combinations of I, J_a, J_b, F_a and L = 1, 2:
+        sum over F_b of the squared factor equals (2F_a+1)/(2J_a+1) to better than 1e-15. That identity is
+        exactly what leaves a radiative width unchanged by hyperfine coupling, since the rate carries a
+        compensating 1/(2F_a+1): Gamma_r(F_a) = Gamma_r(J_a). For I = 0 the factor reduces to 1.
+"""
+function  hfPhotonRecoupling(spinI::AngularJ64, Ja::AngularJ64, Fa::AngularJ64,
+                             Jb::AngularJ64, Fb::AngularJ64, L::Int64)
+    # The factor itself lives in Hfs; this is kept only as a name, because the identical factor is needed by
+    # the hyperfine-INDUCED transitions too, and two copies of one formula is how they begin to diverge.
+    return( Hfs.recouplingElectronicOperator(spinI, Ja, Fa, Jb, Fb, L) )
+end
+
+
+"""
+`DielectronicRecombination.setHfTotalRates(hfCaptureLines::Array{HfCaptureLine,1},
+                            hfPhotonLines::Array{HfPhotonLine,1})`
+    ... to accumulate, for every intermediate HYPERFINE level m, the two total widths
+
+            Gamma_a(m) = sum_i A_a(m --> i)          Gamma_r(m) = sum_f A_r(m --> f)
+
+        and to store them, with the resulting resonance strength, on each hyperfine capture line. A new
+        Array{HfCaptureLine,1} is returned. The single aggregation point of this route, exactly as
+        setTotalRates is for the fine-structure one, and for the same reason: it is where the capture and the
+        photon side couple, and it is the step both old implementations got wrong.
+
+        Keyed on (F, energy) rather than a level index, because Hfs.HfLevel carries no index; two hyperfine
+        levels of equal F and equal energy are the same level.
+"""
+function  setHfTotalRates(hfCaptureLines::Array{DielectronicRecombination.HfCaptureLine,1},
+                          hfPhotonLines::Array{DielectronicRecombination.HfPhotonLine,1})
+    key(lev) = (Basics.twice(lev.F), round(lev.energy, digits=10))
+    totalAuger  = Dict{Tuple{Int64,Float64},Float64}()
+    totalPhoton = Dict{Tuple{Int64,Float64},EmProperty}()
+    for  cLine in hfCaptureLines
+        k = key(cLine.intermediateLevel)
+        totalAuger[k]  = get(totalAuger,  k, 0.) + cLine.captureRate
+    end
+    for  pLine in hfPhotonLines
+        k = key(pLine.intermediateLevel)
+        totalPhoton[k] = get(totalPhoton, k, EmProperty(0., 0.)) + pLine.photonRate
+    end
+    newLines = DielectronicRecombination.HfCaptureLine[]
+    for  cLine in hfCaptureLines
+        k      = key(cLine.intermediateLevel)
+        gammaA = get(totalAuger,  k, 0.)
+        gammaR = get(totalPhoton, k, EmProperty(0., 0.))
+        # C(i,m) = pi^2/k^2 * A_a(m --> i) * (2F_m+1)/(2F_i+1);  the statistical weights are those of the
+        # HYPERFINE levels, which is the one place where the hyperfine resolution enters the strength directly.
+        wavenb = Defaults.convertUnits("kinetic energy to wave number: atomic units", cLine.electronEnergy)
+        factor = pi*pi / (wavenb*wavenb) * cLine.captureRate *
+                 ((Basics.twice(cLine.intermediateLevel.F) + 1) / (Basics.twice(cLine.initialLevel.F) + 1))
+        totC   = gammaA + gammaR.Coulomb;      totB = gammaA + gammaR.Babushkin
+        sC     = totC == 0.  ?  0.  :  factor * gammaR.Coulomb   / totC
+        sB     = totB == 0.  ?  0.  :  factor * gammaR.Babushkin / totB
+        push!( newLines, DielectronicRecombination.HfCaptureLine(cLine.initialLevel, cLine.intermediateLevel,
+                                cLine.electronEnergy, cLine.captureRate, gammaA, gammaR, EmProperty(sC, sB)) )
+    end
+
+    return( newLines )
+end

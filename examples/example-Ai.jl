@@ -1,0 +1,724 @@
+#
+println("Ai) Apply & test for restricted-active-space (RAS) expansions.")
+#
+# A RAS step may also treat part of its Q space to SECOND ORDER instead of putting every CSF into the CI --
+# rank the configurations, promote the strongly coupled ones, fold the weakly coupled remainder.  That is a
+# field on RasStep (`treatment = Basics.SecondOrder(promoteAbove, discardBelow)`) and it has its own file:
+# see example-Ar.jl.  Nothing in THIS file uses it; every branch here is variational.
+
+if  true
+    # Last visit:  18-Oct-2026
+    # Last reproduced:  18-Oct-2026 (3 of 5 to 1e-5, 2 more to 1e-3)
+    # Last successful:  01-Sep-2026 -- step1 -14.57132546, step2 -14.61403156 Ha, w_ref 0.90451, 2p at
+    #                   2.5276 / 2.5289 a.u., 22.0 s.  See the 01-Sep survey below.
+    #
+    # ===== SURVEY, 01-Sep-2026 (priority items 7 and 10): ALL THREE BRANCHES RE-RUN AND DATED. =====
+    #   branch 1 (2-layer EOL) : -14.57132545 / -14.61403155 Ha            21.9 s
+    #   branch 2 (3-layer EOL) : -14.57132545 / -14.61403155 / -14.61474032 Ha    8.4 s
+    #   branch 3 (3-layer DFS) : -14.570964036 / -14.605737784 / -14.616949323 Ha  0.6 s
+    #
+    # TWO THINGS CHANGED SINCE THE 27-Aug SURVEY, and they pull in opposite directions.
+    #  (i)  THE ENERGY ROSE, and that is correct.  27-Aug recorded step1 -14.575891726 and step2
+    #       -14.618826816; step2 is now 4.8 mHa HIGHER.  Its own note says why: "until then no RAS layer
+    #       froze anything ... BOTH layers here re-optimized every orbital".  Freezing is now real in the AL
+    #       pass as well as the rotation (01-Sep), so this is a CONSTRAINED minimum and must lie above the
+    #       unconstrained one.  It sits within 3e-05 Ha of the converged -14.614058864 that
+    #       TestFrames.testRepresentation_RasExpansion asserts, the residual being this branch's 614 a.u. box
+    #       and 24-iteration budget.
+    #  (ii) BRANCH 2 NOW CONVERGES IN SECONDS.  Its own comment records that the third layer "did NOT converge
+    #       within 40 minutes ... energy still dropping steadily after 19 iterations, no plateau".  It takes
+    #       16.7 s.  That is the largest single before/after in this survey, and it is the four EOL
+    #       convergence fixes of 29-Aug to 01-Sep rather than anything about this case.
+    #
+    # WHAT THE THIRD LAYER IS WORTH, AND WHY -- read the radii, which each step now prints (item 25).
+    # The n = 3 layer earns only -0.00072 Ha, and its orbitals say why: 3s 6.9036, 3p 8.1255 / 8.4324,
+    # 3d 7.0131 / 7.1395 a.u., against a 2s at 2.6398 and a 2p at 2.5276.  The layer sits THREE TIMES further
+    # out than the electrons it is meant to correlate.  Compare the high-Z branch (d) below, where the layer
+    # that contracts ONTO the valence region earns sixty times more than the one that does not.
+    #
+    # AND A DISCREPANCY WORTH KEEPING: branch 3, the hand-written DFS loop, reaches -14.616949 -- 2.2 mHa
+    # BELOW the EOL branch 2 on the same three layers.  Part of it is that branch 3 is a COPY of the driver
+    # loop and still seeds its start orbitals from the bare `nuclearPot`, where the driver itself now uses the
+    # screened mean field (priority item 23, fixed 01-Sep); the rest is not yet explained.  A field that
+    # optimizes a configuration average should not beat one that optimizes the very level being reported.
+    # 27-Jul-2026 (the last verified run): -14.57047 (ref) -> -14.57133 (step1, EOL reproduces reference) ->
+    #                   -14.58990 (step2, 2p correlation) Hartree; monotonic lowering, ~0.017 Ha 2p-correlation
+    #                   contribution called the right order of magnitude for Be's dominant 2s^2<->2p^2 channel.
+    # SURVEY, 27-Aug-2026 (priority item 50).  Re-run on current code this branch gives step1 -14.575891726 and
+    # step2 -14.618826816, i.e. 4.6 mHa and 28.9 mHa BELOW the recorded values, and the 2p-correlation
+    # contribution is now 0.043 Ha rather than 0.017.  The direction is right -- every change since July was a
+    # convergence fix, and a variational energy that falls has found more correlation, not less -- but the
+    # branch is NOT re-dated, for two reasons.  Step 2 still ends on "STOPPED after 24 iterations" with
+    # |grad| = 1.7e-03, so it is an upper bound and not a converged number; and it runs on Radial.Grid(true),
+    # 614 a.u. for a four-electron atom, the very grid on which testRepresentation_RasExpansion records that a
+    # correlation layer can RAISE the energy.  Re-dating wants a matched box and a larger iteration budget
+    # first.  The same physical case on the reference-sized box, at 24/60/120 iterations, is converged to
+    # 6.7e-09 Ha -- see the value recorded in TestFrames.testRepresentation_RasExpansion.
+    #   Part of the move is the frozen-orbital fix of the same day: until then no RAS layer froze anything,
+    # despite the description below, so BOTH layers here re-optimized every orbital.
+    # Scenario A: 2-layer Be RAS. Reference 1s^2 2s^2, core 1s always frozen. Layer 1 = reference SCF only
+    # (no correlation shells, no excitations -- just re-optimizes 1s/2s on the single reference CSF). Layer 2
+    # adds 2p as a single+double-excitation correlating shell; 1s and 2s stay frozen (already optimized in
+    # layer 1), only 2p is variationally optimized (EOL, target = lowest ^1S_0 level).
+    name        = "Beryllium 1s^2 2s^2 ^1S_0 ground state -- 2-layer RAS (reference, then 2p correlation)"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(), LevelSelection(true, indices=[1]) )
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    layers      = [ RasLayer(Shell[]; se=false, de=false),
+                     RasLayer([Shell("2p")]) ]
+
+    wa          = Representation(name, Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                                 RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, layers, rasSettings) )
+    println("wa = $wa")
+
+    wb = generate(wa, output=true)
+    #
+elseif  false
+    # Last visit:  11-Sep-2026
+    # Last reproduced:  16-Oct-2026 (4 of 5 to 1e-5, 1 more to 1e-3)
+    # Last successful:  11-Sep-2026 -- -14.571325453 / -14.614031602 / -14.616162172 Ha, w_ref 0.90461 at
+    #                   step 3, 3l orbitals at 3.86-8.38 a.u.  THE OPEN ISSUE BELOW IS CLOSED: what took more
+    #                   than 40 minutes without converging now takes seconds.
+    #                   STEP 3 IS 1.42 mHa LOWER THAN THE 01-Sep VALUE of -14.61474032, and lower is right --
+    #                   it is a variational minimum and the layer sequence stays monotone.  Steps 1 and 2
+    #                   reproduce the 01-Sep numbers to 3e-09 and 5e-08, i.e. exactly; only the third layer
+    #                   moved.  The cause is the September EOL repairs, not this branch: the preconditioner
+    #                   now diagonalizes h1 inside the span it builds (51bf015), the two exits test step
+    #                   health and the energy's own resolution (d0d66fc), and an orbital's sign no longer
+    #                   flips mid-line-search (559c3ea).  Re-dated after a CONTROL: the same run against the
+    #                   tree without that day's uncommitted work is bit-identical, so the change is the
+    #                   solver and not the caller.  Wall time is not recorded here -- the machine was
+    #                   contended and a contended wall time is not evidence.
+    #                   (Step 3 was -14.61475586 earlier the same day, before item 32 was fixed: this is the
+    #                   THREE-layer case, so kappa = -1 first holds 1s, 2s AND 3s here, the positive-branch
+    #                   projection's 1e-9 orthonormality gate is crossed, and its Loewdin step used to rotate
+    #                   the FROZEN orbitals along with the active one.  Holding them fixed raises this number
+    #                   by 1.55e-05 Ha, as a genuinely constrained minimum must.  Branches 1 and 3 are
+    #                   unchanged to 1e-08, the two-orbital block never reaching that gate.)
+    # OPEN ISSUE (28-Jul-2026, root cause CONFIRMED, fix deferred; RESOLVED 01-Sep-2026 by the four EOL
+    # convergence fixes): this 3rd layer (3s,3p,3d, 11 CSF) did
+    # NOT converge within 40 minutes even at a single EOL target level -- energy still dropping steadily
+    # after 19 iterations, no plateau. This is NOT primarily a performance problem: it is the same
+    # winner-take-all instability confirmed for Scenario A's own step 2 (see the KNOWN LIMITATION note on
+    # SelfConsistent.solveOptimizedLevelField and project_eol_implementation.md) -- competing near-degenerate
+    # correlating CSFs (here across 3s/3p/3d as well as 2p) fight for the same correlation channel, and the
+    # (1.0/occ) Fock-matrix scaling diverges as a losing CSF's mixing coefficient shrinks, rather than
+    # settling. More competing shells (this layer) means more such instabilities at once, hence even slower/
+    # less likely to plateau than Scenario A's single 2p_1/2-vs-2p_3/2 case. Needs the real
+    # DA/inhomogeneous-term mechanism (deferred) before this scenario can be trusted or dated. Steps 1-2
+    # below are shared with (and reproduce exactly) the working, dated Scenario A above.
+    # Scenario B: 3-layer Be RAS, extending Scenario A. Layer 1 = reference SCF only; layer 2 adds 2p;
+    # layer 3 adds 3s, 3p, 3d as a further correlation layer (1s, 2s, 2p frozen throughout layer 3). This is
+    # the "2-3 layers" scope the RAS scheme is meant for -- a small, transparent convergence-vs-layer-count
+    # test case (each layer's lowest-level energy should decrease monotonically as correlation is added).
+    name        = "Beryllium 1s^2 2s^2 ^1S_0 ground state -- 3-layer RAS (reference, 2p, then 3s3p3d)"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(), LevelSelection(true, indices=[1]) )
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    layers      = [ RasLayer(Shell[]; se=false, de=false),
+                     RasLayer([Shell("2p")]),
+                     RasLayer([Shell("3s"), Shell("3p"), Shell("3d")]) ]
+
+    wa          = Representation(name, Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                                 RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, layers, rasSettings) )
+    println("wa = $wa")
+
+    wb = generate(wa, output=true)
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last reproduced:  20-Oct-2026 (3 of 3 numbers on the claim line)
+    # Last successful:  01-Sep-2026 -- -14.570964036 / -14.605737784 / -14.616949323 Ha, total 0.6 s.
+    #                   FASTER THAN THE EOL ROUTE BY A FACTOR OF THIRTY, as this branch expects -- and, less
+    #                   expectedly, 2.2 mHa LOWER than it on the same three layers.  A field that optimizes a
+    #                   configuration AVERAGE should not beat one that optimizes the very level being
+    #                   reported, so this is a real discrepancy and not a win.  Part of it: this branch is a
+    #                   COPY of the driver loop and still seeds its start orbitals from the bare `nuclearPot`,
+    #                   whereas the driver itself now uses the screened mean field (item 23, fixed 01-Sep).
+    #                   Bring the two into line before drawing any conclusion from the comparison.
+    # Scenario C: DFS-Field analog of Scenario B (SAME 3-layer structure: reference, then 2p, then
+    # 3s3p3d), for a rough timing/accuracy comparison against the EOL mode above. DFS-Field is a much
+    # cheaper local (Slater-exchange) mean field -- a single potential build per layer, no per-CSF-pair
+    # Fock matrix, no outer CI+SCF loop -- so it should be far faster, at the cost of not optimizing
+    # orbitals against the CI-mixed target level(s) the way EOL does. Hand-rolled here (does not call
+    # Basics.generate(::RasExpansion,...), which hardcodes scField=EOLField()) since this is a one-off
+    # diagnostic comparison, not a permanent second mode.
+    name        = "Beryllium 1s^2 2s^2 ^1S_0 ground state -- 3-layer RAS, DFS-Field (timing/accuracy reference)"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    nModel      = Nuclear.Model(4.)
+    grid        = Radial.Grid(true)
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    layers      = [ RasLayer(Shell[]; se=false, de=false),
+                     RasLayer([Shell("2p")]),
+                     RasLayer([Shell("3s"), Shell("3p"), Shell("3d")]) ]
+    rasExpansion = RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, layers, RasSettings())
+    wa          = Representation(name, nModel, grid, refConfigs, rasExpansion)
+    println("wa = $wa")
+
+    t0             = time()
+    priorMultiplet = SelfConsistent.performSCF(refConfigs, nModel, grid, AsfSettings(); printout=true)
+    nuclearPot     = Nuclear.nuclearPotential(nModel, grid)
+    subshellList   = Basics.extractRelativisticSubshellList(wa)
+    primitives     = Bsplines.generatePrimitives(grid)
+    startOrbitals  = Bsplines.generateOrbitals(subshellList, nuclearPot, nModel, primitives, printout=true)
+    println(">> [DFS] reference multiplet took $(round(time()-t0, digits=1)) s,  lowest level energy = $(priorMultiplet.levels[1].energy)")
+
+    for  (istep, step)  in  enumerate(rasExpansion.steps)
+        global priorMultiplet
+        tstep      = time()
+        println("")
+        printstyled("++ [DFS] Compute the orbitals and multiplet for step $istep ... \n", color=:light_yellow)
+        basis      = Basics.generateBasis(wa.refConfigs, rasExpansion.symmetries, step)
+        orbitals   = Basics.generateOrbitalsForBasis(basis, step.frozenShells, priorMultiplet.levels[1].basis, startOrbitals)
+        basis      = Basis( true, basis.NoElectrons, basis.subshells, basis.csfs, basis.coreSubshells, orbitals )
+
+        frozenSubshellsThisStep = [ sh  for  shell in step.frozenShells  for sh in basis.subshells
+                                        if  sh.n == shell.n  &&  Basics.subshell_l(sh) == shell.l ]
+
+        stepSettings = AsfSettings( AsfSettings();  scField=Basics.DFSField(),  frozenSubshells=frozenSubshellsThisStep )
+
+        multiplet  = SelfConsistent.performSCF(basis, nModel, grid, stepSettings; printout=true)
+        println(">> [DFS] step $istep took $(round(time()-tstep, digits=1)) s,  lowest level energy = $(multiplet.levels[1].energy)")
+        priorMultiplet = multiplet
+    end
+    println(">> [DFS] total wall time = $(round(time()-t0, digits=1)) s")
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last successful:  01-Sep-2026 -- numbers below, produced by the run this branch performs.
+    #
+    # d) A HIGH-Z FOUR-LAYER REFERENCE: Be-like at Z = 92, the 2s^2 (0+) -> 2s2p (1-) resonance line.
+    #    Added as a reference case because the low-Z branches above cannot show what a RAS expansion does
+    #    when relativity dominates, and because four layers is where this driver currently stops being
+    #    trustworthy (see the NOTE ON DEPTH below).
+    #
+    #    THE MODEL.  Reference = the full n = 2 COMPLEX {2s^2, 2s2p, 2p^2}, not 2s^2 alone: the ground state's
+    #    dominant correlation is 2s^2 <-> 2p^2, so a single-configuration reference would leave it out while
+    #    the 1- state carries 2p as a spectroscopic shell -- two DIFFERENT correlation models, whose energies
+    #    cannot be compared.  A multireference also avoids a zero-occupation crash: a single-configuration 0+
+    #    basis still carries 2p in its subshell list with mean occupation 0, and the AL pass rightly refuses it.
+    #    ONE EXPANSION PER SYMMETRY, the transition formed afterwards from two absolute totals, each
+    #    variational for its own level.
+    #
+    #    MEASURED, 07-Sep-2026, four layers (reference / +{3s,3p,3d} / +{4s..4f} / +{5s..5g}), EOL target by
+    #    reference weight, Coulomb and Coulomb+Breit, on ONE code state (c175728), single-threaded.
+    #
+    #    *** READ THIS BEFORE QUOTING ANY NUMBER BELOW: THESE ARE UPPER BOUNDS, NOT CONVERGED ENERGIES. ***
+    #    The driver's exits were recorded for the first time on 07-Sep, and in EVERY ONE of the eight
+    #    expansions exactly ONE of the four layers converges -- the reference layer -- while layers 2 to 4 stop
+    #    on a STAGNANT GRADIENT.  |grad| has a floor (0.0056 here, 0.0770 for C-like) because the functional is
+    #    DISCONTINUOUS along the search direction: a step of ~3e-08 makes the energy jump by exactly 0.032 Ha,
+    #    so the line search is pinned below the cliff and each iteration buys ~3e-10 Ha.  Until that is fixed
+    #    every table in this file is a converging upper bound and the DIFFERENCES below are worth more than the
+    #    absolute values.
+    #
+    #      layer     Coulomb [cm^-1]   +Breit [cm^-1]   Breit shift    (2s^2 -> 2s2p)
+    #        1          2 523 360.36     2 748 837.52    225 477.16
+    #        2          2 500 185.56     2 730 326.32    230 140.76
+    #        3          2 500 277.66     2 730 477.08    230 199.42
+    #        4          2 500 358.31     2 730 601.15    230 242.85
+    #
+    #      0+ totals [Ha]  C : -12040.8576527520 / -12040.8594880981 / -12040.8605090653 / -12040.8615662415
+    #                      CB: -12025.9698298954 / -12025.9736716560 / -12025.9754788823 / -12025.9772773981
+    #      1- totals [Ha]  C : -12029.3603769903 / -12029.4678045091 / -12029.4684058215 / -12029.4690955483
+    #                      CB: -12013.4452046199 / -12013.5333895895 / -12013.5345098839 / -12013.5357431107
+    #      CSFs            0+ 3 / 11 / 26 / 50      1- 2 / 14 / 42 / 92
+    #      wall time       0+ 152.1 s / 213.4 s    1- 351.8 s / 709.7 s    (Coulomb / +Breit), compute machine
+    #
+    #    THE OBSERVABLE MOVES, AND ITS SIGN CHANGED WHEN THE SOLVER WAS REPAIRED.  Against the 01-Sep table the
+    #    transition now shifts +675 / -5442 / -3557 / -1968 cm^-1 layer by layer, i.e. -0.08 % at layer 4.  A
+    #    table written here on 04-Sep reported +3 496 cm^-1 (+0.14 %) at that layer and is SUPERSEDED: it was
+    #    measured before the preconditioner repair of 2965f93, which removed virtual directions that were 99 %
+    #    inside the occupied space.  That pathology lived in the ODD symmetry, which is why the 0+ totals moved
+    #    by under 0.1 mHa and the 1- totals by 25 mHa.
+    #    THE LAYER SEQUENCE IS NO LONGER MONOTONE EITHER: 2 523 360 -> 2 500 186 -> 2 500 278 -> 2 500 358, so
+    #    the first correlation layer now OVERSHOOTS and layers 3 and 4 come back up.
+    #
+    #      SUPERSEDED TABLE, 01-Sep-2026, kept because the difference is the result:
+    #        layer 1..4   Coulomb  2 522 685.49 / 2 505 627.36 / 2 503 834.63 / 2 502 325.85
+    #                     +Breit   2 748 931.29 / 2 735 652.26 / 2 734 190.41 / 2 733 011.26
+    #        0+ totals C : -12040.8510586486 / -12040.8528916844 / -12040.8539048313 / -12040.8549322944
+    #                  CB: -12025.9598261503 / -12025.9636711274 / -12025.9655187973 / -12025.9672696758
+    #        1- totals C : -12029.3568578365 / -12029.4364134361 / -12029.4455948420 / -12029.4534968039
+    #                  CB: -12013.4347736219 / -12013.4991223023 / -12013.5076306471 / -12013.5147541055
+    #        wall time    0+ 0.09 h / 0.13 h      1- 0.89 h / 1.03 h
+    #        Those wall times were taken under contention and are not evidence; the ENERGIES are deterministic.
+    #
+    #      MEASURED AFTER item 32 was fixed (commit 93ee87a).  An earlier table here, taken the same day
+    #      BEFORE that fix, is superseded: the positive-branch projection was rotating the FROZEN orbitals,
+    #      which lowered every total by ~9.8 mHa and -- for the odd symmetry -- badly distorted how the gain
+    #      was shared between layers.  Do not quote the earlier numbers.
+    #
+    #    WHAT THE NUMBERS SAY, and why this case is worth keeping.
+    #    (i)   CORRELATION IS WORTH -23 002 cm^-1 UNDER COULOMB (-18 236 with Breit)  [07-Sep; recorded -20 360 /
+    #          -15 920, and the superseded 04-Sep table said -17 836 / -14 825 -- so this one has moved twice], and the FIRST
+    #          correlation layer takes most but not all of it: 47 % of the correlation ENERGY for the even
+    #          symmetry and 82 % for the odd, with layers 3 and 4 each worth about 10 % for the odd state.
+    #          The transition falls monotonically here, layer by layer, unlike the pre-fix table.
+    #    (ii)  BREIT AND CORRELATION ARE NOT ADDITIVE, and the first layer matters most.  The Breit shift
+    #          moves +4 664 cm^-1 (2.1 %) from the bare reference to one correlation layer, then keeps
+    #          drifting by +59 and +43  [07-Sep].  The non-additivity SURVIVES and is now STRONGER than recorded:
+    #          the drift across the four layers is +4 766 cm^-1 against +4 440 recorded (the 04-Sep table said
+    #          +3 011, which was the stalled solver).  So a Breit correction taken from the UNCORRELATED
+    #          reference is wrong by ~2 %, and one layer brings it to ~0.3 % -- useful, but not converged.
+    #    (iii) THE NON-ADDITIVITY IS IN THE CORRELATION ENERGY ITSELF: the same layer buys -0.00184 Ha under
+    #          Coulomb and -0.00384 under Breit for 0+ (2.1x MORE)  [07-Sep: IDENTICAL to the recorded value to
+    #          five decimals.  This claim has now survived THREE solver states while everything built from a
+    #          DIFFERENCE of two totals moved by thousands of cm^-1.  A correlation increment within one
+    #          symmetry is the robust quantity here; a transition is not], and -0.10956 against -0.09409 for 1-
+    #          (14 % LESS).  Breit does not scale correlation uniformly.
+    #    (iv)  BREIT COSTS +40 % MORE WALL-CLOCK FOR 0+ AND +102 % FOR 1- AND NOTHING IN THE SCF  [07-Sep: 152.1 ->
+    #          213.4 s and 351.8 -> 709.7 s.  The single figure of the original table stays BROKEN, and the
+    #          spread itself is not stable either -- 04-Sep measured +35 % and +255 % on the same two cases]: the orbital radii come out identical
+    #          to four digits with and without it, because the EOL path applies it once at the final CI and
+    #          leaves the variational loop pure Coulomb.
+    #    (v)   WHICH LAYER PAYS IS VISIBLE IN THE RADII, which each step now prints.  The n = 3 layer contracts
+    #          onto the valence region for 1- (3d at 0.0613 a.u., against 2p at 0.0439/0.0532 and 2s at 0.0545)
+    #          and earns -0.10956 Ha; for 0+ it sits at twice that radius (3d 0.1105/0.1149) and earns
+    #          -0.00184.  SIXTY TIMES the correlation energy, and the radius predicts it before the energy is
+    #          looked at.  Successive layers then expand and saturate: 0.05 -> 0.12 -> 0.22 -> 0.27 a.u.,
+    #          +80 % from n=3 to n=4 but only +20 % from n=4 to n=5, with every l of the fifth layer between
+    #          0.260 and 0.274 -- one shell of a single characteristic size.
+    #    (vi)  AT HIGH Z THE REFERENCE WEIGHT IS A BLUNT INSTRUMENT: it stays at 1.00000 through layer 2 here,
+    #          where Be at Z = 4 drops to 0.905 on its first layer.  Correlation energy is roughly constant in
+    #          Hartree while the total scales like Z^2, so the RELATIVE admixture collapses with Z.  Use the
+    #          radii instead.
+    #
+    #    NOTE ON DEPTH -- WHY FOUR AND NOT FIVE.  A fifth layer runs inside the same time budget and returns a
+    #    WRONG number: the energy RISES by 568 Ha (0+) and 535 Ha (1-), which a larger basis cannot do to a
+    #    variational minimum.  The fault is the DEPTH and not the layer: the same {6s..6h} layer is clean when
+    #    it is step 4 instead of step 5, and the failure survives a change of reference model and does not need
+    #    an h shell.  Priority item 32.  Until that is closed, four layers is the honest limit of this driver.
+    #
+    Z      = 92.0
+    refs   = [Configuration("1s^2 2s^2"), Configuration("1s^2 2s^1 2p^1"), Configuration("1s^2 2p^2")]
+    layers = [ RasLayer(Shell[]; se=false, de=false),
+               RasLayer([Shell("3s"), Shell("3p"), Shell("3d")]),
+               RasLayer([Shell("4s"), Shell("4p"), Shell("4d"), Shell("4f")]),
+               RasLayer([Shell("5s"), Shell("5p"), Shell("5d"), Shell("5f"), Shell("5g")]) ]
+    # The 0+ symmetry alone, so that the branch stays around ten minutes; swap the symmetry below for the 1-
+    # partner and difference the two lowest totals to reproduce the table above.
+    rasSettings = RasSettings([1], Basics.RotationRoute(60), 1.0e-6, Basics.CoulombBreit(0.0), LevelSelection(true, configurations=refs))
+    grid   = Basics.recommendedGrid(refs, Nuclear.Model(Z); rnt = 2.0e-7)
+    wa     = Representation("Be-like Z=92 -- 4-layer RAS, Coulomb+Breit", Nuclear.Model(Z), grid, refs,
+                            RasExpansion([LevelSymmetry(0, Basics.plus)], 4, [Shell("1s")],
+                                         [Shell("2s"), Shell("2p")], layers, rasSettings) )
+    println("wa = $wa")
+    wb = generate(wa, output=true)
+    for i = 1:length(layers)
+        k = "step" * string(i)
+        haskey(wb, k)  &&  println(">> step $i : lowest level = $(sort(wb[k].levels, by = l -> l.energy)[1].energy) Ha")
+    end    #
+elseif  false
+    # Last visit:  15-Sep-2026
+    # Last successful:  15-Sep-2026 -- numbers below, produced by the run this branch performs.
+    #
+    # e) THE C-LIKE COUNTERPART OF BRANCH (d): C-like at Z = 92, the 3P_0 -> 3P_1 fine structure of
+    #    1s^2 2s^2 2p^2.  Six electrons instead of four, and an OPEN 2p valence shell instead of a closed
+    #    2s one -- which is the whole reason for repeating the series here.  This is the largest RAS
+    #    computation in this file: 1592 CSFs at the fourth layer for the odd... (1+) symmetry, 658 for 0+.
+    #
+    #    THE MODEL.  Reference = the n = 2 COMPLEX {2s^2 2p^2, 2s 2p^3, 2p^4}, for the same reason as in (d):
+    #    both levels of the transition must be described by the SAME correlation model or their energies
+    #    cannot be compared.  Both 0+ and 1+ come from 2s^2 2p^2, and 2s 2p^3 (odd parity) contributes to
+    #    neither -- but it belongs in the reference so that the model is the n = 2 complex and not a subset
+    #    chosen per symmetry.  ONE EXPANSION PER SYMMETRY, the transition formed from two absolute totals.
+    #
+    #    MEASURED, 15-Sep-2026, four layers (reference / +{3s,3p,3d} / +{4s..4f} / +{5s..5g}), on ONE code
+    #    state (0a70337), single-threaded, four parts run as four separate processes.
+    #
+    #      layer   CSFs 0+/1+   Coulomb [cm^-1]   +Breit [cm^-1]   Breit shift
+    #        1        4 /    2     32 592 815.09    32 198 494.47    -394 320.62
+    #        2       67 /  124     32 591 498.49    32 198 848.47    -392 650.02
+    #        3      264 /  589     32 591 245.84    32 199 120.27    -392 125.57
+    #        4      658 / 1592     32 591 088.38    32 199 416.99    -391 671.40
+    #
+    #      0+ totals [Ha]  C : -14351.2468346300 / -14351.2675185711 / -14351.2765273162 / -14351.2851777275
+    #                      CB: -14330.3062233960 / -14330.3419720415 / -14330.3562980856 / -14330.3698386266
+    #      1+ totals [Ha]  C : -14202.7430422524 / -14202.7697250692 / -14202.7798849503 / -14202.7892527949
+    #                      CB: -14183.5990879655 / -14183.6332236623 / -14183.6463112862 / -14183.6584998992
+    #      wall time       0+ 0.62 h / 0.99 h     1+ 0.73 h / 1.15 h     (Coulomb / +Breit), ordinary desktop
+    #
+    #    *** THESE NUMBERS SUPERSEDE THE 07-Sep TABLE BECAUSE THE TWO-PARTICLE ANGULAR COEFFICIENTS WERE WRONG
+    #    WHEN IT WAS MADE -- not because the solver or the model changed. ***  The spectator-between case of
+    #    SpinAngular.twoParticleMoveOne assembled the CROSSED pairing and labelled it the DIRECT one, fixed
+    #    13-Sep-2026 in `1d05ab3`.  This branch was the LAST of the seven dated RAS branches without a verdict
+    #    against that fix, and the verdict was obtained by re-running one part on the PRE-FIX commit itself:
+    #
+    #        step 2, 0+ Coulomb    recorded 02-Sep        -14351.6352219174
+    #                              PRE-FIX code, 15-Sep   -14351.635222136    (reproduces it, 2e-07 Ha)
+    #                              REPAIRED code, 15-Sep  -14351.2675185711
+    #
+    #    so the old table is what the defect produced, and the table above is what the repaired code gives.
+    #
+    #    AND THE REPAIR RESTORES THE PHYSICS THIS BRANCH WAS WRITTEN TO SHOW.  Correlation now moves the
+    #    interval by 1 727 cm^-1 over four layers, -0.005 %, where the 07-Sep table had it jump +23 508 cm^-1,
+    #    +0.07 %.  A FINE-STRUCTURE INTERVAL JOINS TWO LEVELS OF ONE CONFIGURATION AND THE COMMON SHIFT
+    #    CANCELS -- which is exactly what this file concluded on 04-Sep and then RETRACTED on 07-Sep.  The
+    #    retraction was itself an artefact of the defect; the original argument stands.
+    #
+    #    THE SOLVER IS NOT STUCK, THOUGH IT LOOKS LIKE IT.  On the repaired code the EOL rotation route starts
+    #    layer 2 at |grad| = 0.069 and moves the energy by 0.28 mHa over its 60 iterations;  the pre-fix run
+    #    starts at |grad| = 0.204 and descends 153 mHa.  The repaired problem BEGINS near its minimum -- there
+    #    is no longer a large spurious correlation energy to descend into -- and |grad| is not scale-free, so a
+    #    flat gradient here is convergence rather than stagnation.  Layers 2 to 4 still report STOPPED at the
+    #    60-iteration budget, so these remain upper bounds;  they are simply much tighter ones.
+    #
+    #    AND HERE THE OBSERVABLE MOVES TOO -- WHICH RETRACTS WHAT THIS BRANCH SAID ON 04-Sep.  That day the
+    #    transition came out 39 cm^-1 from the 02-Sep table and the conclusion drawn was that a FINE-STRUCTURE
+    #    INTERVAL, joining two levels of ONE configuration, lets the common shift cancel where an EXCITATION
+    #    does not.  Measured on the repaired solver it shifts +1 697 / +14 458 / +8 451 / +6 612 cm^-1, i.e.
+    #    +0.02 % at layer 4.  The cancellation argument held for a STALLED solver and does not survive: the
+    #    0+ and 1+ expansions stall at different points, and the difference of two upper bounds is not itself
+    #    an upper bound on anything.
+    #    THE TOTALS MOVED BY 0.11 Ha (0+, layer 4: -14351.5826 on 04-Sep against -14351.6973 now), which is
+    #    also the measure of how far from converged the 04-Sep numbers were.
+    #
+    #      SUPERSEDED TABLE, 02-Sep-2026:
+    #        layer 1..4  Coulomb 32 591 118.35 / 32 604 516.51 / 32 607 479.11 / 32 609 711.15
+    #                    +Breit  32 193 276.72 / 32 208 202.51 / 32 211 649.59 / 32 214 279.58
+    #        0+ totals C : -14351.2270058665 / -14351.4807118722 / -14351.5359971278 / -14351.5769920724
+    #                  CB: -14330.2670088184 / -14330.4915344958 / -14330.5413436329 / -14330.5788640877
+    #        1+ totals C : -14202.7309443812 / -14202.9236038947 / -14202.9653905461 / -14202.9962155771
+    #                  CB: -14183.5836471721 / -14183.7401659789 / -14183.7742690343 / -14183.7998064067
+    #        wall time   0+ 0.91 h / 1.47 h     1+ 1.63 h / 2.20 h
+    #
+    #    AND THE REFERENCE LAYER ALONE, three mean fields against two interactions (tourC-A-fields.jl):
+    #      DFS  C -14351.21887732  CB -14330.22831829   3P0->3P1  32 589 166 / 32 186 520 cm^-1   1.9 / 0.9 s
+    #      AL   C -14351.23925550  CB -14330.25357840             32 591 161 / 32 191 591        2.4 / 3.0 s
+    #      EOL  C -14351.24891773  CB -14330.27080296             32 591 370 / 32 193 723       10.4 / 10.8 s
+    #
+    #    FIVE THINGS, AND THE FIRST TWO REVERSE WHAT BRANCH (d) SHOWS.
+    #    (i)   BREIT CHANGES SIGN BETWEEN THE TWO SEQUENCES.  It is +230 243 cm^-1 for the Be-like line of
+    #          branch (d) and -391 921 cm^-1 here.  Nothing about "Breit is a positive correction" survives
+    #          a change of isoelectronic sequence; only its SIZE at high Z is general.
+    #          [Re-checked 07-Sep-2026: SURVIVES.  Recorded +229 000 / -397 000; both still within a percent.]
+    #    (ii)  CORRELATION ALSO REVERSES: it moves this line UP by +23 508 cm^-1 (Coulomb), where in (d) it
+    #          moved the Be-like line DOWN by 23 002.  Both are ~0.07-0.9 % of their transition.
+    #          [07-Sep: SURVIVES, and the near-equality of the two magnitudes first noticed on 04-Sep survives
+    #          with it -- 23 508 against 23 002, where the recorded pair was 18 593 against 20 360.]
+    #    (iii) RELATIVE TO THE TRANSITION, BOTH EFFECTS ARE MUCH SMALLER HERE, because the transition itself
+    #          is a 32.6 MILLION cm^-1 fine-structure splitting rather than a 2.5 million cm^-1 excitation:
+    #          Breit is 1.20 % (against 9.21 %) and correlation 0.072 % (against 0.92 %).  A fine-structure
+    #          interval is a much easier target than an excitation energy at the same Z.
+    #          [07-Sep: SURVIVES as a statement about MAGNITUDES.  The stronger reading of it offered on
+    #          04-Sep -- that this is why the observable moves in (d) and not here -- is RETRACTED: on the
+    #          repaired solver the observable moves here too, by +6 612 cm^-1.]
+    #    (iv)  THE FIRST CORRELATION LAYER TAKES 72 % OF THE CORRELATION ENERGY, and remarkably it is 72 %
+    #          in all four runs -- BUT IT NO LONGER IS: 86.2 / 78.4 / 79.7 / 74.6 % on 07-Sep.  In the
+    #          Be-like case the same fraction was 47 % for the even symmetry and 82 % for the odd, so this
+    #          uniformity is a property of THIS ion and not a general rule.
+    #          [07-Sep: BREAKS.  It read 72.5 / 72.0 / 72.6 / 72.4 originally and 72.1 / 72.3 / 71.6 / 72.0 on 04-Sep,
+    #          and looked like the most robust of the five; on the repaired solver the four runs spread over
+    #          twelve points and no longer share a value.  A uniformity that holds only while every layer
+    #          stalls at the same place is a property of the STALL, not of the ion.]
+    #    (v)   THE ABSOLUTE CORRELATION ENERGY IS ~212x LARGER than Be-like: 0.388 Ha at the first
+    #          correlation layer against 0.00184 Ha.  Four valence electrons rather than two, and an open
+    #          shell rather than a closed one.  The mean field remains irrelevant: 2 204 cm^-1 across DFS,
+    #          AL and EOL, i.e. 0.007 % of the transition.
+    #          [07-Sep: SURVIVES in kind, but the factor moved from ~140 to ~134 to ~212 as the solver was repaired.]
+    #
+    #    COST -- REWRITTEN AGAIN 07-Sep-2026, AND IT HAS NOW MOVED IN BOTH DIRECTIONS.  The four C-like
+    #    expansions take 1.01, 1.34, 5.12 and 5.54 h; with the Be-like four that is 13.4 h for all eight,
+    #    against 21.3 h on 04-Sep and 6.2 h in the original table.  The story is not a trend but two opposing
+    #    effects: the repaired solver does REAL work where the old one quit early, which lengthens a run, while
+    #    c175728 stops a run as soon as its step is confirmed collapsed, which shortens it -- on a C-like test
+    #    case, 275 s to 46 s.  Still one overnight run.
+    #    "Breit adds 35-60 % of wall time" remains FALSE: it is +33 % on 0+ and +8 % on 1+ here, and +40 % and
+    #    +102 % in branch (d).  There is no single figure, and each re-measurement has produced a different
+    #    pair, so quote the case and not a rule.
+
+    Z      = 92.0
+    refs   = [Configuration("1s^2 2s^2 2p^2"), Configuration("1s^2 2s^1 2p^3"), Configuration("1s^2 2p^4")]
+    layers = [ RasLayer(Shell[]; se=false, de=false),
+               RasLayer([Shell("3s"), Shell("3p"), Shell("3d")]),
+               RasLayer([Shell("4s"), Shell("4p"), Shell("4d"), Shell("4f")]),
+               RasLayer([Shell("5s"), Shell("5p"), Shell("5d"), Shell("5f"), Shell("5g")]) ]
+    # The 0+ symmetry, much the cheaper of the two at 0.56 h against 9.59 h; swap for LevelSymmetry(1, Basics.plus) and
+    # difference the two lowest totals to reproduce the table above.
+    rasSettings = RasSettings([1], Basics.RotationRoute(60), 1.0e-6, CoulombInteraction(), LevelSelection(true, configurations=refs))
+    grid   = Basics.recommendedGrid(refs, Nuclear.Model(Z); rnt = 2.0e-7)
+    wa     = Representation("C-like Z=92 -- 4-layer RAS", Nuclear.Model(Z), grid, refs,
+                            RasExpansion([LevelSymmetry(0, Basics.plus)], 6, [Shell("1s")],
+                                         [Shell("2s"), Shell("2p")], layers, rasSettings) )
+    println("wa = $wa")
+    wb = generate(wa, output=true)
+    for i = 1:length(layers)
+        k = "step" * string(i)
+        haskey(wb, k)  &&  println(">> step $i : lowest level = $(sort(wb[k].levels, by = l -> l.energy)[1].energy) Ha")
+    end
+    #
+elseif  false
+    # Last visit:  20-Oct-2026
+    # Last reproduced:  20-Oct-2026 (3 of 3 numbers on the claim line)
+    # Last successful:  17-Oct-2026   ## increments -42.7061 / -43.3205 / -47.6452 mHa for
+    #                  :previousLayersFrozen / :coreFrozen / :allFree;  ordering check PASSED
+    #
+    # MEASURED 17-Oct-2026, the run this branch performs, 0 warnings and no grid complaint:
+    #
+    #       policy                   step 1 [Ha]        step 2 [Ha]     layer-2 increment [mHa]
+    #       previousLayersFrozen     -14.571325453      -14.614031602              -42.7061
+    #       coreFrozen               -14.571325453      -14.614645976              -43.3205
+    #       allFree                  -14.571325453      -14.618970649              -47.6452
+    #
+    #   THREE CONTROLS FELL OUT OF IT, and together they are why this branch is worth running rather than
+    #   reading:
+    #   (1) STEP 1 IS IDENTICAL TO EVERY DIGIT across the three policies, as it must be -- step 1 has nothing
+    #       to inherit, so the policy can only act from step 2 on.  A difference there would mean the policy
+    #       was leaking into the reference layer.
+    #   (2) THE FROZEN POLICY REPRODUCES BRANCH (b)'s OWN DATED NUMBERS, -14.571325453 / -14.614031602, to
+    #       every recorded digit -- an independent branch of this file agreeing with this one.
+    #   (3) EACH RELEASE PHASE DESCENDS FROM ITS OWN WARM-UP, by -0.6144 mHa (:coreFrozen) and -4.9390 mHa
+    #       (:allFree), and both warm-ups reach exactly the :previousLayersFrozen answer.  That is the
+    #       two-phase entry working: before it existed a released layer BEGAN 36.1 mHa above the layer it sat
+    #       on and its increment had a budget-dependent SIGN.
+    #
+    #   SO :allFree IS 11.6 % DEEPER THAN THE DEFAULT HERE -- the same direction as the three ions in the
+    #   `freezing` docstring (+158 % on Ca+, +4.2 % on C II, +7.3 % on Ti III) and a reminder that the size is
+    #   a property of the case and not a rule.  It is NOT a recommendation: see the paragraph above on what
+    #   the release is actually buying back.
+    #
+    # f) THE FREEZING POLICY, WITH EVERYTHING ELSE HELD FIXED -- which orbitals a layer may still move.
+    #
+    # WHY THIS BRANCH EXISTS.  `AtomicState.RasSettings.freezing` carries Rule 21's three freezing policies and
+    #   is measured in its own docstring on three ions -- but until now NO example exercised it, so a capability
+    #   that changes a layer increment by over 100 % was invisible to a user and never reached by a sweep.
+    #   This branch makes the comparison runnable on the lightest system that shows it.
+    #
+    # THE THREE POLICIES, and they differ only in what a LATER layer is allowed to relax:
+    #   :previousLayersFrozen ... every shell an earlier layer optimized is held;  only this layer's new shells
+    #                             move.  GRASP's default and the safe one -- the layer's space contains the
+    #                             previous layer's, and with the earlier orbitals held it cannot help but descend.
+    #   :coreFrozen           ... only `coreShells` are held, so the VALENCE may relax against the correlation
+    #                             this layer adds.
+    #   :allFree              ... nothing is held.  Richest and most expensive.
+    #
+    # ONE VARIABLE.  The reference, the layers, the route, the accuracy, the grid, the nucleus, `coreShells` and
+    #   `fromShells` are all identical across the three runs;  only `freezing` changes.  That is what makes the
+    #   three increments comparable, and it is why Rule 21 asks for the policy to be NAMED beside a number.
+    #
+    # WHAT TO LOOK AT IS THE LAYER INCREMENT, NOT THE TOTAL -- Rule 21 again.  Two policies can land at nearly
+    #   the same total and disagree about where the correlation came from, and it is the increment that says
+    #   whether another layer is still worth adding.
+    #
+    # AND READ THIS BEFORE CONCLUDING THAT `:allFree` IS BETTER, because the docstring's own measurement says it
+    #   mostly is not.  Across three ions `:allFree` is deeper every time (+158 %, +4.2 %, +7.3 % on Ca+, C II
+    #   and Ti III) at 1.65-2.0x the cost -- but that advantage is almost entirely the release buying back what a
+    #   FROZEN REFERENCE LAYER was forbidden to do.  On Ti III with `coreShells` as the only variable, letting the
+    #   core relax at the REFERENCE layer is worth 16.8 mHa, and once it has, this policy is worth 0.048 mHa, a
+    #   factor 228 less than it appeared.  So `:allFree` is a REMEDY FOR A FROZEN-CORE REFERENCE rather than a
+    #   general improvement:  declare `coreShells` only when cost forces it, and reach for `:allFree` when it is.
+    #   This branch DOES freeze the 1s, so it is deliberately in the case where the policy can show itself.
+    #
+    # A RELEASED POLICY RUNS THE LAYER TWICE, and the printout says so.  Phase 1 warms the new shells with the
+    #   earlier ones frozen;  phase 2 releases and restarts the optimized-level solver from those warm orbitals
+    #   through `ManyElectron.StartFromPrevious`, which skips the average-level pre-pass -- that pass optimizes
+    #   the configuration AVERAGE, a different functional from the level energy, and would otherwise re-derive
+    #   the inherited orbitals before the solver ever saw them.  Without the two-step entry a released layer
+    #   began 36.1 mHa ABOVE the layer it sits on, with a budget-dependent SIGN.
+    name        = "Be 1s^2 2s^2 ^1S_0 -- 2-layer RAS, the FREEZING POLICY as the only variable"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    layers      = [ RasLayer(Shell[]; se=false, de=false),
+                    RasLayer([Shell("2p")]) ]
+    results     = Tuple{Symbol,Float64,Float64}[]
+    for  policy  in  (:previousLayersFrozen, :coreFrozen, :allFree)
+        rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(),
+                                  LevelSelection(true, indices=[1]), policy)
+        wa = Representation(name * "  [freezing = :$policy]", Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                            RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells,
+                                         layers, rasSettings) )
+        wb = generate(wa, output=true)
+        e  = Float64[]
+        for  i = 1:length(layers)
+            k = "step" * string(i)
+            haskey(wb, k)  &&  push!(e, sort(wb[k].levels, by = l -> l.energy)[1].energy)
+        end
+        length(e) == length(layers)  ||  error("example-Ai.jl branch f: policy :$policy returned " *
+                                               "$(length(e)) step energies of $(length(layers)).")
+        push!(results, (policy, e[1], e[2]))
+        println(">> [freezing = :$policy]  step 1 = $(e[1]) Ha,  step 2 = $(e[2]) Ha,  " *
+                "increment = $((e[2]-e[1])*1000) mHa")
+    end
+    #
+    println("\n  The freezing policy, everything else identical:")
+    println("  policy                   step 1 [Ha]        step 2 [Ha]     layer-2 increment [mHa]")
+    println("  " * "-"^84)
+    for  (policy, e1, e2)  in  results
+        println("  " * rpad(string(policy), 22) * lpad(string(round(e1, digits=9)), 16) *
+                lpad(string(round(e2, digits=9)), 19) * lpad(string(round((e2-e1)*1000, digits=4)), 22))
+    end
+    println("  " * "-"^84)
+    # THE BRANCH CHECKS ITS OWN PHYSICS rather than only printing it.  A richer policy may not come out ABOVE a
+    # poorer one: each release strictly enlarges the set of orbitals the layer may move, so its stationary point
+    # cannot be higher than the restricted one by more than the solver's own resolution.
+    ePrev = results[1][3];   eCore = results[2][3];   eFree = results[3][3]
+    tol   = 1.0e-7
+    if  eCore <= ePrev + tol  &&  eFree <= eCore + tol
+        println("  >> ORDERING AS IT MUST: allFree <= coreFrozen <= previousLayersFrozen.  Releasing orbitals")
+        println("  >> cannot raise the energy, since each release only enlarges what the layer may move.")
+    else
+        println("  >> ORDERING VIOLATED, and that is a FINDING rather than noise: a released policy came out")
+        println("  >> ABOVE a more restricted one by more than $(tol) Ha.  The release phase is entering above")
+        println("  >> the layer it sits on -- suspect the handover, the grid, or the level selection, and see")
+        println("  >> the `freezing` docstring in src/module-AtomicState.jl for what the repaired entry gives.")
+    end
+    println("  >> And compare the INCREMENTS, not the totals (Rule 21): two policies can agree on the total")
+    println("  >> and disagree about where the correlation came from.")
+    #
+elseif  false
+    # Last visit:  01-Nov-2026
+    #
+    # g) THE AUTOMATIC LADDER -- AtomicState.RasAutoSettings (competition item 16).  Two checks, not one: that
+    #    automation is a STRICT SUPERSET of the hand-built driver (same shells, same number), and that a
+    #    realistic stopping policy actually stops where a human already judged this ladder sufficient.
+    #
+    # PART 1 -- THE ESCAPE HATCH.  AtomicState.RasCompleteShellPolicy proposes the next complete principal
+    #   shell, which for THIS reference (coreShells=[1s], fromShells=[2s]) is n=3 -- 3s,3p,3d together, not the
+    #   single 2p of branch (a).  So this is not a re-run of branch (a); it is the SAME MACHINERY checked
+    #   against a hand-built RasLayer([Shell("3s"),Shell("3p"),Shell("3d")]) ladder of the SAME two layers, and
+    #   the two must agree to the digit -- if automation ever disagreed with an equivalent hand-built ladder,
+    #   that would be the one failure mode this item must never have.
+    name        = "Beryllium -- automatic ladder, part 1: the escape hatch against a hand-built equivalent"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(), LevelSelection(true, indices=[1]) )
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    fixedLayers = [ RasLayer(Shell[]; se=false, de=false) ]
+
+    handLayers  = [ RasLayer(Shell[]; se=false, de=false), RasLayer([Shell("3s"), Shell("3p"), Shell("3d")]) ]
+    waHand      = Representation(name, Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                                 RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, handLayers, rasSettings) )
+    wbHand      = generate(waHand, output=true)
+    eHand       = sort(wbHand["step2"].levels, by = l -> l.energy)[1].energy
+
+    waAuto      = Representation(name, Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                                 RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, fixedLayers, rasSettings) )
+    autoEscape  = AtomicState.RasAutoSettings(AtomicState.FixedLayerCount(2), AtomicState.RasCompleteShellPolicy())
+    wbAuto      = Basics.generate(waAuto.repType, waAuto, coreShells, fromShells, fixedLayers, autoEscape; output=true)
+    eAuto       = sort(wbAuto["step2"].levels, by = l -> l.energy)[1].energy
+
+    println("\n  >> PART 1, the escape hatch:  hand-built = $eHand Ha,  auto (FixedLayerCount) = $eAuto Ha,  " *
+            "difference = $(abs(eHand-eAuto)) Ha")
+    abs(eHand - eAuto) < 1.0e-9  ||
+        error("example-Ai.jl branch g: the automatic ladder disagreed with an EQUIVALENT hand-built one by " *
+              "$(abs(eHand-eAuto)) Ha -- automation must be a strict superset, never a different answer.")
+    println("  >> AGREE to better than 1e-9 Ha, as they must: FixedLayerCount + RasCompleteShellPolicy " *
+            "reproduces a hand-built ladder of the same shells exactly.")
+
+    # PART 2 -- A REALISTIC STOPPING POLICY, pushed past two layers, and checked for the shape Rule 20's
+    #   register discipline asks for: does it stop at a point a human would also have stopped at?  The
+    #   increments on THIS reference are large at layer 2 (tens of mHa) and fall off fast, so a modest
+    #   IncrementBelow with a CostCeiling safety valve behind it (CombinedPolicy's recommended use) is enough.
+    autoCombined = AtomicState.RasAutoSettings(
+                       AtomicState.CombinedPolicy(AtomicState.AbstractRasStoppingPolicy[
+                           AtomicState.IncrementBelow(1.0e-3; consecutive=1), AtomicState.CostCeiling(2000, 300.0)]),
+                       AtomicState.RasCompleteShellPolicy(); maxLayers=5)
+    waCombined  = Representation("Beryllium -- automatic ladder, part 2: CombinedPolicy", Nuclear.Model(4.), Radial.Grid(true),
+                                 refConfigs, RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells,
+                                                           fixedLayers, rasSettings) )
+    wbCombined  = Basics.generate(waCombined.repType, waCombined, coreShells, fromShells, fixedLayers, autoCombined; output=true)
+    nLayers     = 0
+    for  i = 1:autoCombined.maxLayers
+        haskey(wbCombined, "step"*string(i))  ||  break
+        nLayers = i
+    end
+    println("\n  >> PART 2, CombinedPolicy(IncrementBelow(1e-3), CostCeiling(2000,300s)): stopped after " *
+            "$nLayers layer(s) of a $(autoCombined.maxLayers)-layer ceiling.")
+    #
+elseif  false
+    # Last visit:  01-Nov-2026
+    #
+    # h) THE SHELL POLICY THAT NEVER WIDENS IN l -- AtomicState.RasLimitedAngularMomentumPolicy, the remedy for
+    #    RasCompleteShellPolicy being "rather extreme" once n exceeds about 5 (plan discussion, item 16).  Pushed
+    #    to n=6 on the SAME Be reference as branch (g): coreShells=[1s], fromShells=[2s] give lMaxRef=0, so
+    #    `extraL=1` caps every layer at l<=1 (s,p only), however high n climbs -- contrast what
+    #    RasCompleteShellPolicy would propose at n=6: 6s,6p,6d,6f,6g,6h, six shells of which four are unopened,
+    #    unrewarding high-l partial waves (reference_ras_practical_recipe: a layer of high-n, already-occupied-
+    #    symmetry orbitals is both the hardest to converge and the least rewarding).
+    name        = "Beryllium -- automatic ladder pushed to n=6 under a capped angular-momentum window"
+    refConfigs  = [Configuration("[He] 2s^2")]
+    rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(), LevelSelection(true, indices=[1]) )
+    coreShells  = [Shell("1s")]
+    fromShells  = [Shell("2s")]
+    fixedLayers = [ RasLayer(Shell[]; se=false, de=false) ]
+
+    wa   = Representation(name, Nuclear.Model(4.), Radial.Grid(true), refConfigs,
+                          RasExpansion([LevelSymmetry(0, Basics.plus)], 4, coreShells, fromShells, fixedLayers, rasSettings) )
+    auto = AtomicState.RasAutoSettings(AtomicState.FixedLayerCount(5), AtomicState.RasLimitedAngularMomentumPolicy(1); maxLayers=5)
+    wb   = Basics.generate(wa.repType, wa, coreShells, fromShells, fixedLayers, auto; output=true)
+
+    println("\n  Layer   new shell(s)        lowest level [Ha]")
+    println("  " * "-"^48)
+    for  i = 1:5
+        k = "step" * string(i)
+        if  haskey(wb, k)
+            e = sort(wb[k].levels, by = l -> l.energy)[1].energy
+            println("  " * rpad(string(i), 7) * rpad(i==1 ? "(reference)" : "n=$(i+1), l<=1", 20) * string(round(e, digits=9)))
+        end
+    end
+    println("  " * "-"^48)
+    println("  >> l NEVER EXCEEDS 1 however high n climbs: n=6 proposes only 6s,6p, never 6d,6f,6g,6h.")
+    #
+elseif  false
+    # Last visit:  01-Nov-2026 (the Rule-12 risk the branch was written to surface DID occur -- see below;
+    #              MAINTAINER'S JUDGEMENT STILL NEEDED, this is not a Last successful)
+    #
+    # i) THE ENERGY-ORDERED SHELL POLICY, ON A REAL OPEN-d REFERENCE -- AtomicState.RasSpectrumOrderedShellPolicy,
+    #    on Ti III [Ar] 3d^2, the same ion `reference_ras_practical_recipe` already measured by hand for the
+    #    freezing-policy comparison (07-Oct-2026: layer 1 -852.176877 Ha with the core free, layer 2 adding
+    #    4s,4p,4d by hand). Neither RasCompleteShellPolicy nor RasLimitedAngularMomentumPolicy can propose
+    #    `5s` ahead of `4p`/`4d` -- both assume shells group by n, which stops holding once 3d/4s mixing moves
+    #    the real screened-potential ordering out of its light-atom shape. This branch PRINTS the ranked
+    #    candidate list rather than asserting a pass/fail: per the plan, this policy's first real use on any
+    #    one case is a judgement call for the maintainer, not an automatic check.
+    #
+    # WHAT THE FIRST RUN (01-Nov-2026) ACTUALLY PROPOSED, and why it is the cautionary case rather than the
+    #    clean one. Ranked by energy in the screened mean field, this policy proposed Shell[4f, 4s, 4p, 4d] --
+    #    4f CHEAPER than 4s/4p/4d, which is already a surprise on light-atom intuition. Bsplines.
+    #    checkOrbitalConsistency on the resulting layer (added below, stopper=false so the branch still
+    #    completes and prints) then found TWO offending pairs, exactly what Rule 12 warns a too-small or
+    #    ill-matched box produces:
+    #      4f_5/2 / 4f_7/2   <r> = 1.5181 / 6.8446 a.u.   -- a 4.5x radius mismatch between partners that must
+    #                        describe the same shell (4f_5/2 alone is plausibly valence, comparable to 3d's own
+    #                        1.6-2.0 a.u.; 4f_7/2 is not).
+    #      4p_1/2 / 4p_3/2   E ratio 2.907, radii agree (1.017) -- flagged by the ORDERING test instead: an
+    #                        inverted spin-orbit pair, same class as the Pr I 4f case in checkOrbitalConsistency's
+    #                        own docstring.
+    #    So at least one 4f orbital and the 4p pair's ordering are not trustworthy, and the energy ranking that
+    #    put 4f ahead of 4s/4p/4d is suspect for the same reason: a diffuse, box-truncated state can rank
+    #    artificially low, exactly as the policy's own docstring warns. This is not a failure of the wiring --
+    #    FixedLayerCount/RasSpectrumOrderedShellPolicy mechanically did what they were asked -- it is the
+    #    numerical risk the plan named, caught on its first real case rather than left to surprise someone later.
+    #
+    # BEFORE RELYING ON THIS POLICY ON A HEAVIER ION: widen the candidate box (Rule 12; `rbox ~ 2.5 r_+` for the
+    #    4f candidate specifically, which sits far out), or narrow `specSettings.lValues` to exclude l=3 until
+    #    the box is matched, and re-run `Bsplines.checkOrbitalConsistency` clean before trusting the ranking.
+    name        = "Ti III [Ar] 3d^2 -- automatic ladder, RasSpectrumOrderedShellPolicy ranking the candidates by energy"
+    refConfigs  = [Configuration("[Ar] 3d^2")]
+    rasSettings = RasSettings([1], Basics.RotationRoute(24), 1.0e-6, CoulombInteraction(), LevelSelection(true, indices=[1]) )
+    coreShells  = [Shell("1s"), Shell("2s"), Shell("2p"), Shell("3s"), Shell("3p")]
+    fromShells  = [Shell("3d")]
+    fixedLayers = [ RasLayer(Shell[]; se=false, de=false) ]
+
+    wa           = Representation(name, Nuclear.Model(22.), Radial.Grid(true), refConfigs,
+                                  RasExpansion([LevelSymmetry(2, Basics.plus)], 20, coreShells, fromShells, fixedLayers, rasSettings) )
+    specSettings = AtomicState.OneElectronSettings(5, [0, 1, 2, 3], LevelSelection())
+    auto         = AtomicState.RasAutoSettings(AtomicState.FixedLayerCount(2),
+                                               AtomicState.RasSpectrumOrderedShellPolicy(4, specSettings))
+    wb           = Basics.generate(wa.repType, wa, coreShells, fromShells, fixedLayers, auto; output=true)
+
+    println("\n  >> Proposed, ranked by actual one-electron energy in the screened mean field (see the table the")
+    println("  >> driver printed above under '[RAS auto] layer 2 proposes'), and the resulting layer-2 energy " *
+            "is $(sort(wb["step2"].levels, by = l -> l.energy)[1].energy) Ha.")
+    println("  >> Checking the proposed orbitals for the Rule-12 risk the policy's own docstring warns about:")
+    Bsplines.checkOrbitalConsistency(wb["step2"].levels[1].basis.orbitals, wa.grid; stopper=false)
+    println("  >> MAINTAINER'S JUDGEMENT NEEDED before this branch earns a Last successful date: compare the")
+    println("  >> proposed shell order against what a hand-built ladder on this ion would choose.")
+    #
+
+end

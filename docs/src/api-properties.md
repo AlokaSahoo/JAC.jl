@@ -1,7 +1,25 @@
 
+##  Alpha-variation (q-factors)
+```@autodocs
+Modules = [AlphaVariation]
+Order   = [:type, :function]
+```
+
 ##  Atomic form factors
 ```@autodocs
 Modules = [FormFactor]
+Order   = [:type, :function]
+```
+
+##  Crystal-field splittings
+```@autodocs
+Modules = [CrystalField]
+Order   = [:type, :function]
+```
+
+##  Einstein A and B coefficients
+```@autodocs
+Modules = [Einstein]
 Order   = [:type, :function]
 ```
 
@@ -14,5 +32,60 @@ Order   = [:type, :function]
 ##  Isotope shifts
 ```@autodocs
 Modules = [IsotopeShift]
+Order   = [:type, :function]
+```
+
+##  Lande factors and Zeeman splittings
+```@autodocs
+Modules = [LandeZeeman]
+Order   = [:type, :function]
+```
+
+##  Reduced density matrices and natural orbitals
+```@autodocs
+Modules = [ReducedDensityMatrix]
+Order   = [:type, :function]
+```
+
+##  Stark-Zeeman effect
+```@autodocs
+Modules = [StarkZeeman]
+Order   = [:type, :function]
+```
+
+##  Stark shift
+```@autodocs
+Modules = [StarkShift]
+Order   = [:type, :function]
+```
+
+
+##  Muonic atoms
+```@autodocs
+Modules = [MuonicAtom]
+Order   = [:type, :function]
+```
+
+##  Weak-interaction moments
+```@autodocs
+Modules = [WeakInteractionMoment]
+Order   = [:type, :function]
+```
+
+##  Weak-interaction enhancement factors
+```@autodocs
+Modules = [WeakInteractionEnhancement]
+Order   = [:type, :function]
+```
+
+##  Multipole polarizibilities
+```@autodocs
+Modules = [MultipolePolarizibility]
+Order   = [:type, :function]
+```
+
+##  Nuclear magnetic shielding
+```@autodocs
+Modules = [NuclearShielding]
 Order   = [:type, :function]
 ```

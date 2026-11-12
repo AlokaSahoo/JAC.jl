@@ -1,13 +1,12 @@
-
 """
-`module JAC.InteractionStrength`  
-... a submodel of JAC that contains all methods for evaluating the interaction strength (reduced matrix elements) 
-    for various atomic interactions.
+`module JAC.InteractionStrength`
+    ... a submodel of JAC that contains all methods for evaluating the interaction strength (reduced matrix elements) for various atomic
+        interactions.
 """
 module InteractionStrength
 
 
-using  GSL, ..AngularMomentum, ..Basics, ..BsplinesN, ..Defaults, ..ManyElectron, ..Nuclear, ..Radial, ..RadialIntegrals
+using  Printf, GSL, ..AngularMomentum, ..Basics, ..Bsplines, ..Defaults, ..ManyElectron, ..Nuclear, ..Radial, ..RadialIntegrals
 
 
 """
@@ -21,35 +20,176 @@ using  GSL, ..AngularMomentum, ..Basics, ..BsplinesN, ..Defaults, ..ManyElectron
     + d         ::Orbital
     + coeff     ::Float64    ... corresponding coefficient.
 """
-struct XLCoefficient 
+struct XLCoefficient
     kind        ::Char
     nu          ::Int64
     a           ::Orbital
     b           ::Orbital
     c           ::Orbital
     d           ::Orbital
-    coeff       ::Float64 
-end 
+    coeff       ::Float64
+end
+
+
+"""
+`const  InteractionStrength.XLKey`
+    ... the key under which one interaction strength is memoised: (route, L, a, b, c, d, factor, quadrature), where the four Subshells are
+        those of the orbitals a, b, c, d.
+
+        THE ROUTE IS PART OF THE KEY, which is why ONE cache serves every X^L. `XL_Coulomb`,
+        `XL_CoulombKinkAware` and `XL_Breit` all answer the same kind of question -- a strength for rank L
+        and four orbitals, asked for by a spin-angular coefficient -- so what separates them belongs here rather than in three separate
+        dictionaries. `route` is one of :Coulomb, :CoulombKinkAware, :Gaunt or :Breit, and `factor` carries the photon-frequency scaling of
+        CoulombBreit(factor); it is 0. for every route that has none. `quadrature` is :direct or :swept and carries the two ways of evaluating a
+        Breit radial integral -- the same physics by a different summation, so they must not share a memo; it is :direct for every route that
+        offers no choice. IT WAS ADDED 04-Sep-2026 AND THE KEY TYPE HAD TO BE WIDENED WITH IT: XLKey is a CONCRETE tuple type, so a key of the
+        wrong arity fails at the `setindex!`, deep inside the CI build and ONLY on the cached path -- which is exactly the path a probe that
+        calls XL_Breit directly does not exercise.
+
+        `Subshell` is a plain immutable struct of two Int64 fields, so Julia hashes it structurally and it
+        enters the key directly -- there is no string to build, and none to read back when debugging.
+"""
+const XLKey = Tuple{Symbol, Int64, Subshell, Subshell, Subshell, Subshell, Float64, Symbol}
+
+
+"""
+`struct  InteractionStrength.XLCache`
+    ... memoises the effective interaction strengths X^L(abcd) of ONE matrix.
+
+        WHY THIS IS A PARAMETER AND NOT A GLOBAL. Within a single CI matrix the same rank and subshell quadruple recur across many CSF
+        pairs, so the double radial integral is worth doing once. But the key holds subshell LABELS, and labels identify orbitals only
+        within one basis: two bases can both contain a "2s_1/2" whose radial functions differ entirely. Until 15-Aug-2026 the store was a
+        module global wiped by whoever built a matrix -- `Hamiltonian.performCI`, `performCIKinkAware` and
+        `Basics.compute(::CImatrixWithSymmetryJP)` each called an `XL_*_reset_storage` some 200 lines from
+        the fill -- so the key was unambiguous only because of a promise made in another module, which nothing checked and no signature
+        mentioned.
+
+        Handing the cache to the function that fills it makes that promise a fact: the cache is created by the matrix builder and goes out
+        of scope when the matrix is finished, so it CANNOT outlive the basis whose labels it uses. It also makes concurrent matrix builds
+        safe by construction, since two matrices cannot share a cache that neither of them owns.
+
+        This is the pattern JAC already uses elsewhere -- `Bsplines.setupLocalMatrix` and
+        `generateTTpMatrix!` take a `storage::Dict`, `RadialIntegrals.ScreenedPotentialCache` is built and
+        passed, and the EOL solver threads its own `cache1p`/`cache2p` -- so the XL_* strengths were the one remaining place that kept its
+        memo out of sight.
+
+    + values    ::Dict{XLKey, Float64}   ... the memoised strengths.
+    + vk        ::Union{Nothing,Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}}}
+                                         ... the memoised screened potentials V_k[b,d] of `RadialIntegrals.SlaterRkKinkAware`, if they are to be
+                                             kept at all. They cost memory that a CI matrix has no use for, but in a scattering amplitude they
+                                             are most of the run time, since one (k,b,d) serves many (a,c): see `XLCache(; screenedPotentials)`.
+"""
+struct  XLCache
+    values      ::Dict{XLKey, Float64}
+    vk          ::Union{Nothing,Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}}}
+end
+
+
+"""
+`InteractionStrength.XLCache(; screenedPotentials::Bool=false)`
+    ... constructor for an empty cache of interaction strengths, which also keeps the screened potentials if screenedPotentials = true; a
+        cache::InteractionStrength.XLCache is returned.
+"""
+XLCache(; screenedPotentials::Bool=false) =
+    XLCache( Dict{XLKey, Float64}(), screenedPotentials ? Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}}() : nothing )
+
+
+"""
+`InteractionStrength.besselPhiPsi(K::Int64, x::Float64; nmax::Int64=12, tol::Float64=1.0e-16)`
+    ... returns the pair (phi_K(x), psi_K(x)) of NORMALISED spherical Bessel functions
+
+            phi_K(x) = (2K+1)!! j_K(x) / x^K            psi_K(x) = - x^(K+1) y_K(x) / (2K-1)!!
+
+        both of which tend to 1 as x -> 0. They are the natural building blocks of the frequency-dependent Breit kernels, because those
+        kernels are the static kernel TIMES a product of one phi and one psi: the omega -> 0 limit is then exact by construction rather than
+        a special case, and nothing has to be recovered from a cancellation between large numbers.
+
+        TWO ROUTES, JOINED AT x = 2, because each one fails where the other works. Below the crossover an ascending power series in
+        -x^2/2 is used: it returns (phi-1) and (psi-1) with full RELATIVE precision, which is what the W kernel of
+        InteractionStrength.XL_Breit_densities needs, since that kernel multiplies them by [nu]^2/omega^2 -- and forming j_K y_K directly
+        there loses the answer to cancellation, each factor alone diverging as omega -> 0. Above the crossover the EXACT normalised
+        functions are returned from GSL's spherical Bessel functions, which is what every other radial integral in JAC already uses.
+
+        THE SERIES ALONE IS NOT ENOUGH, AND THAT WAS A DEFECT RATHER THAN A LIMITATION. It carries 12 terms while needing about x^2/2 of
+        them, so past x ~ 2.5 the truncation shows and past x ~ 5 the partial sum DIVERGES -- measured against the exact functions, the
+        worst relative error over K = 0..6 runs 9.3e-16 at x = 2, 2.7e-08 at x = 4, 2.8e+01 at x = 12 and 1.2e+25 at x = 100, with nothing
+        in the returned value to show it. Since the argument is x = omega r with omega = factor |E_a - E_c| / c, which reaches ~9 a.u. for
+        a 3p-1s pair at Z = 54, x runs into the hundreds across a radial grid and the Breit strength was silently destroyed: the
+        frequency-dependent correction of example-Ad.jl branch 4 reached 4.4e+97 Ha at factor = 1 where it should be ~5.2.
+
+        THE CROSSOVER WAS MEASURED, NOT CHOSEN. The two routes must overlap, and they do only in a narrow window: at x = 2 the series is
+        right to 9.3e-16 while the exact route still gives (f-1) to 5.4e-15, whereas by x = 2.5 the series has lost 2.3e-13 and by
+        x = 1e-4 the exact route has lost 6.7e-07 on (f-1). x = 2 is where both are good.
+
+        Verified against (2K+1)!! j_K(x)/x^K and -x^(K+1) y_K(x)/(2K-1)!! from GSL to <= 4.6e-16 for K = 0..3 and x = 1e-4..0.5, and to
+        1.000000000000000 in the limit x -> 0. **THAT RANGE IS THE COVERAGE GAP THAT HID THE DEFECT** -- a verification stopping at
+        x = 0.5 can say nothing about x = 100, and the function was used there.
+
+        The normalisation follows GRASP2018 (rci90/bessel.f90, which stores phi-1 and psi-1); the formulation was read there and re-derived
+        here rather than transcribed.
+        A tuple (phi::Float64, psi::Float64) is returned.
+"""
+function besselPhiPsi(K::Int64, x::Float64; nmax::Int64=12, tol::Float64=1.0e-16)
+    x == 0.  &&  return( (1.0, 1.0) )
+
+    # Past the crossover the series below DIVERGES instead of converging, so the exact functions are taken
+    # there;  see the docstring for the measurement that fixes the crossover at 2.
+    if  abs(x) > 2.0
+        dfUp = 1.0;     for  i = 1:2:(2K+1)    dfUp = dfUp * i    end    ## (2K+1)!!
+        dfDown = 1.0;   for  i = 1:2:(2K-1)    dfDown = dfDown * i    end    ## (2K-1)!!, and 1 for K = 0
+        return( ( dfUp * GSL.sf_bessel_jl(K, x) / x^K,  -x^(K+1) * GSL.sf_bessel_yl(K, x) / dfDown ) )
+    end
+
+    wa = -0.5 * x^2;    t1 = 1.0;   t2 = 1.0;   s1 = 0.0;   s2 = 0.0
+    for  i = 1:nmax
+        t1 = t1 * wa / ( i * (2*(K+i) + 1) );    t2 = t2 * wa / ( i * (2*(i-K) - 1) )
+        s1 = s1 + t1;                            s2 = s2 + t2
+        if  abs(t1) < abs(s1)*tol  &&  abs(t2) < abs(s2)*tol    break    end
+    end
+    return( (1.0 + s1, 1.0 + s2) )
+end
 
 
 """
 `InteractionStrength.bosonShift(a::Orbital, b::Orbital, potential::Array{Float64,1}, grid::Radial.Grid)`  
-    ... computes the  <a|| h^(boson-field) ||b>  reduced matrix element of the boson-field shift Hamiltonian for orbital 
-        functions a, b. This boson-field shift Hamiltonian just refers to the effective potential of the given 
-        isotope due to the (assumed) boson mass. A value::Float64 is returned.  
+    ... computes the <a|| h^(boson-field) ||b> reduced matrix element of the boson-field shift Hamiltonian for orbital functions a, b. This
+        boson-field shift Hamiltonian just refers to the effective potential of the given isotope due to the (assumed) boson mass. A
+        value::Float64 is returned.
 """
 function bosonShift(a::Orbital, b::Orbital, potential::Array{Float64,1}, grid::Radial.Grid)
     wa = RadialIntegrals.isotope_boson(a, b, potential, grid) 
-    ## wa = RadialIntegrals.isotope_boson(a, b, potential, grid) 
-    ## println("**  <$(a.subshell) || h^(boson-field shift) || $(b.subshell)>  = $wa" )
+    # wa = RadialIntegrals.isotope_boson(a, b, potential, grid) 
+    # println("**  <$(a.subshell) || h^(boson-field shift) || $(b.subshell)>  = $wa" )
     return( wa )
 end
 
 
 """
+`InteractionStrength.breitRouteOf(eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})`
+    ... resolves an e-e interaction into the two things the Breit strength actually depends on: whether only the Gaunt (magnetic) part is
+        wanted, and the factor that scales the photon wave number. A tuple (onlyGaunt::Bool, factor::Float64) is returned.
+
+        These two ALSO identify the route for caching purposes, which is why they are resolved in one place: CoulombGaunt() and
+        CoulombBreit(0.) give the same coefficients but NOT the same strength, and a memo keyed only on rank and subshells would confuse
+        them. See InteractionStrength.XLCache.
+"""
+function breitRouteOf(eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})
+    if      typeof(eeint) == CoulombGaunt   return( (true,  0.,           :direct) )
+    elseif  typeof(eeint) == CoulombBreit   return( (false, eeint.factor, eeint.quadrature) )
+    else                                    return( (false, eeint.factor, :direct) )
+    end
+end
+
+
+"""
 `InteractionStrength.dipole(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the  <a|| d ||b>  reduced matrix element of the dipole operator for orbital functions a, b. 
+    ... computes the <a|| d ||b> reduced matrix element of the dipole operator for orbital functions a, b.
         A value::Float64 is returned. 
+
+        NO CALLER, AND NOT THE ONE TO REACH FOR. This returns Grant's reduced matrix element WITHOUT the 1/sqrt(2 j_a + 1)
+        that JAC's convention requires, so it must never be paired with a bare spin-angular coeff.T -- doing so is too
+        large by exactly sqrt(2 j_a + 1), which is what module-MultipoleMoment.jl did until 27-Aug-2026. It is the k = 1
+        case of InteractionStrength.eMultipole, which carries that factor; use eMultipole(1, a, b, grid) instead.
 """
 function dipole(a::Orbital, b::Orbital, grid::Radial.Grid)
     wa = AngularMomentum.CL_reduced_me(a.subshell, 1, b.subshell) * RadialIntegrals.rkDiagonal(1, a, b, grid)
@@ -59,21 +199,23 @@ end
 
 """
 `InteractionStrength.eMultipole(k::Int64, a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the  <a|| t^(Ek) ||b>  reduced matrix element of the dipole operator for orbital functions a, b. 
+    ... computes the <a|| t^(Ek) ||b> reduced matrix element of the dipole operator for orbital functions a, b.
         A value::Float64 is returned. 
 """
 function eMultipole(k::Int64, a::Orbital, b::Orbital, grid::Radial.Grid)
-    wa = AngularMomentum.CL_reduced_me_rb(a.subshell, k, b.subshell) * RadialIntegrals.rkDiagonal(k, a, b, grid)
-    ##x @show RadialIntegrals.rkDiagonal(k, a, b, grid), AngularMomentum.CL_reduced_me_rb(a.subshell, k, b.subshell)
+    # the former CL_reduced_me_rb convention: Grant's reduced matrix element divided by sqrt(2 j_a + 1),
+    # with j_a from the FIRST argument as passed (10-Aug-2026).
+    wa = AngularMomentum.CL_reduced_me(a.subshell, k, b.subshell) / sqrt( Basics.subshell_2j(a.subshell) + 1 ) *
+            RadialIntegrals.rkDiagonal(k, a, b, grid)
     return( wa )
 end
 
 
 """
 `InteractionStrength.fieldShift(a::Orbital, b::Orbital, deltaPotential::Array{Float64,1}, grid::Radial.Grid)`  
-    ... computes the  <a|| h^(field-shift) ||b>  reduced matrix element of the field-shift Hamiltonian for orbital 
-        functions a, b. This field-shift Hamiltonian just refers to the difference of the nuclear potential 
-        deltaPotential of two isotopes, and which is already divided by the difference of the mean-square radii. 
+    ... computes the <a|| h^(field-shift) ||b> reduced matrix element of the field-shift Hamiltonian for orbital functions a, b. This
+        field-shift Hamiltonian just refers to the difference of the nuclear potential deltaPotential of two isotopes, and which is already
+        divided by the difference of the mean-square radii.
         A value::Float64 is returned.  
 """
 function fieldShift(a::Orbital, b::Orbital, deltaPotential::Array{Float64,1}, grid::Radial.Grid)
@@ -84,386 +226,326 @@ end
 
 """
 `InteractionStrength.hamiltonian_nms(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... computes the  <a|| h_nms ||b>  reduced matrix element of the normal-mass-shift Hamiltonian for orbital 
-        functions a, b. A value::Float64 is returned.  For details, see Naze et al., CPC 184 (2013) 2187, Eq. (37).
+    ... computes the <a|| h_nms ||b> reduced matrix element of the normal-mass-shift Hamiltonian for orbital functions a, b. A
+        value::Float64 is returned. For details, see Naze et al., CPC 184 (2013) 2187, Eq. (37).
 """
 function hamiltonian_nms(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
     if  a.subshell.kappa != b.subshell.kappa   return( 0. )   end
-    wa = RadialIntegrals.isotope_nms(a, b, nm.Z, grid) / 2
-    ## println("**  <$(a.subshell) || h^nms || $(b.subshell)>  = $wa" )
+    wa = RadialIntegrals.isotope_nms(a, b, nm.Z, grid)
+    # println("**  <$(a.subshell) || h^nms || $(b.subshell)>  = $wa" )
     return( wa )
 end
 
-#==
+
 """
-`InteractionStrength.hfs_t1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(1) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment 
-        of the nucleus for orbital functions a, b. A value::Float64 is returned.  
+`InteractionStrength.hfs_tE1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
+    ... computes the <a|| t^(E1) ||b> reduced matrix element for the HFS coupling to the electric-dipole moment of the nucleus for orbital
+        functions a, b. A value::Float64 is returned.
 """
-function hfs_t1(a::Orbital, b::Orbital, grid::Radial.Grid)
+function hfs_tE1(a::Orbital, b::Orbital, grid::Radial.Grid)
     # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
-    minusa = Subshell(1, -a.subshell.kappa)
-    wb =   - (a.subshell.kappa + b.subshell.kappa) * AngularMomentum.CL_reduced_me_rb(minusa, 1, b.subshell)
-    wc =   RadialIntegrals.rkNonDiagonal(-2, a, b, grid)
+    wb = - AngularMomentum.CL_reduced_me(a.subshell, 1, b.subshell)
+    # wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
+    wc =   RadialIntegrals.rkDiagonal(-2, a, b, grid)
     wa =   wb * wc
-    #
-    ##x println("**  <$(a.subshell) || t1 || $(b.subshell)>  = $wa   = $wb * $wc" )
+
+    # println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
     return( wa )
 end
 
 
 """
-`InteractionStrength.hfs_t2(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(2) ||b> reduced matrix element for the HFS coupling to the electric-quadrupole moment of 
-        the nucleus for orbital functions a, b. A value::Float64 is returned.  
-    """
-function hfs_t2(a::Orbital, b::Orbital, grid::Radial.Grid)
+`InteractionStrength.hfs_tE2(a::Orbital, b::Orbital, grid::Radial.Grid)`  
+    ... computes the <a|| t^(2) ||b> reduced matrix element for the HFS coupling to the electric-quadrupole moment of the nucleus for
+        orbital functions a, b. A value::Float64 is returned.
+"""
+function hfs_tE2(a::Orbital, b::Orbital, grid::Radial.Grid)
     # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
-    wb = - AngularMomentum.CL_reduced_me_rb(a.subshell, 2, b.subshell)
-    ## wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
+    wb = - AngularMomentum.CL_reduced_me(a.subshell, 2, b.subshell)
+    # wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
     wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
     wa =   wb * wc
-    #
-    ## println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
+
+    # println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
     return( wa )
 end
-==#
 
 
 """
-`InteractionStrength.hfs_tM1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(1) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment 
-        of the nucleus for orbital functions a, b. A value::Float64 is returned.  
+`InteractionStrength.hfs_tE3(a::Orbital, b::Orbital, grid::Radial.Grid)`  
+    ... computes the <a|| t^(E3) ||b> reduced matrix element for the HFS coupling to the electric-octupole moment of the nucleus for orbital
+        functions a, b. A value::Float64 is returned.
+"""
+function hfs_tE3(a::Orbital, b::Orbital, grid::Radial.Grid)
+    # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
+    wb = - AngularMomentum.CL_reduced_me(a.subshell, 3, b.subshell)
+    # wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
+    wc =   RadialIntegrals.rkDiagonal(-4, a, b, grid)
+    wa =   wb * wc
+
+    # println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
+    return( wa )
+end
+
+
+"""
+`InteractionStrength.hfs_tM1(a::Orbital, b::Orbital, grid::Radial.Grid)`
+    ... computes the <a|| t^(1) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment of the nucleus for orbital
+        functions a, b. A value::Float64 is returned.
+
+        Note (26-Jul-2026): was missing the alpha (fine-structure constant) prefactor required by Andersson & Jonsson (2008), CPC 178, Eq.
+        (49): <n_a kappa_a || t^(1) || n_b kappa_b> = -alpha(kappa_a+kappa_b) <-kappa_a||C^(1)||kappa_b>[r^-2] -- confirmed by direct
+        re-reading of the paper (p. 161). This alone does not fully resolve the long-standing H(1s) HFS A-constant discrepancy; see
+        examples/example-Cb.jl and memory project_zeeman_hfs_bugs.md for the residual after this fix.
 """
 function hfs_tM1(a::Orbital, b::Orbital, grid::Radial.Grid)
     # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
     minusa = Subshell(1, -a.subshell.kappa)
-    wb =   - (a.subshell.kappa + b.subshell.kappa) * AngularMomentum.CL_reduced_me_sms(minusa, 1, b.subshell)
+    wb =   - Defaults.getDefaults("alpha") * (a.subshell.kappa + b.subshell.kappa) *
+                AngularMomentum.CL_reduced_me(minusa, 1, b.subshell)
     wc =   RadialIntegrals.rkNonDiagonal(-2, a, b, grid)
     wa =   wb * wc
-    #
-    ##x println("**  <$(a.subshell) || t1 || $(b.subshell)>  = $wa   = $wb * $wc" )
+
     return( wa )
 end
 
+
 """
 `InteractionStrength.hfs_tM2(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(M2) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment 
-        of the nucleus for orbital functions a, b. A value::Float64 is returned.  
+    ... computes the <a|| t^(M2) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment of the nucleus for orbital
+        functions a, b. A value::Float64 is returned.
 """
 function hfs_tM2(a::Orbital, b::Orbital, grid::Radial.Grid)
     # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
     minusa = Subshell(1, -a.subshell.kappa)
-    wb =   - (a.subshell.kappa + b.subshell.kappa) * AngularMomentum.CL_reduced_me_sms(minusa, 2, b.subshell)
+    wb =   - (a.subshell.kappa + b.subshell.kappa) * AngularMomentum.CL_reduced_me(minusa, 2, b.subshell)
     wc =   RadialIntegrals.rkNonDiagonal(-3, a, b, grid)/2
     wa =   wb * wc
-    #
-    ##x println("**  <$(a.subshell) || t1 || $(b.subshell)>  = $wa   = $wb * $wc" )
+
     return( wa )
 end
 
+
 """
-`InteractionStrength.hfs_tM3(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(M3) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment 
-        of the nucleus for orbital functions a, b. A value::Float64 is returned.  
+`InteractionStrength.hfs_tM3(a::Orbital, b::Orbital, grid::Radial.Grid)`
+    ... computes the <a|| t^(M3) ||b> reduced matrix element for the HFS coupling to the magnetic-dipole moment of the nucleus for orbital
+        functions a, b. A value::Float64 is returned.
+
+        Note (30-Jul-2026): was missing the same alpha (fine-structure constant) prefactor found missing in hfs_tM1 on 26-Jul-2026 --
+        Andersson & Jonsson (2008), CPC 178, Eq. (49) is generic in the multipole rank L, so the same alpha(kappa_a+kappa_b) prefactor
+        applies for L=3 (M3) as for L=1 (M1). See examples/example-Cb.jl and memory project_zeeman_hfs_bugs.md.
 """
 function hfs_tM3(a::Orbital, b::Orbital, grid::Radial.Grid)
     # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
     minusa = Subshell(1, -a.subshell.kappa)
-    wb =   - (a.subshell.kappa + b.subshell.kappa) * AngularMomentum.CL_reduced_me_sms(minusa, 3, b.subshell)
+    wb =   - Defaults.getDefaults("alpha") * (a.subshell.kappa + b.subshell.kappa) *
+                AngularMomentum.CL_reduced_me(minusa, 3, b.subshell)
     wc =   RadialIntegrals.rkNonDiagonal(-4, a, b, grid)/3
     wa =   wb * wc
-    #
-    ##x println("**  <$(a.subshell) || t1 || $(b.subshell)>  = $wa   = $wb * $wc" )
-    return( wa )
-end
-
-"""
-`InteractionStrength.hfs_tE2(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(2) ||b> reduced matrix element for the HFS coupling to the electric-quadrupole moment of 
-        the nucleus for orbital functions a, b. A value::Float64 is returned.  
-    """
-function hfs_tE2(a::Orbital, b::Orbital, grid::Radial.Grid)
-    # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
-    wb = - AngularMomentum.CL_reduced_me_sms(a.subshell, 2, b.subshell)
-    ## wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
-    wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
-    wa =   wb * wc
-    #
-    ## println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
-    return( wa )
-end
-
-"""
-`InteractionStrength.hfs_tE1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(E1) ||b> reduced matrix element for the HFS coupling to the electric-quadrupole moment of 
-        the nucleus for orbital functions a, b. A value::Float64 is returned.  
-    """
-function hfs_tE1(a::Orbital, b::Orbital, grid::Radial.Grid)
-    # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
-    wb = - AngularMomentum.CL_reduced_me_sms(a.subshell, 1, b.subshell)
-    ## wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
-    wc =   RadialIntegrals.rkDiagonal(-2, a, b, grid)
-    wa =   wb * wc
-    #
-    ## println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
-    return( wa )
-end
-
-"""
-`InteractionStrength.hfs_tE3(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| t^(E3) ||b> reduced matrix element for the HFS coupling to the electric-quadrupole moment of 
-        the nucleus for orbital functions a, b. A value::Float64 is returned.  
-    """
-function hfs_tE3(a::Orbital, b::Orbital, grid::Radial.Grid)
-    # Use Andersson, Jönson (2008), CPC, Eq. (49) ... test for the proper definition of the C^L tensors.
-    wb = - AngularMomentum.CL_reduced_me_sms(a.subshell, 3, b.subshell)
-    ## wc =   RadialIntegrals.rkDiagonal(-3, a, b, grid)
-    wc =   RadialIntegrals.rkDiagonal(-4, a, b, grid)
-    wa =   wb * wc
-    #
-    ## println("**  <$(a.subshell) || t2 || $(b.subshell)>  = $wa   = $wb * $wc" )
-    return( wa )
-end
-
-"""
-`InteractionStrength.MbaAbsorptionCheng(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) interaction strength <b || O^(Mp, absorption) || a> 
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and 
-        within the given gauge. A value::Float64 is returned.  
-"""
-function MbaAbsorptionCheng(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
-    wa = MbaEmissionCheng(mp, gauge, omega, b, a, grid)
-    wa = conj(wa)
-    return( wa )
-end
-
-
-
-"""
-`InteractionStrength.MbaEmissionCheng(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) interaction strength <b || O^(Mp,emission) || a> 
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and 
-        within the given gauge. A value::Float64 is returned.  
-        This procedure has been first worked out with Andrey; in this case, however, the phases are not under good control,
-        and this gives rise to wrong amplitudes and rates. The procedure is currently not in use.
-"""
-function MbaEmissionCheng(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
-    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
-    #
-    if       gauge == Basics.Magnetic
-        ChengI = AngularMomentum.ChengI(-kapa, kapb, AngularJ64(mp.L))
-        wa     = -1.0im / sqrt(mp.L*(mp.L+1)) * ChengI * (kapb + kapa) * RadialIntegrals.GrantILplus(mp.L, q, a, b, grid::Radial.Grid)
-    #
-    elseif   gauge == Basics.Babushkin
-        ChengI = AngularMomentum.ChengI(kapa, kapb, AngularJ64(mp.L))
-        wr     = (mp.L+1) * RadialIntegrals.GrantJL(mp.L, q, a, b, grid::Radial.Grid)
-        wr     = wr +  (kapb-kapa-mp.L-1) * RadialIntegrals.GrantIL0(mp.L+1, q, a, b, grid::Radial.Grid)
-        wr     = wr +  (kapb-kapa+mp.L+1) * RadialIntegrals.GrantIL0(mp.L+1, q, b, a, grid::Radial.Grid)
-        wa     = 1.0im / sqrt(mp.L*(mp.L+1)) * ChengI * wr
-    #
-    elseif   gauge == Basics.Coulomb
-        ChengI = AngularMomentum.ChengI(kapa, kapb, AngularJ64(mp.L))
-        wr     = (mp.L+1) * (kapb-kapa+mp.L) / (2mp.L+1) * RadialIntegrals.GrantIL0(mp.L-1, q, a, b, grid::Radial.Grid)
-        wr     = wr +  ((mp.L+1) * (kapb-kapa+mp.L) - (2mp.L+1) * (kapb-kapa)) / (2mp.L+1) * 
-                                                            RadialIntegrals.GrantIL0(mp.L+1, q, a, b, grid::Radial.Grid)
-        wr     = wr + (mp.L+1) * (kapb-kapa-mp.L) / (2mp.L+1) * RadialIntegrals.GrantIL0(mp.L-1, q, b, a, grid::Radial.Grid)
-        wr     = wr +  ((mp.L+1) * (kapb-kapa-mp.L) - (2mp.L+1) * (kapb-kapa)) / (2mp.L+1) * 
-                                                            RadialIntegrals.GrantIL0(mp.L+1, q, b, a, grid::Radial.Grid) 
-        wa     = 1.0im / sqrt(mp.L*(mp.L+1)) * ChengI * wr
-    else     error("stop a")
-    end
-    wa = conj(wa)
 
     return( wa )
 end
 
 
-
 """
-`InteractionStrength.MbaEmissionJohnsonx(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) interaction strength <b || O^(Mp,emission) || a> 
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and 
-        within the given gauge. A value::Float64 is returned.  
-        This procedure has been adapted from Jiri's work but modified for the Coulomb gauge which was apparently wrong following
-        some former implementation with RATIP.
+`InteractionStrength.MabEmission(mp::EmMultipole, gauge::EmGauge, omega::Float64, a::Orbital, b::Orbital, grid::Radial.Grid;
+                                 orientation::Union{Nothing,Float64}=nothing)`
+    ... computes the single-electron reduced matrix element <a || O^(Mp, emission) || b> of the electron-photon multipole interaction, for
+        the multipole mp of the radiation field at photon energy omega and in the given gauge. A value::Float64 is returned.
+
+        THE ONE VERSION. Introduced 09-Aug-2026 to replace a family of seven variants that had accumulated along historical routes --
+        MabEmissionJohnsony, MabEmissionJohnsony_Wu, MbaEmissionJohnsonx, MbaEmissionCheng, MbaAbsorptionCheng, MbaEmissionAndreyOld and
+        MbaEmissionMigdalek -- which differed in normalisation, in return type, in sign and in argument order, so that amplitudes computed
+        through different ones could not be added.
+
+        ARGUMENT ORDER: the orbitals are passed in the order they appear, `MabEmission(..., a, b, ...)` returning <a || O || b>. Until
+        03-Sep-2026 the two were declared the other way round, so that the SECOND argument was the one on the left; the signature was
+        turned round and every call site swapped in the same commit, which changes no number. The old arrangement needed a paragraph of
+        prose to explain it, and prose that reads like physics but is really about a parameter list is worse than no prose.
+
+        THE MULTIPOLE CHOOSES THE OPERATOR AND THE GAUGE ONLY ITS FORM. `mp.electric` alone decides whether the electric or the magnetic
+        strength is returned, so a magnetic multipole is answered with M_L under ANY gauge -- it has a single form, and `Magnetic` therefore
+        states nothing that `mp` has not already stated -- while an ELECTRIC multipole under `Magnetic` RAISES, that being the one pairing
+        with no reading. This lets a caller sweep the electric gauges over a MIXED list of multipoles, as the two-photon modules do, without
+        each of them having to re-derive the rule; `module-Hfs.jl` and `module-PhotoEmission.jl` had each derived it separately.
+
+        THE GAUGES, following Grant, J. Phys. B 7, 12 (1974): `Coulomb` is the velocity form and `Babushkin` the length form of the electric
+        multipole operator; `Magnetic` is the single form of a magnetic one. For exact one-body eigenfunctions the two electric forms must agree
+        at the physical photon energy, and here they do -- H 1s-2p gives Coulomb/Babushkin = 1.000000 on shell. Away from that energy they
+        legitimately differ: the length form scales with the omega it is given, while the velocity form carries the level difference through
+        <f|p|i> = i m (E_f - E_i) <f|r|i>, so an OFF-SHELL call is not gauge invariant and must not be expected to be.
+
+        THE VALUE IS REAL, and this deserves a word because the literature usually writes it as complex. The Racah phase of the angular
+        factor is (-1)^(j_b + 1/2); j_b is half-integer, so that exponent is an integer and the phase is +-1, alternating with j_b. Until
+        09-Aug-2026 `AngularMomentum.JohnsonI` raised (-1+0im) to `jb.num + 1/2`, i.e. to a HALF-integer, which returned a constant -i for
+        every j_b: it turned every matrix element imaginary and, worse, discarded the alternating sign. With that corrected the quantity is
+        real, as it should be. Any overall factor i that a given convention prefers is a global phase and cancels from every observable; the
+        j-dependent sign does NOT cancel and is carried here.
+
+        WHAT IS INSIDE, AND WHAT THE CALLER MUST SUPPLY. This function returns the SINGLE-ELECTRON reduced matrix element and nothing else.
+        A many-electron amplitude is assembled by the caller as
+
+            amplitude = sum_(r,s) c_r c_s sum_coeff  coeff.T * MabEmission(...) / sqrt(2j_a+1) * sqrt(2J_f+1)
+
+        with the angular coefficients from SpinAngular and the CI mixing coefficients. NO FURTHER MULTIPOLARITY FACTOR IS TO BE APPLIED: a
+        factor sqrt((2L+1)(L+1)/L) appears commented out at the PhotoEmission call site, and it is commented out CORRECTLY -- restoring it
+        would multiply E1 by 2.449 and E2 by 2.739 and destroy the agreement documented below.
+
+        VALIDATED, and additive across multipoles. Against Jitrik & Bunge, J. Phys. Chem. Ref. Data 33, 1059 (2004), hydrogen Z = 1,
+        point-nucleus Dirac -- the same model as the test:
+
+            transition        JAC A(Cou)      JAC A(Bab)      reference      ratio
+            E1 1s-2p_1/2      6.268354e+08    6.268020e+08    6.2649e+08     1.000498
+            M1 1s-2s_1/2      2.481059e-06    2.481059e-06    2.4946e-06     0.994572
+            E2 1s-3d_3/2      5.940766e+02    5.940251e+02    5.937500e+02   1.000463
+
+        The three ratios agree with one another, which is the statement that E1, M1 and E2 amplitudes computed through this function stand
+        on a common footing and may be added as they occur in the full electron-photon interaction.
+
+        **THE `eps` ORIENTATION BELOW, AND WHAT IT DOES AND DOES NOT AFFECT -- MEASURED 15-Oct-2026.** The
+        Babushkin branch settles the orientation of its length-form expression from the ORBITAL ENERGIES,
+        `eps = a.energy <= b.energy`, which is a PROXY for which orbital plays which role. It is exact for an ordinary
+        transition, where the more strongly bound orbital is also the final state. Inside a SECOND-ORDER sum the
+        intermediate orbital may be either more or less bound than the initial one, so the two factors of a chain can
+        receive OPPOSITE orientations -- which is what `MultiPhotonTransition`'s two-photon emission sum does.
+        **AND THAT TURNS OUT NOT TO MATTER FOR A CONVERGED SUM, WHICH IS WORTH KNOWING BEFORE ANYONE "FIXES" IT.**
+        For H 2s -> 1s at n_max = 60, the shipped mixed assignment and all four forced combinations (+-1, +-1) agree
+        to 2e-5 AND ALL REPRODUCE the exact 8.22906 /s, with the Coulomb value identical throughout (eps is
+        Babushkin-only, so that is the control). A complete sum is a physical object and cannot depend on this.
+        **WHERE IT DOES BITE IS A SEVERELY TRUNCATED SUM**, and there neither gauge means anything anyway: a
+        bound-only intermediate set captures about 15 % of this rate in the Coulomb gauge, and over such a set the
+        Babushkin value moves by a factor 8 between Z = 1 and Z = 2. **So a gauge ratio taken from a truncated
+        two-photon basis is NOT evidence about this function** -- converge the intermediate space first.
+        Do not, in any case, replace the test below by a constant: that breaks four test modules (Einstein,
+        PhotoEmission, PhotoExcitation, Empirical), because a MANY-electron amplitude sums over SUBSHELL pairs whose
+        binding order does not follow the levels' roles, and there the energy test is doing real work.
+        `DalgarnoLewis.amplitudeKernel` is this branch with the orientation fixed at +1, valid because its own callers
+        never swap which argument plays which role; it is the right choice where a caller can guarantee that, and it
+        is not a general-purpose replacement for this function.
+
+        **A CALLER WHOSE ORBITALS HAVE FIXED ROLES PASSES `orientation`, and then the orbital energies are not read.** The length operator
+        is symmetric in its two orbitals, so one many-electron amplitude must use ONE form for all its subshell pairs, while the energy test
+        flips the GrantJL term for every pair in which an initial-state orbital is the more strongly bound one. Measured on Be 2s^2 1S_0 -
+        2s2p 1P_1 in a CI on one common orbital set, against f(exp) = 1.37: DFS {2s^2,2p^2} 2.93 by the energy test and 1.40 with one form;
+        DFS n=3 2.01 and 1.46; AL n=3 2.07 and 1.36. On an EOL or RAS basis the test is worse still, since `energy` then holds no orbital
+        energy: O I 2p^4 3P_2 - 2p^3 3s 5S_2 came out 3.3e-4 against 1.0e-6 with one form and 1.16e-6 from NIST. `PhotoEmission`, whose
+        `a` is always the initial-state orbital, passes `orientation = -1.0`, the value the energy test gives its leading pair. With it, both
+        gauges reproduce GRASP2018 `rtransition` to 1.0000 on the 15 strong lines between one set of O I wave functions (2558 CSFs), where the
+        energy test gave Babushkin 0.94 to 1.22, and f(Babushkin) no longer changes under a rotation of the orbitals of a complete active space.
+
+        THE COULOMB GAUGE IS STRUCTURALLY ZERO FOR A DIAGONAL ELECTRIC MULTIPOLE, i.e. whenever the two orbitals belong to the SAME subshell
+        and hence kapa == kapb. The Coulomb branch below is built only from I^+ and I^-, and there both die at once: the prefactor
+        (kapa-kapb) vanishes, and I^-(a,a) = int j_L (P_a Q_a - Q_a P_a) dr is identically zero. The Babushkin branch keeps J_L = int j_L
+        (P_a^2 + Q_a^2) dr and stays finite. This is not a defect of either branch: the velocity form of an electric multipole between two
+        states built on the same orbital vanishes at the one-body level, and the amplitude of a transition INSIDE one configuration (2p^4
+        1S_0 - 1D_2, say) is carried entirely by the length form. Use Babushkin for such transitions, and do not read the resulting
+        Coulomb/Babushkin ratio as a gauge-consistency check -- there is nothing there to compare. The magnetic branch is unaffected, since
+        it carries (kapa+kapb) = 2*kappa and I^+(a,a) != 0; that is why M1 fine-structure rates inside a term come out right to a few parts
+        in 1000.
 """
-function MbaEmissionJohnsonx(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
-    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
-    #
-    if       gauge == Basics.Magnetic
-        JohnsonI = AngularMomentum.JohnsonI(-kapb, kapa, AngularJ64(mp.L))
-        wa     = JohnsonI * (kapa + kapb)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L, q, a, b, grid::Radial.Grid)
-    #
-    elseif   gauge == Basics.Babushkin
-        JohnsonI = AngularMomentum.JohnsonI(kapb, kapa, AngularJ64(mp.L))
-        wr     = - RadialIntegrals.GrantJL(mp.L, q, a, b, grid::Radial.Grid)
-        wr     = wr +  (kapb-kapa)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid)
-        wr     = wr +  RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid)
-        wa     = JohnsonI * wr
-    #
-    elseif   gauge == Basics.Coulomb
-        # This reduced matrix element still follows RATIP apart from JohnsonI
-        ChengI = AngularMomentum.JohnsonI(kapb, kapa, AngularJ64(mp.L))
-        wr     = (mp.L+1) * (kapb-kapa+mp.L) / (2mp.L+1) * RadialIntegrals.GrantIL0(mp.L-1, q, a, b, grid::Radial.Grid)
-        wr     = wr +  ((mp.L+1) * (kapb-kapa+mp.L) - (2mp.L+1) * (kapb-kapa)) / (2mp.L+1) * 
-                                                            RadialIntegrals.GrantIL0(mp.L+1, q, a, b, grid::Radial.Grid)
-        wr     = wr + (mp.L+1) * (kapb-kapa-mp.L) / (2mp.L+1) * RadialIntegrals.GrantIL0(mp.L-1, q, b, a, grid::Radial.Grid)
-        wr     = wr +  ((mp.L+1) * (kapb-kapa-mp.L) - (2mp.L+1) * (kapb-kapa)) / (2mp.L+1) * 
-                                                            RadialIntegrals.GrantIL0(mp.L+1, q, b, a, grid::Radial.Grid) 
-        wa     = 1.0 / (mp.L+1) * ChengI * wr
-    else     error("stop a")
-    end
+function MabEmission(mp::EmMultipole, gauge::EmGauge, omega::Float64, a::Orbital, b::Orbital, grid::Radial.Grid;
+                     orientation::Union{Nothing,Float64}=nothing)
+    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c")
 
-    return( wa )
-end
-
-
-
-"""
-`InteractionStrength.MabEmissionJohnsony(mp::EmMultipole, gauge::EmGauge, omega::Float64, a::Orbital, b::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) interaction strength <a || O^(Mp,emission) || b> 
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and 
-        within the given gauge. A value::Float64 is returned. This procedure has been re-worked due to the book by Johnson (2007). 
-"""
-function MabEmissionJohnsony(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
-    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
+    # THE FORMULA FAMILY IS SET BY THE MULTIPOLE, NOT BY THE GAUGE -- corrected 29-Oct-2026.  Until then this
+    # function branched on the GAUGE ALONE and never once looked at `mp`, so M_L asked for under an electric gauge
+    # returned the ELECTRIC strength E_L of the same rank, and E_L under `Magnetic` returned M_L:  measured on
+    # hydrogenic Z = 10 orbitals, M2/Coulomb equalled E2/Coulomb to every digit of a Float64, in both directions
+    # and at every rank.  A magnetic multipole has only ONE form, so `Magnetic` carries nothing that `mp` does not
+    # already carry;  a caller sweeping the electric gauges over a MIXED set of multipoles must still receive M_L
+    # for the magnetic members, the gauge then labelling the electric members alone -- which is what
+    # `module-Hfs.jl` arranges by hand at its own call sites and what `module-PhotoEmission.jl` arranges by
+    # branching on the multipole before it chooses a gauge.
     #
-    if       gauge == Basics.Magnetic
+    # AND THE OLD BEHAVIOUR DID NOT MERELY MISSCALE AN AMPLITUDE:  the two families have OPPOSITE parity at equal
+    # rank, (-1)^L against (-1)^(L+1), so it swapped the SELECTION RULE.  That is why it was invisible for twenty
+    # months and then total -- every mixed-multipole two-photon channel came back EXACTLY zero rather than merely
+    # wrong, since the substituted operator was forbidden for precisely the orbital pairs the right one allows.
+    if       !mp.electric
         JohnsonI = AngularMomentum.JohnsonI(-kapa, kapb, AngularJ64(mp.L))
         wa     = JohnsonI * (kapa + kapb)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L, q, a, b, grid::Radial.Grid)
-        #
+
     elseif   gauge == Basics.Babushkin
         JohnsonI = AngularMomentum.JohnsonI(kapa, kapb, AngularJ64(mp.L))
-        wr     = RadialIntegrals.GrantJL(mp.L, q, a, b, grid::Radial.Grid)
+        # ORIENTATION (corrected 09-Aug-2026). Unlike the velocity form below, the length form is not
+        # antisymmetric term by term under exchange of the two orbitals: GrantJL is symmetric, GrantILminus
+        # is antisymmetric and (kapa-kapb) changes sign. The written expression is therefore valid for ONE
+        # assignment only -- the one with `a` the more strongly bound orbital -- and the mirrored order needs
+        # the GrantJL term negated, the other two flips cancelling against the required overall sign. Call
+        # sites disagreed about the order, so the orientation is settled here from the orbital energies
+        # instead of being left to the caller. For a == b both orders coincide and eps = +1 is the right one.
+        eps    = !isnothing(orientation)   ?   orientation   :   ( a.energy <= b.energy   ?   1.0   :   -1.0 )
+        wr     = eps * RadialIntegrals.GrantJL(mp.L, q, a, b, grid::Radial.Grid)
         wr     = wr +  (kapa-kapb)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid)
         wr     = wr +  RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid)
         wa     = JohnsonI * wr
-        #
+
     elseif   gauge == Basics.Coulomb
-        # This reduced matrix element has been re-worked due to Johnson (2007)
         JohnsonI = AngularMomentum.JohnsonI(kapa, kapb, AngularJ64(mp.L))
         wr       = (1 - mp.L/(2mp.L+1)) * RadialIntegrals.GrantILplus(mp.L-1, q, a, b, grid::Radial.Grid)  -
-                    mp.L/(2mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid) 
-        wr       = -(kapa-kapb) / (mp.L+1) * wr 
-        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L-1, q, a, b, grid::Radial.Grid) 
-        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid) 
+                    mp.L/(2mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid)
+        wr       = -(kapa-kapb) / (mp.L+1) * wr
+        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L-1, q, a, b, grid::Radial.Grid)
+        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid)
         wa       = JohnsonI * wr
+
+    elseif   gauge == Basics.Magnetic
+        # AN ELECTRIC MULTIPOLE WITH `Magnetic` IS THE ONE COMBINATION WITH NO READING, and it is not answered
+        # silently:  returning the magnetic strength would hand back a DIFFERENT OPERATOR under the caller's name,
+        # and returning an electric one would invent a gauge choice the caller never made.  Nothing in `src/`
+        # reaches here -- checked over every call path of this function on 29-Oct-2026 -- so the raise is a
+        # detector for a future caller rather than a behaviour change.
+        error("InteractionStrength.MabEmission(): the ELECTRIC multipole $mp was requested in the Magnetic "   *
+              "gauge. An electric multipole has the Coulomb (velocity) and Babushkin (length) forms only, and " *
+              "`Magnetic` is not a third one. Pass Coulomb or Babushkin for an electric multipole; a magnetic "  *
+              "multipole has a single form and takes it from its own type, under any gauge.")
     else     error("stop a")
     end
 
-    return( wa )
-end
-
-
-"""
-`InteractionStrength.MabEmissionJohnsony_Wu(mp::EmMultipole, gauge::EmGauge, omega::Float64, a::Orbital, b::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) interaction strength <a || O^(Mp,emission) || b> 
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and 
-        within the given gauge. The caluclation is performed by using the function AngularMomentum.CL_reduced_me_sms. 
-        A value::Float64 is returned. This procedure has been re-worked due to the book by Johnson (2007). 
-"""
-function MabEmissionJohnsony_Wu(mp::EmMultipole, gauge::EmGauge, omega::Float64, a::Orbital, b::Orbital, grid::Radial.Grid)
-    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
-    #
-    if       gauge == Basics.Magnetic
-        minusa = Subshell(1, -kapa)
-        JohnsonI =AngularMomentum.CL_reduced_me_sms(minusa, mp.L, b.subshell)*sqrt((2*mp.L+1)*(mp.L+1) /(4*pi*mp.L ));
-        wa     = JohnsonI * (kapa + kapb)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L, q, a, b, grid::Radial.Grid)
-        #
-    elseif   gauge == Basics.Babushkin
-        JohnsonI = AngularMomentum.CL_reduced_me_sms(a.subshell,mp.L, b.subshell)*sqrt((2*mp.L+1)*(mp.L+1) /(4*pi*mp.L ));
-        wr     = RadialIntegrals.GrantJL(mp.L, q, a, b, grid::Radial.Grid)
-        wr     = wr +  (kapa-kapb)/(mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid)
-        wr     = wr +  RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid)
-        wa     = -JohnsonI * wr
-        #
-    elseif   gauge == Basics.Coulomb
-        # This reduced matrix element has been re-worked due to Johnson (2007)
-        JohnsonI = AngularMomentum.CL_reduced_me_sms(a.subshell, mp.L, b.subshell)*sqrt((2*mp.L+1)*(mp.L+1) /(4*pi*mp.L ));
-        wr       = (1 - mp.L/(2mp.L+1)) * RadialIntegrals.GrantILplus(mp.L-1, q, a, b, grid::Radial.Grid)  -
-                    mp.L/(2mp.L+1) * RadialIntegrals.GrantILplus(mp.L+1, q, a, b, grid::Radial.Grid) 
-        wr       = -(kapa-kapb) / (mp.L+1) * wr 
-        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L-1, q, a, b, grid::Radial.Grid) 
-        wr       = wr  +  mp.L/(2mp.L+1) * RadialIntegrals.GrantILminus(mp.L+1, q, a, b, grid::Radial.Grid) 
-        wa       = -JohnsonI * wr
-    else     error("stop a")
-    end
-
-    return( wa )
-end
-
-
-"""
-`InteractionStrength.MbaEmissionAndrey(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)`  
-    ... to compute the (single-electron reduced matrix element) interaction strength <b || O^(Mp, emission) || a>  
-        for the interaction with the Mp multipole component of the radiation field and the transition frequency omega,
-        and within the given gauge. A value::Float64 is returned. At present, only the magnetic matrix elements are 
-        implemented. 
-        This procedure has been worked out with Andrey but is currently not in use.
-"""
-function MbaEmissionAndreyOld(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
-    kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
-    ja   = Basics.subshell_j(a.subshell);   jb   = Basics.subshell_j(b.subshell);   
-    #
-    if       gauge == Basics.Magnetic
-        wa = -1.0im * sqrt( (2mp.L+1) * (Basics.subshell_2j(a.subshell)+1) ) / sqrt(4pi) / sqrt(mp.L * (mp.L+1)) * (-1)^mp.L * (kapb + kapa)
-        wa = wa * AngularMomentum.ClebschGordan(ja, AngularM64(1//2), AngularJ64(mp.L), AngularM64(0), jb, AngularM64(1//2)) 
-        wa = wa * RadialIntegrals.GrantILplus(mp.L, q, a, b, grid::Radial.Grid)
-        wa = conj(wa)
-    #
-    elseif   gauge == Basics.Babushkin
-        wa = 0.
-    #
-    elseif   gauge == Basics.Coulomb
-        wa = 0.
-    else     error("stop a")
-    end
-        
-    return( wa )
-end
-
-"""
-`InteractionStrength.MbaEmissionMigdalek(cp::CorePolarization, a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... to compute the (single-electron reduced matrix element) interaction strength <b || O^(E1, emission with core-polarization) || a>  
-        in length gauge. A value::Float64 is returned. 
-"""
-function MbaEmissionMigdalek(cp::CorePolarization, a::Orbital, b::Orbital, grid::Radial.Grid)
-    mp   = E1;    kapa = a.subshell.kappa;   kapb = b.subshell.kappa
-    ja   = Basics.subshell_j(a.subshell);    jb   = Basics.subshell_j(b.subshell);   
-    #
-    JohnsonI = AngularMomentum.JohnsonI(kapa, kapb, AngularJ64(mp.L))
-    wr       = RadialIntegrals.GrantJL_cp(mp.L, 0., a, b, grid::Radial.Grid, cp::CorePolarization)
-    @show "MbaEmissionMigdalek", wr
-    wa       = JohnsonI * wr
-        
     return( wa )
 end
 
 
 """
 `InteractionStrength.multipoleTransition(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)`
-    ... to compute the (single-electron reduced matrix element) multipole-transition interaction strength 
-        <b || T^(Mp, absorption) || a> due to Johnson (2007) for the interaction with the Mp multipole component of the
-        radiation field and the transition frequency omega, and within the given gauge. A value::Float64 is returned.  
+    ... to compute the (single-electron reduced matrix element) multipole-transition interaction strength <b || T^(Mp, absorption) || a> due
+        to Johnson (2007) for the interaction with the Mp multipole component of the radiation field and the transition frequency omega, and
+        within the given gauge. A value::Float64 is returned.
 """
 function multipoleTransition(mp::EmMultipole, gauge::EmGauge, omega::Float64, b::Orbital, a::Orbital, grid::Radial.Grid)
     function besselPrime_jl(L::Int64, x::Float64)    return( GSL.sf_bessel_jl(L-1, x) - (L+1)/x * GSL.sf_bessel_jl(L, x) )       end
+    # THE ANGULAR FACTOR, THROUGH JAC's OWN CL_reduced_me. It replaced AngularMomentum.ChengI on 28-Aug-2026, which
+    # carried a convention of its own that nothing else in the package shares and that its own comments could not
+    # justify -- one factor was changed from sqrt(2 j_a + 1) to sqrt(2 j_b + 1) because it "is likely related to
+    # change emission - absorption", and a phase (-1)^(ja + L - jb) was replaced by (-1)^L "to get a proper phase
+    # between 1/2 --> 3/2 ME". A reader could not tell from the call site whether the Wigner-Eckart factor was
+    # present, which is why the bare coeff.T beside it in module-MultipoleMoment.jl was the ONE site left
+    # unclassified when every other was read under Rule 19.
+    #
+    # The identity below is MEASURED, not transcribed: over all 162 combinations of kappa_1, kappa_2 in
+    # +-1 ... +-6 and L = 1 ... 4,
+    #     ChengI(kappa_1, kappa_2, L)  ==  (-1)^L * CL_reduced_me(kappa_1, L, kappa_2) / sqrt(2 j_2 + 1)
+    # to 1.1e-16, while the same expression with j_1 in the root is wrong by up to 4.1e-01. The factor therefore
+    # sits on the SECOND argument; this routine is called with the BRA orbital first, so kapb is that second
+    # argument and the factor sits on the BRA -- exactly where Rule 18 puts it. THAT ANSWERS THE OPEN QUESTION:
+    # multipoleTransition DOES carry the Wigner-Eckart factor, so the bare coeff.T beside it is correct.
+    angularFactor(kap1::Int64, kap2::Int64, L::Int64) =
+        (-1)^L * AngularMomentum.CL_reduced_me(Subshell(9, kap1), L, Subshell(9, kap2)) /
+                 sqrt( Basics.subshell_2j(Subshell(9, kap2)) + 1.0 )
 
     kapa = a.subshell.kappa;   kapb = b.subshell.kappa;    q = omega / Defaults.getDefaults("speed of light: c") 
     mtp  = min(size(a.P, 1), size(b.P, 1))
-    !(grid.meshType == Radial.MeshGL())  &&  error("Only for Radial.MeshGL() implemented so far.")
-    #
+
     if       gauge == Basics.Magnetic
-        ChengI = AngularMomentum.ChengI(-kapa, kapb, AngularJ64(mp.L));   if  abs(ChengI) < 1.0e-10  return( 0. )   end
+        angFac = angularFactor(-kapa, kapb, mp.L);   if  abs(angFac) < 1.0e-10  return( 0. )   end
         wa = Complex(0.)
         for  i = 2:mtp
             wa = wa + (kapa+kapb) / (mp.L+1) * GSL.sf_bessel_jl(mp.L, q * grid.r[i]) * (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * grid.wr[i]  
         end
-        wa = ChengI * wa
-        #
+        wa = angFac * wa
+
     elseif   gauge == Basics.Velocity
-        ChengI = AngularMomentum.ChengI(kapa, kapb, AngularJ64(mp.L));    if  abs(ChengI) < 1.0e-10  return( 0. )   end
+        angFac = angularFactor( kapa, kapb, mp.L);    if  abs(angFac) < 1.0e-10  return( 0. )   end
         wa = Complex(0.)
         for  i = 2:mtp
             wa = wa - (kapa-kapb) / (mp.L+1) * 
@@ -471,10 +553,10 @@ function multipoleTransition(mp::EmMultipole, gauge::EmGauge, omega::Float64, b:
                         (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) * grid.wr[i]
             wa = wa + mp.L * GSL.sf_bessel_jl(mp.L, q * grid.r[i]) / (q * grid.r[i]) * (a.P[i] * b.Q[i] - a.Q[i] * b.P[i]) * grid.wr[i]  
         end
-        wa = ChengI * wa
-        #
+        wa = angFac * wa
+
     elseif   gauge == Basics.Length
-        ChengI = AngularMomentum.ChengI(kapa, kapb, AngularJ64(mp.L));    if  abs(ChengI) < 1.0e-10  return( 0. )   end
+        angFac = angularFactor( kapa, kapb, mp.L);    if  abs(angFac) < 1.0e-10  return( 0. )   end
         wa = Complex(0.)
         for  i = 2:mtp
             wa = wa + GSL.sf_bessel_jl(mp.L, q * grid.r[i]) * (a.P[i] * b.P[i] + a.Q[i] * b.Q[i]) * grid.wr[i] 
@@ -482,8 +564,8 @@ function multipoleTransition(mp::EmMultipole, gauge::EmGauge, omega::Float64, b:
                         ( (kapa-kapb) / (mp.L+1) * (a.P[i] * b.Q[i] + a.Q[i] * b.P[i]) +
                         (a.P[i] * b.Q[i] - a.Q[i] * b.P[i]) ) * grid.wr[i]
         end
-        wa = ChengI * wa
-        #
+        wa = angFac * wa
+
     else     error("stop a")
     end
 
@@ -492,105 +574,408 @@ end
 
 
 """
-`InteractionStrength.schiffMoment(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... computes the  <a|| h^(Schiff-moment) ||b>  reduced matrix element of the Schiff-moment Hamiltonian for orbital 
-        functions a, b and for the nuclear density as given by the nuclear model. A value::Float64 is returned.  
+`InteractionStrength.X_smsA(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
+    ... computes the the effective interaction strengths X^1_sms,A (abcd) for fixed rank 1 and orbital functions a, b, c and d at the given
+        grid. A value::Float64 is returned.
 """
-function schiffMoment(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
-    printstyled("\nWarning -- InteractionStrength.schiffMoment():: Not yet implemented.", color=:cyan)
-    wb = 1.0 + 2.0im
-    return( wb )
+function X_smsA(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
+    wa = AngularMomentum.CL_reduced_me(a.subshell, 1, c.subshell) * 
+            AngularMomentum.CL_reduced_me(b.subshell, 1, d.subshell) *
+            RadialIntegrals.Vinti(a, c, grid) * RadialIntegrals.Vinti(b, d, grid) / 2
+    # println("**  <$(a.subshell) || Vinti || $(c.subshell)>  = $(RadialIntegrals.Vinti(a, c, grid)) " )
+    # println("**  <$(b.subshell) || Vinti || $(d.subshell)>  = $(RadialIntegrals.Vinti(b, d, grid)) " )
+    return( wa )
 end
 
 
 """
-`InteractionStrength.weakCharge(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... computes the  <a|| h^(weak-charge) ||b>  reduced matrix element of the weak-charge Hamiltonian for orbital functions 
-        a, b and for the nuclear density as given by the nuclear model. A value::Float64 is returned.  
+`InteractionStrength.X_smsB(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
+    ... computes the the effective interaction strengths X^1_sms,B (abcd) for fixed rank 1 and orbital functions a, b, c and d at the given
+        grid. A value::Float64 is returned.
 """
-function weakCharge(a::Orbital, b::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
-    printstyled("\nWarning -- InteractionStrength.weakCharge():: Not yet implemented.", color=:cyan)
-    wb = 1.0 + 2.0im
-    return( wb )
+function X_smsB(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
+    wa = - AngularMomentum.CL_reduced_me(b.subshell, 1, d.subshell) * RadialIntegrals.Vinti(b, d, grid) *
+            RadialIntegrals.isotope_smsB(a, c, nm.Z, grid) / 2
+    return( wa )
 end
 
 
 """
-`InteractionStrength.XL_Breit_reset_storage(keep::Bool; printout::Bool=false)`  
-    ... resets the global storage of XL_Breit interaction strength; nothing is returned.
+`InteractionStrength.X_smsC(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)` 
+    ... computes the the effective interaction strengths X^1_sms,C (abcd) for fixed rank 1 and orbital functions a, b, c and d at the given
+        grid. A value::Float64 is returned.
 """
-function XL_Breit_reset_storage(keep::Bool; printout::Bool=false)
-    if  keep
-        if  printout   println("  reset GBL_Storage_XL_Breit storage ...")    end
-        global GBL_Storage_XL_Breit = Dict{String, Float64}()
-    else
-    end
-    return( nothing )      
+function X_smsC(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
+    wa = - AngularMomentum.CL_reduced_me(b.subshell, 1, d.subshell) * 
+            AngularMomentum.CL_reduced_me(a.subshell, 1, c.subshell) * 
+            RadialIntegrals.Vinti(b, d, grid) * RadialIntegrals.isotope_smsC(a, c, nm.Z, grid) / 2
+    return( wa )
 end
 
 
 """
 `InteractionStrength.XL_Breit(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
-                                eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt}; keep::Bool=false)`  
-    ... computes the the effective Breit interaction strengths X^L_Breit (abcd) or Gaunt interaction strengths 
-        X^L_Gaunt (abcd) for given rank L and orbital functions a, b, c and d  at the given grid. 
-        For keep=true, the procedure looks up the (global) directory GBL_Storage_XL_Coulomb
-        and returns the corresponding value without re-calculation of the interaction strength; it also 'stores' the calculated
-        value if not yet included. For keep=false, the interaction strength is always computed on-fly. A value::Float64 is returned. 
-        At present, only the zero-frequency Breit or Gaunt interaction is taken into account.
+                              eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})`
+    ... computes the effective Breit interaction strength X^L_Breit (abcd), or the Gaunt strength X^L_Gaunt (abcd) for eeint =
+        CoulombGaunt(), for given rank L and orbital functions a, b, c and d at the given grid. A value::Float64 is returned. The factor of
+        CoulombBreit(factor) scales the photon wave number omega = factor |E_a - E_c| / c, so factor = 0 gives the frequency-independent
+        interaction as the exact limit of the same expressions; see the reference formulation heading this section. To memoise the result,
+        use the method that additionally takes an InteractionStrength.XLCache.
+
+        THE BREIT INTERACTION IN JAC -- THE REFERENCE FORMULATION
+        Written 13-Aug-2026 as Stage 1 of the frequency-dependent Breit work, BEFORE any code was changed, so
+        that the implementation below can be checked against a statement of the physics rather than against
+        itself.
+
+        PROVENANCE, STATED HONESTLY: the standard references are Grant & Pyper, J. Phys. B 9, 761 (1976) and
+        Grant, "Relativistic Quantum Theory of Atoms and Molecules" (2007), ch. 8.  THIS BLOCK WAS NOT
+        TRANSCRIBED FROM THEM -- it is written from recollection of the standard formulation, cross-checked
+        against secondary sources only.  It must therefore be checked against the primary texts by someone who
+        has them before any number produced from it is trusted.  Where it has been confirmed NUMERICALLY, that
+        is said at the point in question.
+
+        1. THE OPERATOR.  Exchange of one transverse photon of frequency omega between electrons 1 and 2, in the
+           COULOMB GAUGE:
+
+               B(omega) = - (alpha_1 . alpha_2) cos(omega r_12) / r_12
+                          + (alpha_1 . grad_1)(alpha_2 . grad_2) [cos(omega r_12) - 1] / (omega^2 r_12)
+
+           The second term is finite as omega -> 0 only through a cancellation: [cos(x) - 1]/x^2 -> -1/2.
+
+        2. UNITS OF omega -- AND A DEFECT.  omega is a WAVE NUMBER, not an energy.  In atomic units
+
+               omega = |E_a - E_c| / c,        c = 137.036 ,
+
+           so that omega*r is the dimensionless phase the Bessel functions below require.  Retardation is small
+           precisely because omega*r ~ (Delta E) r / c << 1 for atomic transitions.
+
+           XL_Breit_densities below formed  omg_ac = factor * abs(E_a - E_c)  and NEVER DIVIDED BY c until
+           13-Aug-2026, feeding an energy in Hartree into sf_bessel_jl(nu, omega*r) as if it were a wave number
+           and overstating the phase by c = 137.  FIXED.  It never affected a published number, since no branch
+           consumed those values (see point 6).
+
+        3. THE TWO omega -> 0 LIMITS ARE DIFFERENT OPERATORS, AND THE DIFFERENCE IS A GAUGE CHOICE.
+
+               Coulomb gauge, omega -> 0:   B = - 1/(2 r_12) [ alpha_1.alpha_2 + (alpha_1.rhat)(alpha_2.rhat) ]
+                                                ... the BREIT operator            -> JAC: CoulombBreit(0.)
+               Feynman gauge, omega -> 0:   G = - alpha_1.alpha_2 / r_12
+                                                ... the GAUNT operator            -> JAC: CoulombGaunt
+
+           These are NOT the same approximation.  The total one-photon exchange is gauge independent; truncating
+           at omega -> 0 is what breaks that, which is why two gauges leave two different instantaneous operators.
+           The retardation correction to instantaneous Gaunt is O(alpha^2) -- LARGER than the omega-independent
+           Coulomb-gauge term itself.  A user choosing CoulombGaunt over CoulombBreit(0.) is therefore making an
+           undocumented gauge choice, and the frequency dependence does NOT vanish in either gauge.
+
+        4. MULTIPOLE DECOMPOSITION.  XL_Breit_coefficients splits the operator into two families, and this split
+           IS the Gaunt/retardation split (onlyGaunt returns after the 'T' blocks):
+
+               'T'  (magnetic / GAUNT)      nu = L-1, L, L+1,   four mu permutations each
+               'S'  (RETARDATION)           nu = L +- 1
+
+           The many-electron angular factors are NOT computed here: they come from SpinAngular as
+           Coefficient2p(nu, a, b, c, d, V), and the CI matrix forms V * XL_Breit(nu, ...).  The coefficients
+           below belong to the OPERATOR, not to the CSFs.
+
+        5. THE RADIAL KERNELS.  The two kinds enter DIFFERENTLY, which is easy to get wrong:
+
+               Gaunt / 'T':   the static kernel Ubar_nu = r_<^nu / r_>^(nu+1) times a FREQUENCY FACTOR
+                                  V_nu = -omega (2nu+1) j_nu(omega r_<) y_nu(omega r_>)  ->  1   as omega -> 0.
+
+               Retardation / 'S':  the kernel W_(L-1,L+1,L) of Grant & Pyper equation (6) IN FULL -- it is not a
+                                   factor on Ubar_nu, and for r_1 < r_2 it is a difference of two 1/omega^2-
+                                   divergent pieces, which is the whole numerical difficulty.
+
+           Both are evaluated through the normalised phi, psi of besselPhiPsi, so the cancellations are taken
+           ALGEBRAICALLY and each kernel reaches its omega -> 0 limit by construction rather than by a special case.
+           See the closures V() and W() in XL_Breit_densities for the derivations and their verification.
+
+           MEASURED 13-Aug-2026, on the forms that stood here before: V() omitted the leading factor omega
+           (V*omega/static -> 1.000001 at omega = 1e-3 for nu = 1, while V/static -> 1000), and W() was equation (6)
+           with the omega missing from its first term AND that term's sign reversed, so its cancellation failed
+           outright -- neither W, W*omega nor W*omega^2 converged.  Neither could ever have been switched on.
+
+        6. WHAT IS COMPUTED.  Since 14-Aug-2026 both parts are frequency dependent, and the argument `factor` of
+           CoulombBreit(factor) does exactly what its name says: it scales omega, so that
+
+               factor = 0  ->  omega = 0, the standard frequency-independent Breit interaction, recovered as the
+                               EXACT limit of the same expressions rather than by a separate code path;
+               factor = 1  ->  the full frequency-dependent interaction at omega = |E_a - E_c| / c.
+
+           Before that date nothing frequency dependent was computed at all: omg_ac and omg_bd were formed and then
+           discarded, factor == 0 taking wy = 1 and factor == 1 taking wy = 1.05, a placeholder with no derivation
+           that is now gone.  No JAC number published before 14-Aug-2026 contains a retardation correction.
+
+           NOT included: for a given 'S' permutation only the radial ordering carried by that permutation is
+           summed, its transpose supplying the other.  This is exact at omega = 0 and drops a term of relative
+           order omega^2 WITHIN the retardation -- O(omega^4) in the interaction -- since W's r_1 > r_2 branch is
+           itself O(omega^2).  With omega ~ 1e-2 for the transitions of interest that is a ~1e-8 relative effect.
+
+
+        7. AUDIT OF THE ANGULAR COEFFICIENTS, 13-Aug-2026.  XL_Breit_coefficients was compared TERM BY TERM against
+           Grant & Pyper's table 2 and against GRASP2018's rci90/cxk.f90, which implements the same table.
+           RESULT: THE ANGULAR DECOMPOSITION IS CORRECT.  Every weight, every kappa factor and every mu ordering
+           agrees.  In GRASP's notation DK1 = kappa_c - kappa_a, DK2 = kappa_d - kappa_b, F1..F4 = DK -+ K,
+           G1..G4 = DK -+ (K+1), H = the two CL reduced matrix elements with the odd-L sign:
+
+             'T', nu = L    : JAC -(ka+kc)(kb+kd)/(L(L+1)), equal for all mu   ==  GRASP S(1..4) = -(KA+KC)(KD+KB)H/(K(K+1))
+             'T', nu = L+1  : JAC L/((L+1)(2L+1)(2L+3)), four kappa products   ==  GRASP A = H*K/((K+1)(2K+1)(2K+3)),
+                              G1G3, G2G4, G1G4, G2G3
+             'T', nu = L-1  : JAC (L+1)/(L(2L-1)(2L+1))                        ==  GRASP A = H*(K+1)/(K(2K+1)(2K-1)),
+                              F2F4, F1F3, F2F3, F1F4
+             'S', all 8 mu  : JAC 1/(2L+1)^2 times, in order,
+                              F2G3, F4G1, F1G4, F3G2, F2G4, F3G1, F1G3, F4G2   ==  GRASP S(5), S(6), ..., S(12)
+
+           THE ONE STRUCTURAL DIFFERENCE, and it is deliberate rather than a defect: JAC emits each 'S' coefficient
+           TWICE, at nu = L+1 with weight +[L]/2 and at nu = L-1 with -[L]/2, [L] = 2L+1.  That is precisely Grant's
+           STATIC LIMIT of the retardation kernel, their equations (9)-(10),
+
+               W_(nu-1,nu+1,nu) -> -(1/2)[nu] ( Ubar_(nu-1) - Ubar_(nu+1) ),
+
+           with Ubar the one-sided kernel of equation (10) -- which the r/s loop below realises by summing only
+           s <= r and halving the diagonal, since U = Ubar(1,2) + Ubar(2,1).  Signs included, JAC matches.
+
+           CONSEQUENCE FOR THE FREQUENCY-DEPENDENT RETARDATION, AS IT STOOD ON 13-Aug-2026: it could not be switched
+           on by changing a multiplier, because the 'S' entries carried the static limit inside their coefficients.
+
+           **THAT WORK WAS DONE THE NEXT DAY AND THIS PARAGRAPH IS NO LONGER A TO-DO -- corrected 04-Sep-2026, after
+           it was read at face value and nearly acted on.**  Since 14-Aug-2026 (commit 7c82e45) each mu emits a
+           SINGLE entry carrying the multipole L itself and the bare coefficient xcc, and the whole kernel
+           W_(L-1,L+1,L) of equation (6) is supplied by XL_Breit_densities; see the comment at the 'S' block of
+           XL_Breit_coefficients, which records the collapse and why no extra prefactor is needed.  The eight mu
+           terms are four TRANSPOSED PAIRS, matching the two-term W(1,2) / W(2,1) structure of equation (8).
+
+           SO THERE IS NO OUTSTANDING ALGEBRA HERE, and the term count is not padding: the 'T' blocks at
+           nu = L-1, L, L+1 are three distinct tensor ranks and the eight 'S' mu terms are Grant's table 2 in full.
+           The only genuine redundancy was entries sharing (kind, nu, a, b, c, d), which differ by a scalar alone;
+           XL_Breit_densitiesSwept sums those coefficients and sweeps once (commit 94df5bc, 11.94 -> 7.15
+           sub-coefficients per strength).  Measured 04-Sep-2026, generating the coefficients is ~1 % of a swept
+           Breit strength, so there is no speed argument for touching this decomposition either.
 """
 function XL_Breit(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
-                    eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt}; keep::Bool=false)
-    global GBL_Storage_XL_Breit
+                    eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})
     ja2 = Basics.subshell_2j(a.subshell)
     jb2 = Basics.subshell_2j(b.subshell)
     jc2 = Basics.subshell_2j(c.subshell)
     jd2 = Basics.subshell_2j(d.subshell)
-    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||  L == 0  
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||  L == 0
         return( 0. )
     end
-    
-    # Calculate a reduced number of cofficients for the CoulombGaunt() interaction
-    if    typeof(eeint) == CoulombGaunt   onlyGaunt = true;    factor = 0.
-    else                                  onlyGaunt = false;   factor = eeint.factor   
-    end
-    
-    # Now distiguish due to the optional argument keep
-    if  keep
-        sa = "XL" * string(L) * " " * string(a.subshell) * string(b.subshell) * string(c.subshell) * string(d.subshell)
-        if haskey(GBL_Storage_XL_Breit, sa )
-            XL_Breit = GBL_Storage_XL_Breit[sa]
-        else
-            xcList   = XL_Breit_coefficients(L,a,b,c,d, onlyGaunt=onlyGaunt)
-            XL_Breit = XL_Breit_densities(xcList, factor, grid)
-            global GBL_Storage_XL_Breit = Base.merge(GBL_Storage_XL_Breit, Dict( sa => XL_Breit))
-        end
-    else
-        xcList   = XL_Breit_coefficients(L,a,b,c,d, onlyGaunt=onlyGaunt)
-        XL_Breit = XL_Breit_densities(xcList, factor, grid)
-    end
-    #
 
-    return( XL_Breit )
+    # Calculate a reduced number of cofficients for the CoulombGaunt() interaction
+    onlyGaunt, factor, quadrature = InteractionStrength.breitRouteOf(eeint)
+    InteractionStrength.checkFrequencyIsMeaningful(factor, a, b, c, d, grid)
+    xcList = XL_Breit_coefficients(L, a, b, c, d, onlyGaunt=onlyGaunt)
+
+    if  quadrature == :swept    return( XL_Breit_densitiesSwept(xcList, factor, grid) )
+    else                        return( XL_Breit_densities(     xcList, factor, grid) )
+    end
 end
 
 
 """
-`InteractionStrength.XL_BreitDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`  
-    ... computes the the effective Breit interaction strengths X^L_Breit (abcd) for given rank L and orbital functions 
-        a, b, c and d  at the given grid. A value::Float64 is returned. At present, only the zero-frequency Breit 
-        interaction is taken into account.
+`InteractionStrength.checkFrequencyIsMeaningful(factor::Float64, a::Orbital, b::Orbital, c::Orbital, d::Orbital,
+                                               grid::Radial.Grid)`
+    ... refuses a frequency-dependent Breit strength whose orbitals cannot supply a frequency. Nothing is returned.
+
+        WHY THIS HAS TO REFUSE RATHER THAN WARN. The photon wave number is omega = factor |E_a - E_c| / c, taken from the ORBITAL
+        ENERGIES. Both EOL solvers (SelfConsistent.solveOptimizedLevelField and ...ByRotation) build their orbitals with
+        `Bsplines.generateOrbitalFromVector(sh, 0.0, ...)` -- a rotation- or functional-optimised orbital is not the eigenfunction of any
+        one-particle operator, so it carries no eigenvalue and the field is left at zero. Every orbital of a RAS or EOL basis therefore
+        has energy 0.0 exactly, omega comes out 0 for every pair, and CoulombBreit(1.) silently returns the CoulombBreit(0.) answer:
+        the retardation the caller asked for is absent and nothing says so. Measured 04-Sep-2026 on Be-like U: all four orbitals of the
+        reference layer at 0.0, against -4705.73 / -1185.21 / -1174.16 / -1018.99 Ha from a mean-field SCF on the same configurations.
+
+        Four bound orbitals at EXACTLY 0.0 is the signature of the unset field and not of physics, so the test is safe; a continuum
+        orbital carries its own positive energy and an AL or DFS basis its eigenvalues, which is why example-Ad, -Df and -Dv keep working.
+        The remedy is one of: CoulombBreit(0.), which is the EXACT omega -> 0 limit and what every published JAC RAS number used; or a
+        mean-field basis, whose orbitals carry eigenvalues. Giving EOL orbitals a defined energy is a physics question -- the diagonal
+        Lagrange multiplier is the candidate -- and is on the priority list rather than guessed at here.
+
+        AND THE OTHER END, ADDED 15-Sep-2026 AND PUT ON THE RIGHT VARIABLE 05-Oct-2026.  Nothing guarded LARGE omega.  In an Auger or
+        dielectronic-capture amplitude one orbital is a CONTINUUM electron, so |E_a - E_c| is the continuum energy itself, and amplitudes
+        measured on 09-Sep-2026 degraded from a 0.2 % correction at Z = 53 to values wrong by 10^6-10^7 at Z = 92 with no warning at all.
+
+        THE QUANTITY THAT DECIDES IT IS omega TIMES THE EXTENT OF THE OVERLAP DENSITY, and it was settled by varying one thing at a time
+        rather than by argument.  Two controls, both on C-like carbon:
+
+            THE MESH IS INERT.  Box fixed at 12.5 a.u., hp refined fourfold -- 474 against 1893 points per oscillation of the kernel --
+            gives 1.1038/1.1041 at omega*rbox = 4, 1.1627/1.1626 at 7, -0.2162/-0.2558 at 18.  So "an oscillatory integrand the
+            quadrature cannot follow" is REFUTED; that was this guard's stated mechanism for a month.
+
+            THE BOX IS INERT TOO.  The SAME orbitals in a box enlarged from 12.6 to 50.4 a.u. give 1.1627 against 1.1626 at fixed omega,
+            while omega*rbox moves 7.0 -> 28.2.  A length that changes nothing when changed alone is not the criterion.
+
+        So the length belongs to the PAIR, and `InteractionStrength.overlapExtent` forms it.  Landmarks, on two bound systems 15x apart
+        in box size and 9x in Z: already ~21 % below the O(omega^2) law at omega*extent = 1.2;  PEAK at 2.1-3.0, where the correction
+        stops growing with omega and so is unphysical;  correction VANISHED by 3.4-4.7;  sign REVERSED by 5.5-7.7.  The two systems place
+        these about 40 % apart, so the threshold is the conservative end, 1.2.  That the same two systems LOOKED like a clean collapse in
+        omega*rbox is a two-point coincidence: their extent/rbox are 0.304 and 0.428, so those two points cannot separate the variables.
+
+        IT COVERS THE AUGER CASE IT WAS FILED FOR, which a box test was kept here for until it was measured.  With a real continuum
+        orbital at the KLL energy, Li-like U sits at omega*extent = 6.3 and Li-like iodine at 3.7 -- both far past 1.2, not at the
+        0.5-1.0 the priority item recorded -- so one clause serves both.  And the "healthy Z = 53" is not a healthy STRENGTH: refining
+        the mesh there, XL_Breit(0.) converges to 4.6430e-03 to six figures while XL_Breit(1.) runs -7.12e-02, +6.84e-03, +2.44e+01.
+        The 0.2 % belongs to the assembled AMPLITUDE, where errors across many strengths partly cancel.
+
+        AND IT WARNS RATHER THAN REFUSES, because the 40 % spread in the landmarks is calibrated on two systems and a wrong refusal is
+        worse than a warning that names the remedy.  The check is O(1): two frequencies, two extents and one product, and ordinary
+        bound-bound work sits near omega*extent ~ 0.03, two orders below the threshold.
 """
-function XL_BreitDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
-    error("stop a")
+function checkFrequencyIsMeaningful(factor::Float64, a::Orbital, b::Orbital, c::Orbital, d::Orbital,
+                                    grid::Radial.Grid)
+    if  factor != 0.   &&   a.energy == 0.   &&   b.energy == 0.   &&   c.energy == 0.   &&   d.energy == 0.
+        error("A frequency-dependent Breit interaction was requested (factor = $factor), but all four orbitals " *
+              "($(a.subshell), $(b.subshell), $(c.subshell), $(d.subshell)) carry energy 0.0 exactly, so omega = " *
+              "factor |E_a - E_c| / c is zero for every pair and the retardation would be silently absent.\n" *
+              "   Until 12-Sep-2026 this was what EVERY EOL or RAS basis looked like, and the remedy was to change " *
+              "the request.  Both EOL solvers now set the diagonal Lagrange multiplier eps_a = <a|F_a|a> instead " *
+              "(SelfConsistent.computeOrbitalEnergiesEOL), so a converged EOL basis no longer reaches this error.\n" *
+              "   Four exact zeros therefore mean something more specific now: orbitals that carry NO generalized " *
+              "occupation in the target level(s), for which the EOL functional defines no mean field and hence no " *
+              "multiplier, or a basis whose orbitals were never given energies at all.\n" *
+              "   Use CoulombBreit(0.) -- the EXACT omega -> 0 limit, and what every published JAC RAS number has " *
+              "used -- or run on a basis whose orbitals carry their energies.")
+    end
+    factor == 0.  &&  return( nothing )
+
+    # PRIORITY ITEM 19 WAS CLOSED HERE, 05-Oct-2026.  Should a frequency-dependent Breit strength again be found
+    # wrong by orders of magnitude at high Z, the three explanations below are already tested and refuted, so do
+    # not spend the time again: it is NOT the quadrature (a fourfold mesh refinement is inert to four decimals),
+    # NOT the radial box (the same orbitals in a 4x box give the same answer while omega*rbox moves 7 -> 28), and
+    # NOT the continuum orbital's resolution (XL_Breit(0.) settles at 37 points per de Broglie wavelength while
+    # XL_Breit(1.) stays wild at 132).  It is the clause below, and its variable is the pair's own extent.
+
+    # THE LARGE-omega END -- TWO CLAUSES THAT MEAN DIFFERENT THINGS, AND NEITHER REFUSES.
+    #
+    # CLAUSE A is the established one, and the variable is omega TIMES THE EXTENT OF THE OVERLAP DENSITY.  That it
+    # is the orbitals and not the box was settled 05-Oct-2026 by a controlled test: the SAME C orbitals in a box
+    # enlarged from 12.6 to 50.4 a.u. give the ratio 1.1627 and 1.1626 at the same omega, while omega*rbox moves
+    # from 7.0 to 28.2.  The box cannot be causal if changing it alone changes nothing.  Refining the MESH
+    # fourfold is equally inert (1.1038/1.1041 at product 4, 1.1627/1.1626 at 7, 474 against 1893 points per
+    # oscillation), which rules out quadrature resolution -- the mechanism this item asserted for a month.
+    #
+    # AND THERE IS NO SECOND CLAUSE, which took measuring.  A box test was kept here until 05-Oct-2026 on the
+    # grounds that clause A could not cover the Z = 92 Auger catastrophe this guard was filed for -- the item
+    # recorded both Auger cases as sitting at omega x extent 0.5-1.0, where clause A is silent.  Measured on the
+    # actual quadruples, with a real continuum orbital at the KLL energy, THAT IS NOT WHERE THEY SIT: Li-like
+    # U gives omega x extent = 6.3 and Li-like iodine 3.7, both far past the 1.2 threshold, so clause A fires on
+    # both.  The gap the second clause existed for does not exist, and a guard kept for a reason that has been
+    # measured away is worse than none.
+    #
+    # AND THE "HEALTHY Z = 53" WAS NEVER A HEALTHY STRENGTH.  Refining the mesh on the Li-like iodine quadruple,
+    # XL_Breit(0.) converges to 4.6430e-03 to six figures while XL_Breit(1.) runs -7.12e-02, +6.84e-03, +2.44e+01
+    # over the same three meshes.  The 0.2 % correction the item calls healthy belongs to the assembled
+    # AMPLITUDE, where errors across many strengths partly cancel -- not to the strengths going into it.  So
+    # there was no Z = 53 against Z = 92 contrast to explain.
+    cLight = Defaults.getDefaults("speed of light: c")
+    omgAC  = factor * abs(a.energy - c.energy) / cLight
+    omgBD  = factor * abs(b.energy - d.energy) / cLight
+    omega  = max(omgAC, omgBD)
+    extent = max( InteractionStrength.overlapExtent(a, c, grid), InteractionStrength.overlapExtent(b, d, grid) )
+    if  omega * extent >= 1.2
+        @warn("A frequency-dependent Breit interaction at omega x (overlap extent) = " *
+              @sprintf("%.2f", omega*extent) * " is OUTSIDE the range where its O(omega^2) retardation law was " *
+              "validated (example-Ad.jl branch 4, small omega).\n" *
+              "   Measured on two bound systems 15x apart in box size and 9x in Z: the correction is already " *
+              "~21 % below that law by 1.2, PEAKS between 2.1 and 3.0 -- where it stops growing with omega, which " *
+              "is unphysical -- has VANISHED by 3.4 to 4.7, and reverses SIGN by 5.5 to 7.7.  The two systems " *
+              "place these landmarks about 40 % apart, so the threshold is the conservative end of that spread.\n" *
+              "   REMEDY: CoulombBreit(0.) is the exact omega -> 0 limit and is what every published JAC Auger, " *
+              "DR and cascade number has used.", maxlog=3)
+    end
+
+    return( nothing )
+end
+
+
+"""
+`InteractionStrength.overlapExtent(x::Orbital, y::Orbital, grid::Radial.Grid)`
+    ... the radius inside which 99 % of |P_x P_y + Q_x Q_y| lies, i.e. of the TRANSITION DENSITY that a two-electron radial integral
+        actually samples. A value::Float64 is returned.
+
+        THIS IS THE LENGTH THAT DECIDES WHERE A FREQUENCY-DEPENDENT BREIT STRENGTH STOPS BEING TRUSTWORTHY, and it is the pair's own
+        property rather than the grid's. Settled 05-Oct-2026 by the one test that varies a single thing: the same C orbitals in a box
+        enlarged from 12.6 to 50.4 a.u. return the ratio 1.1627 against 1.1626 at fixed omega, while omega*rbox moves 7.0 -> 28.2.
+
+        It is formed per PAIR, since the code builds omg_ac and omg_bd separately, and the larger of the two pairs sets the scale. For an
+        Auger quadruple -- three compact bound orbitals and a continuum electron filling the grid -- it is the bound orbitals that bound
+        the density, which is why such a run is not false-alarmed on its box.
+
+        Numerically it comes out close to `effectiveExtent` of the more compact partner (0.245 against 0.245 for Ne-like Xe, 5.304
+        against 5.304 for C-like carbon), so the two are not distinguished by the present measurements; this one is used because it is
+        the density the integrand contains rather than a proxy for it.
+"""
+function overlapExtent(x::Orbital, y::Orbital, grid::Radial.Grid)
+    n = min(length(x.P), length(y.P), length(x.Q), length(y.Q), length(grid.r), length(grid.wr))
+    n <= 0   &&   return( grid.r[end] )
+    total = 0.
+    for  i = 1:n    total = total + abs(x.P[i]*y.P[i] + x.Q[i]*y.Q[i]) * grid.wr[i]    end
+    total <= 0.  &&  return( grid.r[n] )
+    acc = 0.;    target = 0.99 * total
+    for  i = 1:n
+        acc = acc + abs(x.P[i]*y.P[i] + x.Q[i]*y.Q[i]) * grid.wr[i]
+        acc >= target  &&  return( grid.r[i] )
+    end
+
+    return( grid.r[n] )
+end
+
+
+"""
+`InteractionStrength.effectiveExtent(orb::Orbital, grid::Radial.Grid)`
+    ... the radius inside which 99 % of the orbital's radial density lies, i.e. the distance over which it can contribute to an
+        overlap integral. A value::Float64 is returned.
+
+        THIS IS NOT THE BOX, and for a continuum orbital the two differ by orders of magnitude -- which is the point: an Auger
+        amplitude pairs compact bound orbitals with an electron that fills the grid, and the integrand lives where the BOUND
+        orbitals do. Using the box instead would refuse every Auger run with a frequency-dependent Breit interaction.
+"""
+function effectiveExtent(orb::Orbital, grid::Radial.Grid)
+    n = min(length(orb.P), length(orb.Q), length(grid.r), length(grid.wr))
+    total = 0.
+    for  i = 1:n    total = total + (orb.P[i]^2 + orb.Q[i]^2) * grid.wr[i]    end
+    total <= 0.  &&  return( grid.r[n] )
+    acc = 0.;    target = 0.99 * total
+    for  i = 1:n
+        acc = acc + (orb.P[i]^2 + orb.Q[i]^2) * grid.wr[i]
+        acc >= target  &&  return( grid.r[i] )
+    end
+    return( grid.r[n] )
+end
+
+
+"""
+`InteractionStrength.XL_Breit(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                               eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt},
+                               cache::InteractionStrength.XLCache)`
+    ... as XL_Breit without a cache, but memoising the result in the given cache. A value::Float64 is returned.
+
+        THE KEY CARRIES THE ROUTE AND THE FACTOR, which the former global store did not: it was keyed on rank and subshells alone, so a
+        CoulombGaunt() strength and a CoulombBreit(1.) strength for the same four orbitals would have collided. That was latent rather than
+        live, since one matrix build uses a single settings.eeInteractionCI -- but it is exactly the kind of promise this cache no longer
+        needs to make. See InteractionStrength.XLCache.
+"""
+function XL_Breit(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                    eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt}, cache::XLCache)
+    onlyGaunt, factor, quadrature = InteractionStrength.breitRouteOf(eeint)
+    route = onlyGaunt ? :Gaunt : :Breit
+    key   = (route, L, a.subshell, b.subshell, c.subshell, d.subshell, factor, quadrature)
+    haskey(cache.values, key)   &&   return( cache.values[key] )
+    value = InteractionStrength.XL_Breit(L, a, b, c, d, grid, eeint)
+    cache.values[key] = value
+    return( value )
 end
 
 
 """
 `InteractionStrength.XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital; onlyGaunt::Bool=false)`  
-    ... evaluates the combinations and pre-coefficients for the zero-frequency Breit interaction  
-        X^L_Breit (omega=0.; abcd) for given rank L and orbital functions a, b, c and d. A list of coefficients 
-        xcList::Array{XLCoefficient,1} is returned.
+    ... evaluates the combinations and pre-coefficients of the Breit interaction X^L_Breit(abcd) for given rank L and orbital functions a,
+        b, c and d; a list xcList::Array{XLCoefficient,1} is returned.
+
+        THESE COEFFICIENTS ARE FREQUENCY INDEPENDENT and are correct for both cases: the omega dependence enters only through the radial
+        kernels in XL_Breit_densities, not here. The list splits into kind = 'T' (magnetic / GAUNT, nu = L-1, L, L+1) and kind = 'S'
+        (RETARDATION, nu = L+-1); onlyGaunt returns after the 'T' blocks, so that split IS the Gaunt/retardation split.
 """
 function XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital; onlyGaunt::Bool=false)
     xcList = XLCoefficient[]
@@ -600,9 +985,35 @@ function XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::
     lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
     ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
 
-    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
-    if   rem(L,2) == 1    xc = - xc                end 
-    if   abs(xc)  <  1.0e-10    return( xcList )   end
+    # TWO angular prefactors are needed, because the blocks below do not all want the same parity.
+
+    #   xc      = <kappa_a || C^L || kappa_c> <kappa_b || C^L || kappa_d>,  nonzero for l_a+l_c+L EVEN.
+    #             Used by the 'T' blocks at nu = L-1 and nu = L+1 and by the whole 'S' block.
+    #   xcFlip  = the same with the kappa sign flipped on the first argument, nonzero for l_a+l_c+L ODD.
+    #             Used by the 'T' block at nu = L.
+
+    # The nu = L integrand is a.P * c.Q -- LARGE component against SMALL.  The small component of kappa_c
+    # carries lbar_c = l_c +- 1, so the angular factor there is <kappa_a || C^L || -kappa_c> and its parity
+    # condition is the OPPOSITE of the one that governs the other blocks.  CL_reduced_me depends on kappa
+    # only through 2j = 2|kappa|-1, so flipping the sign leaves the VALUE untouched and moves only the
+    # selection rule; xcFlip is therefore exactly the number this code used before 8f0930b.
+
+    # THAT COMMIT (10-Aug-2026) gave CL_reduced_me the parity rule it had genuinely been missing -- correct
+    # in itself, and needed for the Coulomb and multipole call sites -- but here it silently zeroed the
+    # nu = L block: its guard demands l_a+l_c+L odd, which the single shared xc could no longer satisfy.
+    # That block carries the DOMINANT magnetic term, so every Breit and Gaunt number computed between
+    # 10-Aug-2026 and 14-Aug-2026 came out far too small (a factor 3.3 in Gaunt for Cl-like Xe), while the
+    # retardation part, which wants even parity, was untouched.  The test suite did not notice.
+
+    # GRASP2018 keeps the same division of labour differently: its CLRX depends only on |kappa_a|, |kappa_b|
+    # and K, vetoes on the triangle condition alone, and evaluates BOTH parity branches, leaving the parity
+    # vetoes to callers such as rci90/cxk.f90.  Spelling the -kappa out here says the same thing explicitly.
+    xc     = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) *
+             AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    xcFlip = AngularMomentum.CL_reduced_me(Subshell(a.subshell.n, -a.subshell.kappa), L, c.subshell) *
+             AngularMomentum.CL_reduced_me(Subshell(b.subshell.n, -b.subshell.kappa), L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc;   xcFlip = - xcFlip                       end
+    if   abs(xc) < 1.0e-10   &&   abs(xcFlip) < 1.0e-10      return( xcList )  end
 
     # Consider the individual contributions from sum_nu and sum_mu. First, take T^(nu,L)_mu = R^(nu,L)_mu
     nu = L - 1
@@ -626,13 +1037,14 @@ function XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, c, b, a, d, xcc) )   end
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, b, c, d, a, xcc) )   end
     end
-    #
+
     nu = L
 
     if  rem(la+lc+nu,2) == 1   &&   rem(lb+ld+nu,2) == 1   &&   L != 0
+        # The ONLY block that wants odd parity, and hence the only consumer of xcFlip; see the note above.
         wa = - (a.subshell.kappa + c.subshell.kappa) * (b.subshell.kappa + d.subshell.kappa) / (L*(L+1))
         # mu = 1
-        xcc = xc * wa
+        xcc = xcFlip * wa
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, a, b, c, d, xcc) )   end
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, b, a, d, c, xcc) )   end
         # mu = 2
@@ -645,7 +1057,7 @@ function XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, c, b, a, d, xcc) )   end
         if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('T', nu, b, c, d, a, xcc) )   end
     end
-    #
+
     nu = L + 1
 
     if  rem(la+lc+nu,2) == 1   &&   rem(lb+ld+nu,2) == 1   &&   L != 0
@@ -671,41 +1083,47 @@ function XL_Breit_coefficients(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::
     # Return here if onlyGaunt = true
     if   onlyGaunt     return( xcList )     end
 
-    # Add contributions of the S^k_mu integrals
+    # Add contributions of the S^k_mu integrals -- the RETARDATION part, Grant & Pyper's B^(2), their eq (8).
+
+    # Each mu carries the multipole L itself and the bare coefficient xcc; the whole radial kernel is then
+    # W_(L-1,L+1,L) of their equation (6), supplied by XL_Breit_densities.  The eight mu terms form four
+    # TRANSPOSED PAIRS (1<->2, 3<->4, 5<->6, 7<->8), which is exactly the two-term W(1,2) / W(2,1) structure
+    # of equation (8): each partner is supported on one of the two radial orderings.
+
+    # UNTIL 14-Aug-2026 each mu emitted a PAIR of entries instead,
+    #     ('S', L+1, perm, +[L]/2 xcc)  and  ('S', L-1, perm, -[L]/2 xcc),   [L] = 2L+1,
+    # whose sum against the static kernels Ubar_(L+1), Ubar_(L-1) is  -[L]/2 xcc (Ubar_(L-1) - Ubar_(L+1)),
+    # i.e. precisely xcc * W_(L-1,L+1,L) in the limit omega -> 0 of their equations (9)-(10).  That is a
+    # correct static Breit interaction, but it FORECLOSES omega /= 0 in the coefficient list, where no factor
+    # applied later in the radial loop can restore it.  The collapse to a single entry is therefore the whole
+    # of what makes the retardation frequency-dependent; the angular algebra is untouched and needs no extra
+    # prefactor, since the omega -> 0 value above is reproduced by coefficient xcc and nothing else.
     if  rem(la+lc+L-1,2) == 1   &&   rem(lb+ld+L+1,2) == 1
         # mu = 1
         wb =  1 / ( (L+L+1)*(L+L+1) )
         xcc = xc * wb * (c.subshell.kappa - a.subshell.kappa + L) * (d.subshell.kappa - b.subshell.kappa - L - 1)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, b, a, d, c,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, b, a, d, c,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   b, a, d, c,   xcc) )   end
         # mu = 2
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa + L) * (c.subshell.kappa - a.subshell.kappa - L - 1)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, a, b, c, d,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, a, b, c, d,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   a, b, c, d,   xcc) )   end
         # mu = 3
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa + L + 1) * (c.subshell.kappa - a.subshell.kappa - L)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, d, c, b, a,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, d, c, b, a,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   d, c, b, a,   xcc) )   end
         # mu = 4
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa - L) * (c.subshell.kappa - a.subshell.kappa + L + 1)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, c, d, a, b,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, c, d, a, b,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   c, d, a, b,   xcc) )   end
         # mu = 5
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa + L + 1) * (c.subshell.kappa - a.subshell.kappa + L)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, d, a, b, c,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, d, a, b, c,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   d, a, b, c,   xcc) )   end
         # mu = 6
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa - L) * (c.subshell.kappa - a.subshell.kappa - L - 1)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, a, d, c, b,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, a, d, c, b,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   a, d, c, b,   xcc) )   end
         # mu = 7
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa - L - 1) * (c.subshell.kappa - a.subshell.kappa - L)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, b, c, d, a,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, b, c, d, a,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   b, c, d, a,   xcc) )   end
         # mu = 8
         xcc = xc * wb * (d.subshell.kappa - b.subshell.kappa + L) * (c.subshell.kappa - a.subshell.kappa + L + 1)
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L+1, c, b, a, d,   (L+L+1) / 2 * xcc) )   end
-        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L-1, c, b, a, d,  -(L+L+1) / 2 * xcc) )   end
+        if  abs(xcc) > 1.0e-10   push!( xcList, XLCoefficient('S', L,   c, b, a, d,   xcc) )   end
     end
 
     return( xcList )
@@ -713,243 +1131,429 @@ end
 
 
 """
-`InteractionStrength.XL_Breit_densities(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid)`  
-    ... computes the the effective Breit interaction strengths X^L,0_Breit (abcd) for given rank L and a list of 
-        orbital functions a, b, c, d and angular coefficients at the given grid. A value::Float64 is returned. 
-        At present, only the zero-frequency Breit interaction is taken into account.
+`InteractionStrength.XL_Breit_densities(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid; tau::Float64=0.)`
+    ... computes the the effective Breit interaction strengths X^L_Breit (abcd) for given rank L and a list of orbital functions a, b, c, d
+        and angular coefficients at the given grid. A value::Float64 is returned. The argument factor scales the photon wave number omega =
+        factor * |E_a - E_c| / c, so that factor = 0 gives the frequency-independent interaction as the exact limit of the same expressions;
+        see the reference formulation heading this section. A positive tau damps the radial integrand by exp(-tau r_1 - tau r_2), as the
+        DampedSpaceCI Green function approach requires; tau = 0 is the undamped interaction and costs nothing extra.
 """
-function XL_Breit_densities(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid)
+function XL_Breit_densities(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid; tau::Float64=0.)
+    # V is the MULTIPLIER on the static kernel r_<^nu / r_>^(nu+1), so it must equal 1 at omega = 0.
+
+    # REWRITTEN 13-Aug-2026.  It read  -(2nu+1) j_nu(omega r_<) y_nu(omega r_>), which is the frequency-
+    # dependent kernel DIVIDED BY THE STATIC ONE AND BY omega -- it diverged as 1/omega and could never be
+    # switched on (measured: V/static = 1000 at omega = 1e-3, V*omega/static = 1.000001).  Two bare catch
+    # blocks then substituted wx = 1.0 whenever the Bessel evaluation failed, which would have silently
+    # replaced the kernel by its static limit.
+
+    # The identity that fixes it, verified numerically to 3e-15 over nu = 1..3 and omega = 0.005..0.5:
+
+    #     -omega (2nu+1) j_nu(omega r_<) y_nu(omega r_>)  =  phi_nu(omega r_<) psi_nu(omega r_>) *
+    #                                                        [ r_<^nu / r_>^(nu+1) ]
+
+    # with the NORMALISED functions phi and psi of Nuclear-style small-argument form
+
+    #     phi_K(x) = (2K+1)!! j_K(x) / x^K        psi_K(x) = -x^(K+1) y_K(x) / (2K-1)!!
+
+    # both of which tend to 1 as x -> 0.  So the multiplier is simply phi*psi, the static limit is exact by
+    # construction rather than by a special case, and no cancellation is taken between large numbers.
+
+    # This normalisation is the one used by GRASP2018 (rci90/bessel.f90, which stores phi-1 and psi-1); the
+    # formulation was read there and re-derived here, not transcribed.
     function V(nu::Int64, r::Float64, s::Float64, omega::Float64)
-        wx = 1.0;            
-        if      omega <= 0.  
-        elseif  nu < 0       @show "V", nu
-        elseif   r < s   
-            try     wx = -(2*nu+1) * GSL.sf_bessel_jl(nu, omega*r) * GSL.sf_bessel_yl(nu, omega*s)
-            catch
-                    wx = 1.0;  @show  "Va", nu, omega*r, omega*s
-            end
-        else             
-            try     wx = -(2*nu+1) * GSL.sf_bessel_jl(nu, omega*s) * GSL.sf_bessel_yl(nu, omega*r)
-            catch
-                    wx = 1.0;  @show  "Vb", nu, omega*r, omega*s
-            end
-        end
-        return(wx)
-    end
-    #
-    function W(nu::Int64, r::Float64, s::Float64, omega::Float64)
-        wx = 1.0
-        if      omega <= 0.  
-        elseif      nu < 1   ## @show "W", nu
-        elseif   r < s   
-            try     wx = -(2*nu+1) * GSL.sf_bessel_jl(nu-1, omega*r) * GSL.sf_bessel_yl(nu+1, omega*s) +
-                            ( (2*nu+1)/omega )^2 * r^(nu-1) / s^(nu+2)
-            catch
-                    wx = 1.0;  @show  "Wa", nu, omega*r, omega*s
-            end
-        elseif   r > s
-        else             
-            try     wx = -(2*nu+1) * GSL.sf_bessel_jl(nu-1, omega*r) * GSL.sf_bessel_yl(nu+1, omega*s) +
-                            ( (2*nu+1)/omega )^2 * r^(nu-1) / s^(nu+2)
-            catch
-                    wx = 1.0;  @show  "Wb", nu, omega*r, omega*s
-            end
-        end
-        return(wx)
-    end
-    
-    if  grid.meshType == Radial.MeshGL()
-        wa = 0.
-        for  xc  in  xcList  ## [end:end]
-            # Use the minimal extent of any involved orbitals; this need to be improved
-            mtp_ac = min(size(xc.a.P, 1), size(xc.c.P, 1));     mtp_bd = min(size(xc.b.P, 1), size(xc.d.P, 1))
-            omg_ac = factor * abs(xc.a.energy - xc.c.energy);   omg_bd = factor * abs(xc.b.energy - xc.d.energy)
-            for  r = 2:mtp_ac
-                for  s = 2:mtp_bd
-                    if      factor  == 0.    wy = 1.0
-                    elseif  factor  == 1.    wy = 1.05
-                    elseif  xc.kind == 'S'   wy = 1.0
-                                                ## wy = (W(xc.nu, grid.r[r], grid.r[s], omg_ac) + W(xc.nu, grid.r[r], grid.r[s], omg_bd)) / 2.0
-                    elseif  xc.kind == 'T'   wy = (V(xc.nu, grid.r[r], grid.r[s], omg_ac) + V(xc.nu, grid.r[r], grid.r[s], omg_bd)) / 2.0
-                    else    error("stop a")
-                    end
-                    #
-                    wc = xc.coeff * grid.wr[r] * grid.wr[s] 
-                    #
-                    if      s > r   continue
-                    elseif  s == r
-                        wa = wa + wy * wc * (xc.a.P[r] * xc.c.Q[r]) * (grid.r[s]^xc.nu) / (grid.r[r]^(xc.nu+1)) * (xc.b.P[s] * xc.d.Q[s]) / 2.0
-                    else 
-                        wa = wa + wy * wc * (xc.a.P[r] * xc.c.Q[r]) * (grid.r[s]^xc.nu) / (grid.r[r]^(xc.nu+1)) * (xc.b.P[s] * xc.d.Q[s])
-                    end
-                end
-            end
-        end
-        return( wa )
-    else
-        error("stop b")
-    end
-end
-
-
-"""
-`InteractionStrength.matrixL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, primitives::BsplinesN.Primitives)`  
-    ... computes the partly-contracted (effective) Coulomb interaction matrices M^L_Coulomb (abcd) for given rank L and orbital functions 
-        a, b, c and d at the given grid. The matrix M^L is defined for the primitives and contracted over the two orbitals
-        b, d (for a=c) or  b, c (for a=d).  An error message is issued if a != c && a != d. A matrix::Array{Float64,2} is returned.
-"""
-function matrixL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, primitives::BsplinesN.Primitives)
-    grid = primitives.grid;   nsL = primitives.grid.nsL;    nsS = primitives.grid.nsS
-    wm = zeros( nsL+nsS, nsL+nsS )
-    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
-    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
-    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
-    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
-    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
-
-    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
-        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        return( wm )
-    end
-    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
-    if   rem(L,2) == 1    xc = - xc    end 
-
-    if  a.subshell == c.subshell
-        # Direct interaction; contract the full interaction array over the orbitals b and d
-        for  i = 1:nsL
-            for  k = 1:nsL 
-                Ba = primitives.bsplinesL[i].bs;    Bc = primitives.bsplinesL[k].bs
-                wm[i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.P, Bc, d.P, grid) + 
-                            RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.Q, Bc, d.Q, grid)
-            end
-        end
-        for  i = 1:nsS
-            for  k = 1:nsS
-                Ba = primitives.bsplinesS[i].bs;    Bc = primitives.bsplinesS[k].bs
-                wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.P, Bc, d.P, grid) + 
-                                    RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.Q, Bc, d.Q, grid)
-            end
-        end
-    elseif true 
-        println("Skip exchange integrals")
-        return( wm )
-    elseif  a.subshell == d.subshell
-        # Exchange interaction; contract the full interaction array over the orbitals b and c
-        for  i = 1:nsL
-            for  k = 1:nsL 
-                Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesL[k].bs
-                wm[i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.P, c.P, Bd, grid)
-            end
-            for  k = 1:nsS 
-                Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesS[k].bs
-                wm[i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.P, c.Q, Bd, grid)
-            end
-        end
-        for  i = 1:nsS
-            for  k = 1:nsL 
-                Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesL[k].bs
-                wm[nsL+i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.Q, c.P, Bd, grid)
-            end
-            for  k = 1:nsS 
-                Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesS[k].bs
-                wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Ba, b.Q, c.Q, Bd, grid)
-            end
-        end
-    else    error("stop d")
+        if  omega <= 0.  ||  nu < 0     return( 1.0 )    end
+        rSmall = min(r,s);    rLarge = max(r,s)
+        phi, _ = InteractionStrength.besselPhiPsi(nu, omega*rSmall)
+        _, psi = InteractionStrength.besselPhiPsi(nu, omega*rLarge)
+        return( phi * psi )
     end
 
-    return( wm )
-end
+    # W is Grant & Pyper's RETARDATION kernel.  Their paper carries two objects both written W, and it matters
+    # which one is meant here:
 
+    #   * equation (4)  W_nu = ( V_nu - U_nu ) / omega^2  -- an auxiliary of the general equation (5); and
+    #   * equation (6)  W_(nu-1,nu+1,nu)(1,2)             -- the one that actually appears in the B^(2) term
+    #                                                        of their equation (8), and hence the one needed.
 
-"""
-`InteractionStrength.XL_Coulomb_WO(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`  
-    ... computes the the effective Coulomb interaction strengths X^L_Coulomb (abcd) for given rank L and orbital functions 
-        a, b, c and d at the given grid but without optimization. A value::Float64 is returned.
-"""
-function XL_Coulomb_WO(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
-    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
-    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
-    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
-    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
-    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+    # It is equation (6) that this closure implements:
 
-    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
-        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        return( 0. )
-    end
-    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
-    if   rem(L,2) == 1    xc = - xc    end 
-    
-    XL_Coulomb = xc * RadialIntegrals.SlaterRk_2dim_WO(L, a, b, c, d, grid)
-    ##x XL_Coulomb = xc * RadialIntegrals.SlaterRk_new(L, a, b, c, d, grid)
-    return( XL_Coulomb )
-end
+    #     W_(nu-1,nu+1,nu)(1,2) = [nu] omega j_(nu-1)(omega r_1) n_(nu+1)(omega r_2)
+    #                             + ([nu]^2/omega^2) r_1^(nu-1) / r_2^(nu+2)              for r_1 < r_2
+    #                           = [nu] omega n_(nu-1)(omega r_1) j_(nu+1)(omega r_2)      for r_1 > r_2
 
+    # with [nu] = 2nu+1, and W_(nu+1,nu-1,nu)(1,2) = W_(nu-1,nu+1,nu)(2,1).  The two orderings are DIFFERENT
+    # functions, not one function of r_< and r_>, which is why equation (8) carries both of them.
 
-"""
-`InteractionStrength.XL_Coulomb_reset_storage(keep::Bool; printout::Bool=false)`  
-    ... resets the global storage of XL_Coulomb interaction strength; nothing is returned.
-"""
-function XL_Coulomb_reset_storage(keep::Bool; printout::Bool=false)
-    if  keep
-        if printout     println(">> Reset GBL_Storage_XL_Coulomb storage.")     end
-        global GBL_Storage_XL_Coulomb = Dict{String, Float64}()
-    else
-    end
-    return( nothing )      
-end
+    # For r_1 < r_2 this is a DIFFERENCE OF TWO 1/omega^2-DIVERGENT QUANTITIES, which is the whole numerical
+    # difficulty.  Substituting the normalised phi, psi of besselPhiPsi,
+    #     j_(nu-1)(x) = phi_(nu-1)(x) x^(nu-1)/(2nu-1)!!      n_(nu+1)(x) = -psi_(nu+1)(x) (2nu+1)!!/x^(nu+2)
+    # the first term becomes exactly -([nu]^2/omega^2) phi psi r_1^(nu-1)/r_2^(nu+2), so the divergence
+    # cancels ALGEBRAICALLY against the second and what remains is
 
+    #     W = -([nu]^2/omega^2) (r_1^(nu-1)/r_2^(nu+2)) (a + b + a*b),   a = phi_(nu-1)-1,  b = psi_(nu+1)-1
 
-"""
-`InteractionStrength.XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid; keep::Bool=false)`  
-    ... computes the the effective Coulomb interaction strengths X^L_Coulomb (abcd) for given rank L and orbital functions 
-        a, b, c and d at the given grid. For keep=true, the procedure looks up the (global) directory GBL_Storage_XL_Coulomb
-        and returns the corresponding value without re-calculation of the interaction strength; it also 'stores' the calculated
-        value if not yet included. For keep=false, the interaction strength is always computed on-fly. A value::Float64 is 
-        returned.
-"""
-function XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid; keep::Bool=false)
-    global GBL_Storage_XL_Coulomb
-    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
-    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
-    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
-    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
-    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+    # in which nothing is subtracted numerically: a and b come straight from their own power series.
+    # For r_1 > r_2 no cancellation arises and the same substitution gives an O(omega^2) expression.
 
-    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
-        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        return( 0. )
-    end
-    
-    # Now distiguish due to the optional argument keep
-    if  keep
-        sa = "XL" * string(L) * " " * string(a.subshell) * string(b.subshell) * string(c.subshell) * string(d.subshell)
-        if haskey(GBL_Storage_XL_Coulomb, sa )
-            XL_Coulomb = GBL_Storage_XL_Coulomb[sa]
+    # VERIFIED against Grant's analytic omega -> 0 limit, their equations (9)-(10),
+    #     W_(nu-1,nu+1,nu) -> -(1/2) [nu] ( Ubar_(nu-1) - Ubar_(nu+1) ),   Ubar_k = r_1^k/r_2^(k+1), r_1 < r_2
+    #                      -> 0                                                                     r_1 > r_2
+    # the deviation scaling as O(omega^2): 4.9e-3, 4.9e-5, 4.9e-7 at omega = 0.1, 0.01, 0.001 for nu = 1, and
+    # likewise for nu = 2, 3.  That limit is precisely what the 'S' coefficients of XL_Breit_coefficients
+    # already encode in their +-[nu]/2 weights, so at omega = 0 kernel and coefficients agree by construction.
+
+    # Below omegaFloor the residual roundoff of a and b, amplified by 1/omega^2, exceeds that deviation, so
+    # the analytic limit is returned instead -- the device of GRASP2018's IF (W < EPSI**2) in rci90/bessel.f90.
+
+    # HISTORY.  What stood here before 13-Aug-2026 was equation (6) with the factor omega missing from its
+    # first term and that term's sign reversed, so the cancellation failed outright; measured, neither W,
+    # W*omega nor W*omega^2 converged, and two bare catch blocks then substituted wx = 1.0.  The rewrite of
+    # bd0e9fb replaced it with equation (4) instead, which is a different function -- corrected here.
+    function W(nu::Int64, r1::Float64, r2::Float64, omega::Float64)
+        nu < 1  &&  return( 0.0 )
+        nn = 2nu + 1
+        omegaFloor = 1.0e-4
+        if  r1 < r2
+            if  omega <= omegaFloor
+                return( -0.5 * nn * ( r1^(nu-1) / r2^nu - r1^(nu+1) / r2^(nu+2) ) )
+            end
+            aa = InteractionStrength.besselPhiPsi(nu-1, omega*r1)[1] - 1.0
+            bb = InteractionStrength.besselPhiPsi(nu+1, omega*r2)[2] - 1.0
+            return( -(nn^2 / omega^2) * (r1^(nu-1) / r2^(nu+2)) * (aa + bb + aa*bb) )
         else
-            XL_Coulomb = InteractionStrength.XL_Coulomb(L::Int64, a, b, c, d, grid)
-            ## global GBL_Storage_XL_Coulomb = Base.merge(GBL_Storage_XL_Coulomb, Dict( sa => XL_Coulomb))
-            global GBL_Storage_XL_Coulomb[sa] = XL_Coulomb
+            omega <= omegaFloor  &&  return( 0.0 )
+            psi = InteractionStrength.besselPhiPsi(nu-1, omega*r1)[2]
+            phi = InteractionStrength.besselPhiPsi(nu+1, omega*r2)[1]
+            return( -omega^2 * psi * phi * r2^(nu+1) / ((2nu-1) * (2nu+3) * r1^nu) )
         end
-    else
-        xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
-        if   rem(L,2) == 1    xc = - xc    end 
-        XL_Coulomb = xc * RadialIntegrals.SlaterRk_2dim(L, a, b, c, d, grid)
-        
-        ##x XL_Coulomb = XL_Coulomb* (-1)^( (ja2+jb2+jc2+jd2)/2 )
     end
     
-    return( XL_Coulomb )
+    wa = 0.
+    # HOISTED 04-Sep-2026 (priority item 10).  NOTHING BELOW CHANGES THE ARITHMETIC: every product and division
+    # keeps its operands and its left-to-right order, so the result is BITWISE identical -- verified by dumping
+    # the whole Coulomb+Breit CI matrix before and after and comparing the files with cmp, not by eye.
+    # What moved out of the O(N^2) grid double loop: r^nu and r^(nu+1), each a function of ONE index but raised
+    # to a power at EVERY (r,s) pair; the r-only weight and density factors, re-formed for every s; and the
+    # speed of light, re-read from the defaults once per coefficient.  This is the same shape as the
+    # ul()/SlaterRk_2dim power hoist of 12-Aug-2026, which measured 4.7-9.4x bitwise-identical; that item's
+    # "SlaterRk_2dim was the only N^2 case" note scoped itself to module-RadialIntegrals.jl and never covered
+    # this module.  WHY IT IS WORTH DOING HERE: one XL_Breit was measured at >= 31x one XL_Coulomb, and Breit
+    # is ~36 % of a Coulomb+Breit run, so this kernel is the larger half of every Breit calculation.
+    cLight = Defaults.getDefaults("speed of light: c")
+    for  xc  in  xcList  # [end:end]
+        # Use the minimal extent of any involved orbitals; this need to be improved
+        mtp_ac = min(size(xc.a.P, 1), size(xc.c.P, 1));     mtp_bd = min(size(xc.b.P, 1), size(xc.d.P, 1))
+        # omega is a WAVE NUMBER, not an energy: omega = |E_a - E_c| / c in atomic units, so that omega*r is
+        # the dimensionless phase the spherical Bessel functions require.  The division by c was MISSING here
+        # until 13-Aug-2026, which overstated the phase by a factor c = 137 and would have sampled j_nu*y_nu
+        # in their oscillatory regime instead of the small-argument one where retardation actually lives.
+        # It never affected a published number, because no branch below ever consumed these values.
+        omg_ac = factor * abs(xc.a.energy - xc.c.energy) / cLight
+        omg_bd = factor * abs(xc.b.energy - xc.d.energy) / cLight
+        # Only s <= r contributes: every permutation is emitted together with its TRANSPOSE, and the transposed
+        # partner covers the other radial ordering.  Grant's coordinate 1 is then always the SMALLER radius --
+        # his Ubar_nu(1,2) vanishes for r_1 > r_2, and the static factor here is r_s^nu / r_r^(nu+1) -- so both
+        # kernels are called with grid.r[s] first.  The two frequencies omg_ac, omg_bd coincide when energy is
+        # conserved; their mean is used where it does not, as GRASP2018 likewise works with a single omega.
+        # The two static powers of the 'T' kernel: each depends on ONE index, so each is formed once per index
+        # rather than once per pair.  They are divided in the same order below, so the bits do not move.
+        rsPow = xc.kind == 'T' ? [ grid.r[s]^xc.nu     for s = 1:mtp_bd ] : Float64[]
+        rrPow = xc.kind == 'T' ? [ grid.r[r]^(xc.nu+1) for r = 1:mtp_ac ] : Float64[]
+        for  r = 2:mtp_ac
+            cwr = xc.coeff * grid.wr[r]                 # the s-independent half of wc
+            pqr = xc.a.P[r] * xc.c.Q[r]                 # the s-independent half of the density
+            etr = tau > 0. ? -tau*grid.r[r] : 0.
+            for  s = 2:min(r, mtp_bd)
+                if      xc.kind == 'T'
+                    # Gaunt (magnetic) part: the static kernel Ubar_nu times the frequency factor V_nu -> 1.
+                    wk = ( V(xc.nu, grid.r[s], grid.r[r], omg_ac) + V(xc.nu, grid.r[s], grid.r[r], omg_bd) ) / 2.0 *
+                         rsPow[s] / rrPow[r]
+                elseif  xc.kind == 'S'
+                    # Retardation: W_(L-1,L+1,L) is the COMPLETE kernel, not a factor multiplying Ubar_nu.
+                    wk = ( W(xc.nu, grid.r[s], grid.r[r], omg_ac) + W(xc.nu, grid.r[s], grid.r[r], omg_bd) ) / 2.0
+                else    error("stop a")
+                end
+
+                wc = cwr * grid.wr[s]
+                if  s == r      wc = wc / 2.0                                          end
+                if  tau > 0.    wc = wc * exp( etr - tau*grid.r[s] )                    end
+                wa = wa + wc * wk * pqr * (xc.b.P[s] * xc.d.Q[s])
+            end
+        end
+    end
+    return( wa )
 end
 
 
 """
-`InteractionStrength.XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::BsplinesN.Primitives)`  
-    ... computes the (direct) Coulomb interaction strengths X^L_Coulomb (.b.d) for given rank L and orbital functions
-        as well as the given primitives. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+`InteractionStrength.XL_Breit_densitiesSwept(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid; tau::Float64=0.)`
+    ... the same integral as XL_Breit_densities, accumulated in ONE PASS over the grid instead of a full double sum.
+        A value::Float64 is returned. Selected by CoulombBreit(factor, :swept); :direct keeps the other form.
+
+        WHY THIS IS POSSIBLE AT ALL, and it is the only idea in the function: EVERY Breit kernel factorises into a
+        function of r_< times a function of r_>, so the inner integral over s <= r is a RUNNING SUM and need not be
+        redone for each r. Term by term, with s the smaller radius:
+          'T' (Gaunt)   V_nu(r_s,r_r) Ubar_nu  =  [phi_nu(omega r_s) r_s^nu] * [psi_nu(omega r_r) / r_r^(nu+1)]
+          'S' at omega -> 0   W = -[nu]/2 (Ubar_(nu-1) - Ubar_(nu+1))                       -- TWO such products
+          'S' at omega > 0    W = -([nu]^2/omega^2) r_s^(nu-1) r_r^-(nu+2) (a + b + a b)    -- THREE, since
+                              a depends on r_s alone and b on r_r alone.
+        The cost falls from O(N^2) to O(N) per sub-coefficient. On a 595-point grid with 11.9 sub-coefficients per
+        strength the direct form visits 2.11 million grid points per Breit strength; this one visits some thousands.
+        THE BESSEL FUNCTIONS COME ALONG FOR FREE: the direct form evaluates them per (r,s) PAIR, this one per point,
+        which is the reuse the maintainer asked for on 04-Sep-2026 -- a corollary of separability, not a separate
+        optimisation. (In the STATIC case, factor = 0., neither form evaluates a Bessel function at all.)
+
+        THE DIAGONAL IS NOT PART OF THE SWEEP FOR 'S'. Grant's W is a DIFFERENT function for r_1 = r_2 than for
+        r_1 < r_2 -- the direct form reaches its `else` branch there -- so that single term is added separately,
+        which costs O(N) and keeps the two forms comparable term by term. 'T' has no such split: V is one
+        expression in r_< and r_>, so its diagonal is carried by the sweep with the same halved weight.
+
+        WHAT IT DOES NOT PROMISE: this is NOT bitwise identical to XL_Breit_densities, and cannot be -- the same
+        products are summed in a different order. It is the same integral, and the difference is the floating-point
+        associativity of the sum, not a change of physics. TestFrames.testMethod_BreitInteraction(), section (5), compares the two
+        on real orbitals in both frequency regimes; keep that test, because an unused route rots (see XL_BreitDamped, whose body was
+        `error("stop a")` behind a signature one argument short of its only caller, unnoticed for months).
 """
-function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::BsplinesN.Primitives)
+function XL_Breit_densitiesSwept(xcList::Array{XLCoefficient,1}, factor::Float64, grid::Radial.Grid; tau::Float64=0.)
+    cLight     = Defaults.getDefaults("speed of light: c")
+    omegaFloor = 1.0e-4
+    wa         = 0.
+    # the shortcuts of the direct form's V, kept identical: at omega <= 0 both normalised functions are 1
+    phiOf(nu::Int64, omg::Float64, r::Float64) = omg <= 0. ? 1.0 : InteractionStrength.besselPhiPsi(nu, omg*r)[1]
+    psiOf(nu::Int64, omg::Float64, r::Float64) = omg <= 0. ? 1.0 : InteractionStrength.besselPhiPsi(nu, omg*r)[2]
+
+    # SIX BUFFERS FOR THE WHOLE CALL, not two to six per sub-coefficient (04-Sep-2026).  Measured before the
+    # change: a swept strength allocated 722 kB and spent 99.6 % of itself here, against 0.4 % in the angular
+    # algebra of XL_Breit_coefficients -- so the vectors, not the arithmetic and not the algebra, were the cost.
+    # Only indices 2..mtp are ever written and only those are ever read, so no clearing is needed between
+    # sub-coefficients.  NOT bitwise equal to the allocating form it replaced, and the reason is worth naming
+    # because it is not the buffers: each separable kernel now sums into its own accumulator and is added to
+    # the total once, where before every point was added straight into the running total.  That is a
+    # reassociation of the same terms -- measured at 3e-15 relative on a real basis, against an agreement with
+    # :direct that is unchanged (8.73e-12 worst, sum to 3.7e-13) -- and it is the better-conditioned order.
+    np = grid.NoPoints
+    fr = zeros(np);     fs = zeros(np)
+    uA = zeros(np);     uB = zeros(np);     vA = zeros(np);     vB = zeros(np)
+
+    # one separable kernel u(r_<) * v(r_>): the running sum IS the inner integral over s <= r
+    function sweep!(u::Vector{Float64}, v::Vector{Float64}, coeff::Float64, mtp_ac::Int64, mtp_bd::Int64,
+                    halfDiag::Bool)
+        acc = 0.;   cum = 0.
+        for  r = 2:mtp_ac
+            if  r <= mtp_bd
+                dg    = u[r] * fs[r]
+                cum   = cum + dg
+                inner = halfDiag ? cum - 0.5*dg : cum - dg      # 'T' halves the diagonal, 'S' drops it
+            else
+                inner = cum
+            end
+            acc = acc + coeff * (v[r] * fr[r]) * inner
+        end
+        return( acc )
+    end
+
+    # COLLAPSE FIRST.  Two sub-coefficients that share (kind, nu, a, b, c, d) have the SAME radial integral and
+    # differ only in a scalar, so their coefficients are summed and the sweep is done ONCE.  This is bookkeeping,
+    # not algebra: nothing is approximated and no term is dropped.  Measured on a real basis, 1862 sub-coefficients
+    # over 156 strengths carry only 1116 distinct radial integrals -- 11.94 per strength falls to 7.15, and one
+    # strength collapses 8-fold ((2p_3/2)^4 at L = 1 emits eight entries that are all ('T', nu = 1) on one quadruple).
+    # The list is a dozen entries long, so the quadratic scan costs nothing worth measuring and avoids a Dict per
+    # call.  The ANGULAR cost does not fall -- the terms must still be generated in order to be collapsed -- but
+    # that was measured at ~1 % of a swept strength, so there is nothing there to save.
+    nx   = length(xcList)
+    used = falses(nx)
+    for  i = 1:nx
+        used[i]  &&  continue
+        xc   = xcList[i]
+        cTot = xc.coeff
+        for  j = i+1:nx
+            y = xcList[j]
+            if  !used[j]  &&  y.kind == xc.kind  &&  y.nu == xc.nu  &&
+                y.a === xc.a  &&  y.b === xc.b  &&  y.c === xc.c  &&  y.d === xc.d
+                cTot = cTot + y.coeff;      used[j] = true
+            end
+        end
+        nu     = xc.nu
+        mtp_ac = min(size(xc.a.P, 1), size(xc.c.P, 1));     mtp_bd = min(size(xc.b.P, 1), size(xc.d.P, 1))
+        omg_ac = factor * abs(xc.a.energy - xc.c.energy) / cLight
+        omg_bd = factor * abs(xc.b.energy - xc.d.energy) / cLight
+        xc.kind == 'S'  &&  nu < 1   &&   continue      # W vanishes for nu < 1, exactly as in the direct form
+
+        # the two densities, each carrying its own quadrature weight and, where asked for, its damping factor
+        for  r = 2:mtp_ac   fr[r] = xc.a.P[r] * xc.c.Q[r] * grid.wr[r] * (tau > 0. ? exp(-tau*grid.r[r]) : 1.0)   end
+        for  s = 2:mtp_bd   fs[s] = xc.b.P[s] * xc.d.Q[s] * grid.wr[s] * (tau > 0. ? exp(-tau*grid.r[s]) : 1.0)   end
+
+        for  omg  in  (omg_ac, omg_bd)          # the mean of the two frequencies, as the direct form takes it
+            if      xc.kind == 'T'
+                for  s = 2:mtp_bd   uA[s] = 0.5 * phiOf(nu, omg, grid.r[s]) * grid.r[s]^nu        end
+                for  r = 2:mtp_ac   vA[r] = psiOf(nu, omg, grid.r[r]) / grid.r[r]^(nu+1)          end
+                wa = wa + sweep!(uA, vA, cTot, mtp_ac, mtp_bd, true)
+            elseif  omg <= omegaFloor
+                # W -> -[nu]/2 ( Ubar_(nu-1) - Ubar_(nu+1) ):  TWO separable kernels
+                nn = 2nu + 1
+                for  s = 2:mtp_bd   uA[s] = 0.5 * (-0.5*nn) * grid.r[s]^(nu-1)
+                                    uB[s] = 0.5 * ( 0.5*nn) * grid.r[s]^(nu+1)                    end
+                for  r = 2:mtp_ac   vA[r] = 1.0 / grid.r[r]^nu
+                                    vB[r] = 1.0 / grid.r[r]^(nu+2)                                end
+                wa = wa + sweep!(uA, vA, cTot, mtp_ac, mtp_bd, false)
+                wa = wa + sweep!(uB, vB, cTot, mtp_ac, mtp_bd, false)
+            else
+                # W = -([nu]^2/omg^2) r_s^(nu-1) r_r^-(nu+2) (a + b + a b):  THREE separable kernels
+                nn   = 2nu + 1;     pref = -(nn^2 / omg^2)
+                for  s = 2:mtp_bd
+                    aa    = InteractionStrength.besselPhiPsi(nu-1, omg*grid.r[s])[1] - 1.0
+                    uB[s] = 0.5 * pref * grid.r[s]^(nu-1);      uA[s] = uB[s] * aa
+                end
+                for  r = 2:mtp_ac
+                    bb    = InteractionStrength.besselPhiPsi(nu+1, omg*grid.r[r])[2] - 1.0
+                    vA[r] = 1.0 / grid.r[r]^(nu+2);             vB[r] = vA[r] * bb
+                end
+                wa = wa + sweep!(uA, vA, cTot, mtp_ac, mtp_bd, false)
+                wa = wa + sweep!(uB, vB, cTot, mtp_ac, mtp_bd, false)
+                wa = wa + sweep!(uA, vB, cTot, mtp_ac, mtp_bd, false)
+            end
+        end
+
+        # ... and the 'S' diagonal, where Grant's W is the other of his two expressions
+        if  xc.kind == 'S'
+            for  r = 2:min(mtp_ac, mtp_bd)
+                wk = 0.
+                for  omg  in  (omg_ac, omg_bd)
+                    omg <= omegaFloor   &&   continue
+                    psi = InteractionStrength.besselPhiPsi(nu-1, omg*grid.r[r])[2]
+                    phi = InteractionStrength.besselPhiPsi(nu+1, omg*grid.r[r])[1]
+                    wk  = wk + 0.5 * ( -omg^2 * psi * phi * grid.r[r]^(nu+1) / ((2nu-1) * (2nu+3) * grid.r[r]^nu) )
+                end
+                wk == 0.   &&   continue
+                wa = wa + cTot * 0.5 * wk * fr[r] * fs[r]
+            end
+        end
+    end
+
+    return( wa )
+end
+
+
+"""
+`InteractionStrength.XL_BreitDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                                    eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})`
+    ... computes the effective Breit interaction strength X^L_Breit (abcd) for given rank L and orbital functions a, b, c and d at the given
+        grid, with the radial integrand damped by exp(-tau r_1 - tau r_2) as the DampedSpaceCI Green function approach requires. A
+        value::Float64 is returned. This is XL_Breit with that one factor added, so it follows the same gauge, the same frequency dependence
+        and the same coefficients; see XL_Breit and the reference formulation heading this section.
+
+        UNTIL 14-Aug-2026 the body of this function was `error("stop a")`, and its signature took SEVEN arguments while its only caller --
+        the Breit branch of Basics.computeMultipletForGreenApproach for AtomicState.DampedSpaceCI -- passed EIGHT. The path therefore raised
+        a MethodError before it could even reach the stub. It had never been noticed because every use of DampedSpaceCI in the examples and
+        in the suite selects a Coulomb-only e-e interaction, so that branch was never taken.
+"""
+function XL_BreitDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                        eeint::Union{BreitInteraction, CoulombBreit, CoulombGaunt})
+    ja2 = Basics.subshell_2j(a.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    jc2 = Basics.subshell_2j(c.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||  L == 0
+        return( 0. )
+    end
+
+    onlyGaunt, factor, quadrature = InteractionStrength.breitRouteOf(eeint)
+    InteractionStrength.checkFrequencyIsMeaningful(factor, a, b, c, d, grid)
+    xcList = XL_Breit_coefficients(L, a, b, c, d, onlyGaunt=onlyGaunt)
+    if  quadrature == :swept    return( XL_Breit_densitiesSwept(xcList, factor, grid, tau=tau) )
+    else                        return( XL_Breit_densities(     xcList, factor, grid, tau=tau) )
+    end
+end
+
+
+"""
+`InteractionStrength.XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                                cache::InteractionStrength.XLCache)`
+    ... as XL_Coulomb without a cache, but memoising the result in the given cache and returning the stored value when the same rank and
+        subshells are asked for again. A value::Float64 is returned. See InteractionStrength.XLCache for why the cache is a parameter rather
+        than a global.
+"""
+function XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid, cache::XLCache)
+    key = (:Coulomb, L, a.subshell, b.subshell, c.subshell, d.subshell, 0., :direct)
+    haskey(cache.values, key)   &&   return( cache.values[key] )
+    value = InteractionStrength.XL_Coulomb(L, a, b, c, d, grid; vkCache=cache.vk)
+    cache.values[key] = value
+    return( value )
+end
+
+
+"""
+`InteractionStrength.XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid;
+                                vkCache::Union{Nothing,Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}}}=nothing)`
+    ... computes the effective Coulomb interaction strength X^L_Coulomb (abcd) for given rank L and orbital functions a, b, c and d at the
+        given grid. A value::Float64 is returned. To memoise the result, use the method that additionally takes an
+        InteractionStrength.XLCache. A vkCache memoises the screened potential inside the integral and leaves its value bit-identical.
+
+        DO NOT BUILD ONE TRIANGLE OF AN SCF OR CI MATRIX FROM THIS FAMILY AND MIRROR IT WITHOUT VERIFYING FIRST. That optimisation was
+        applied to Basics.compute(::CImatrixWithSymmetryJP,...) and to Hamiltonian.setupMatrix, where it was checked empirically and is
+        sound, and it was deliberately NOT extended to the XL_Coulomb family: the symmetry argument LOOKS the same, but this family mixes
+        Subshell and Orbital roles across its methods and its derivation is not the one that was verified. Being plausible by analogy is
+        not the same as having been tested. Anything built on it needs its own bit-identical before/after on a real SCF, not an appeal to
+        the earlier result.
+
+        The two neighbouring cases are already settled and are worth knowing, because they are the reason this one looks safe and is not
+        established: Bsplines.setupLocalMatrix is NOT symmetric and says so in a disabled diagnostic -- the last B-spline breaks it -- and
+        CrystalField.computeInteractionMatrix Hermitizes with the ADJOINT as a guard against residual floating-point asymmetry, since its
+        two triangles are summed independently rather than mirrored.
+"""
+function XL_Coulomb(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid;
+                    vkCache::Union{Nothing,Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}}}=nothing)
+    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
+    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( 0. )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end
+    # The kink-aware quadrature integrates across the r_< / r_> cusp instead of through it. Against the
+    # analytic F^0(1s,1s) = 5Z/8 it is converged already on the coarsest grid tried -- identical to nine
+    # digits over a 10x refinement -- where the plain rule still drifts; on JAC's default exponential grid
+    # the errors are 7.85e-5 against 2.59e-4, and the gap grows with rank as the cusp sharpens. Both forms
+    # satisfy R^k(abcd) = R^k(badc) and agree to 1e-5..2e-4 on direct and cross terms alike.
+
+    # Switching it on moves every approved reference. Almost everywhere the shift is the 1e-4 the integrals
+    # themselves carry; it reaches the percent level only in small splittings between close-lying levels,
+    # where a difference of two large numbers inherits the whole absolute change. Such a splitting is then
+    # not converged in either form, which is a statement about grid and basis rather than about quadrature.
+    XL_Coulomb = xc * (isnothing(vkCache) ? RadialIntegrals.SlaterRkKinkAware(L, a, b, c, d, grid) :
+                                            RadialIntegrals.SlaterRkKinkAware(L, a, b, c, d, grid, vkCache))
+
+
+    return( XL_Coulomb )
+end
+
+
+# THE FULL-LENGTH-ARRAY PATTERN IN THIS METHOD AND THE EXCHANGE ONE BELOW IS DELIBERATE, AND WAS MEASURED.
+# Both materialise each B-spline into an array as long as the grid before integrating, which is what the
+# kink-aware kernels did until 971199c -- there, integrating over each spline's own support instead cut a RAS
+# ladder's allocation from 99.4 to 46.7 GB. The ten instances that remain here are NOT an oversight: the arrays
+# are handed to RadialIntegrals.SlaterRkComponent, whose length acts as the integration bound.
+#
+# PROFILED 15-Sep-2026 AND FOUND NOT WORTH CHANGING, on the two process modules that exercise this path hardest:
+# the Ne K-LL Auger case of example-De.jl branch a, and the F-like Ne+ electron-impact case of example-Dl.jl
+# branch e. XL_Coulomb is 7.9 % of the Auger run and 13.7 % of the impact run, and is ABSENT from both
+# allocation profiles -- under the 30 % bar that governs a speed change here, and nothing on the memory side.
+# Most of the Auger share is the bound-state CI rather than the Auger amplitude.
+#
+# The two runs are otherwise OPPOSITE and neither generalises to the other: the Auger case is 79 % SCF and CI
+# with 1.6 partial waves per line, the impact case 76 % process lines with 35 continuum orbitals per energy.
+# Re-measure on the module at hand before treating either as the cost of "a process module".
+"""
+`InteractionStrength.XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::Bsplines.Primitives)`  
+    ... computes the (direct) Coulomb interaction strengths X^L_Coulomb (.b.d) for given rank L and orbital functions as well as the given
+        primitives. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+"""
+function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::Bsplines.Primitives)
     nsL = primitives.grid.nsL;        nsS = primitives.grid.nsS;    grid = primitives.grid
     wm  = zeros(nsL+nsS, nsL+nsS)
     
@@ -961,7 +1565,9 @@ function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, 
 
     if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
         rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        @warn("stop aa")  ## This should not occur.
+        # The angular coefficients are NOT pre-filtered on this selection rule, so a combination whose
+        # reduced matrix element vanishes does reach here -- XL_Coulomb returns zero for the same reason,
+        # silently. The zero matrix IS the result; it is not an anomaly worth warning about.
         return( wm )
     end
     
@@ -972,26 +1578,26 @@ function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, 
     wm = zeros(nsL+nsS, nsL+nsS)
     for  i = 1:nsL
         for  k = 1:nsL 
-            ## Ba = primitives.bsplinesL[i].bs;    Bc = primitives.bsplinesL[k].bs
+            # Ba = primitives.bsplinesL[i].bs;    Bc = primitives.bsplinesL[k].bs
             Ba = primitives.bsplinesL[i];    Bc = primitives.bsplinesL[k]
             Pa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Pa[j] = Pa[j] + Ba.bs[j+add]   end
             Pc = zeros(Bc.upper);   add = 1 - Bc.lower;   
             for  j = Bc.lower:Bc.upper  Pc[j] = Pc[j] + Bc.bs[j+add]   end
-            wm[i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Pa, b.P, Pc, d.P, grid) + 
-                      RadialIntegrals.SlaterRkComponent_2dim(L, Pa, b.Q, Pc, d.Q, grid)
+            wm[i,k] = RadialIntegrals.SlaterRkComponent(L, Pa, b.P, Pc, d.P, grid) + 
+                      RadialIntegrals.SlaterRkComponent(L, Pa, b.Q, Pc, d.Q, grid)
         end
     end
     for  i = 1:nsS
         for  k = 1:nsS
-            ## Ba = primitives.bsplinesS[i].bs;    Bc = primitives.bsplinesS[k].bs
+            # Ba = primitives.bsplinesS[i].bs;    Bc = primitives.bsplinesS[k].bs
             Ba = primitives.bsplinesS[i];    Bc = primitives.bsplinesS[k]
             Qa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Qa[j] = Qa[j] + Ba.bs[j+add]   end
             Qc = zeros(Bc.upper);   add = 1 - Bc.lower;   
             for  j = Bc.lower:Bc.upper  Qc[j] = Qc[j] + Bc.bs[j+add]   end            
-            wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Qa, b.P, Qc, d.P, grid) + 
-                              RadialIntegrals.SlaterRkComponent_2dim(L, Qa, b.Q, Qc, d.Q, grid)
+            wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent(L, Qa, b.P, Qc, d.P, grid) + 
+                              RadialIntegrals.SlaterRkComponent(L, Qa, b.Q, Qc, d.Q, grid)
         end
     end
     
@@ -1000,11 +1606,11 @@ end
 
 
 """
-`InteractionStrength.XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, primitives::BsplinesN.Primitives)`
-    ... computes the (exchange) Coulomb interaction strengths X^L_Coulomb (.bc.) for given rank L and orbital functions
-        as well as the given primitives. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+`InteractionStrength.XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, primitives::Bsplines.Primitives)`
+    ... computes the (exchange) Coulomb interaction strengths X^L_Coulomb (.bc.) for given rank L and orbital functions as well as the given
+        primitives. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
 """
-function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, primitives::BsplinesN.Primitives)
+function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, primitives::Bsplines.Primitives)
     nsL = primitives.grid.nsL;        nsS = primitives.grid.nsS;    grid = primitives.grid
     wm  = zeros(nsL+nsS, nsL+nsS)
     
@@ -1016,7 +1622,9 @@ function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, 
 
     if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
         rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        @warn("stop ab")  ## This should not occur.
+        # The angular coefficients are NOT pre-filtered on this selection rule, so a combination whose
+        # reduced matrix element vanishes does reach here -- XL_Coulomb returns zero for the same reason,
+        # silently. The zero matrix IS the result; it is not an anomaly worth warning about.
         return( wm )
     end
     
@@ -1026,79 +1634,53 @@ function XL_Coulomb(L::Int64, a::Subshell, b::Orbital, c::Orbital, d::Subshell, 
     # Exchange interaction; contract the full interaction array over the orbitals b and c
     for  i = 1:nsL
         for  k = 1:nsL 
-            ## Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesL[k].bs
+            # Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesL[k].bs
             Ba = primitives.bsplinesL[i];    Bd = primitives.bsplinesL[k]
             Pa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Pa[j] = Pa[j] + Ba.bs[j+add]   end
             Pd = zeros(Bd.upper);   add = 1 - Bd.lower;   
             for  j = Bd.lower:Bd.upper  Pd[j] = Pd[j] + Bd.bs[j+add]   end            
-            wm[i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Pa, b.P, c.P, Pd, grid)
+            wm[i,k] = RadialIntegrals.SlaterRkComponent(L, Pa, b.P, c.P, Pd, grid)
         end
         for  k = 1:nsS 
-            ## Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesS[k].bs
+            # Ba = primitives.bsplinesL[i].bs;    Bd = primitives.bsplinesS[k].bs
             Ba = primitives.bsplinesL[i];    Bd = primitives.bsplinesS[k]
             Pa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Pa[j] = Pa[j] + Ba.bs[j+add]   end
             Qd = zeros(Bd.upper);   add = 1 - Bd.lower;   
             for  j = Bd.lower:Bd.upper  Qd[j] = Qd[j] + Bd.bs[j+add]   end            
-            wm[i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Pa, b.P, c.Q, Qd, grid)
+            wm[i,nsL+k] = RadialIntegrals.SlaterRkComponent(L, Pa, b.P, c.Q, Qd, grid)
         end
     end
     for  i = 1:nsS
         for  k = 1:nsL 
-            ## Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesL[k].bs
+            # Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesL[k].bs
             Ba = primitives.bsplinesS[i];    Bd = primitives.bsplinesL[k]
             Qa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Qa[j] = Qa[j] + Ba.bs[j+add]   end
             Pd = zeros(Bd.upper);   add = 1 - Bd.lower;   
             for  j = Bd.lower:Bd.upper  Pd[j] = Pd[j] + Bd.bs[j+add]   end            
-            wm[nsL+i,k] = RadialIntegrals.SlaterRkComponent_2dim(L, Qa, b.Q, c.P, Pd, grid)
+            wm[nsL+i,k] = RadialIntegrals.SlaterRkComponent(L, Qa, b.Q, c.P, Pd, grid)
         end
         for  k = 1:nsS 
-            ## Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesS[k].bs
+            # Ba = primitives.bsplinesS[i].bs;    Bd = primitives.bsplinesS[k].bs
             Ba = primitives.bsplinesS[i];    Bd = primitives.bsplinesS[k]
             Qa = zeros(Ba.upper);   add = 1 - Ba.lower;   
             for  j = Ba.lower:Ba.upper  Qa[j] = Qa[j] + Ba.bs[j+add]   end
             Qd = zeros(Bd.upper);   add = 1 - Bd.lower;   
             for  j = Bd.lower:Bd.upper  Qd[j] = Qd[j] + Bd.bs[j+add]   end            
-            wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent_2dim(L, Qa, b.Q, c.Q, Qd, grid)
+            wm[nsL+i,nsL+k] = RadialIntegrals.SlaterRkComponent(L, Qa, b.Q, c.Q, Qd, grid)
         end
     end
-    
+
     return( xc * wm )
 end
 
 
 """
-`InteractionStrength.XL_CoulombDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`  
-    ... computes the the effective Coulomb interaction strengths X^L_Coulomb (abcd) for given rank L and orbital functions 
-        a, b, c and d at the given grid. A value::Float64 is returned.
-"""
-function XL_CoulombDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
-    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
-    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
-    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
-    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
-    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
-
-    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
-        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
-        return( 0. )
-    end
-    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
-    if   rem(L,2) == 1    xc = - xc    end 
-    
-    XL_Coulomb = xc * RadialIntegrals.SlaterRk_2dim_Damped(tau::Float64, L, a, b, c, d, grid)
-    ##x XL_Coulomb = xc * RadialIntegrals.SlaterRk_new(L, a, b, c, d, grid)
-    return( XL_Coulomb )
-end
-
-
-"""
 `InteractionStrength.XL_Coulomb_DH(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid, lambda::Float64)`  
-    ... computes the the effective Coulomb-Debye-Hückel interaction strengths X^L_Coulomb_DH (abcd) for given rank L and 
-        orbital functions a, b, c and d at the given grid and for the given screening parameter lambda. A value::Float64 is 
-        returned.
+    ... computes the effective Coulomb-Debye-Hückel interaction strengths X^L_Coulomb_DH (abcd) for given rank L and orbital functions a, b,
+        c and d at the given grid and for the given screening parameter lambda. A value::Float64 is returned.
 """
 function XL_Coulomb_DH(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid, lambda::Float64)
     # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
@@ -1114,96 +1696,546 @@ function XL_Coulomb_DH(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital,
     xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
     if   rem(L,2) == 1    xc = - xc    end 
 
-    XL_Coulomb_DH = xc * RadialIntegrals.SlaterRk_DebyeHueckel_2dim(L, a, b, c, d, grid, lambda)
+    XL_Coulomb_DH = xc * RadialIntegrals.SlaterRkDebyeHueckel(L, a, b, c, d, grid, lambda)
     return( XL_Coulomb_DH )
 end
 
 
 """
+`InteractionStrength.XL_CoulombDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`
+    ... computes the the effective Coulomb interaction strengths X^L_Coulomb (abcd) for given rank L and orbital functions a, b, c and d at
+        the given grid. A value::Float64 is returned.
+"""
+function XL_CoulombDamped(tau::Float64, L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
+    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
+    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( 0. )
+    end
+    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end 
+    
+    XL_Coulomb = xc * RadialIntegrals.SlaterRkDamped(tau::Float64, L, a, b, c, d, grid)
+    return( XL_Coulomb )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`
+    ... computes the same effective Coulomb interaction strength as XL_Coulomb(L, a, b, c, d, grid), including the same triangular-delta
+        veto and angular reduced-matrix-element prefactor xc, but using the kink-aware RadialIntegrals.SlaterRkKinkAware for the underlying
+        radial integral instead of RadialIntegrals.SlaterRk. A value::Float64 is returned. Shared by Hamiltonian.setupMatrixKinkAware (the
+        CI-matrix Coulomb term for ALField/EOLField) and by SelfConsistent.computeTwoElectronV (their Fock matrix). To memoise the result,
+        use the method that additionally takes an InteractionStrength.XLCache -- and see there for why SelfConsistent.computeTwoElectronV
+        must NOT create one.
+"""
+function XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
+    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( 0. )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    return( xc * RadialIntegrals.SlaterRkKinkAware(L, a, b, c, d, grid) )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital,
+        grid::Radial.Grid, vkCache::Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}})`
+    ... as the method without a cache, but passing `vkCache` down to RadialIntegrals.SlaterRkKinkAware so that the
+        screened potential V_L[b,d] -- the expensive part, and a function of only TWO of the four orbitals -- is
+        built once per (L, b, d, extent) instead of once per coefficient. A value::Float64 is returned.
+
+        NOT TO BE CONFUSED WITH THE `XLCache` METHOD ABOVE, WHICH KEYS ON ALL FOUR SUBSHELLS.  That one memoises
+        the finished integral and is right for a caller that meets the same quadruple twice; it is useless where
+        every coefficient carries a unique quintuple, which is what the level-optimised field does -- measured
+        03-Sep-2026 on C-like uranium, 20 083 coefficients with 20 083 distinct quintuples and only 781 distinct
+        (L,b,d) triples, a redundancy of 25.7x that a quadruple key cannot see.  The two caches are
+        complementary, not alternatives.
+
+        THE CACHE IS THE CALLER'S AND IS KEYED ON SUBSHELL LABELS, so it must not outlive the orbitals it was
+        built from: a caller inside an SCF iteration creates a fresh one per evaluation.
+"""
+function XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                              vkCache::Dict{Tuple{Int64,Subshell,Subshell,Int64},Vector{Float64}})
+    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( 0. )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    return( xc * RadialIntegrals.SlaterRkKinkAware(L, a, b, c, d, grid, vkCache) )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital,
+                                          grid::Radial.Grid, cache::InteractionStrength.XLCache)`
+    ... as XL_CoulombKinkAware without a cache, but memoising the result in the given cache. A value::Float64 is returned.
+
+        THE OLD DOCSTRING WARNED IN PROSE about the very thing the cache parameter now settles: caching had to be left off (keep=false) at
+        SelfConsistent.computeTwoElectronV's call site, because that call sits INSIDE the SCF iteration, where the orbitals change from one
+        iteration to the next and a store keyed on subshell labels would hand back an integral computed for an earlier orbital shape. With
+        the cache owned by its caller, that is no longer a rule to remember: a caller inside an SCF iteration simply does not create one.
+        See InteractionStrength.XLCache.
+"""
+function XL_CoulombKinkAware(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid,
+                              cache::XLCache)
+    key = (:CoulombKinkAware, L, a.subshell, b.subshell, c.subshell, d.subshell, 0., :direct)
+    haskey(cache.values, key)   &&   return( cache.values[key] )
+    value = InteractionStrength.XL_CoulombKinkAware(L, a, b, c, d, grid)
+    cache.values[key] = value
+    return( value )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAware(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::Bsplines.Primitives)`
+    ... computes the same (direct) Coulomb interaction strengths X^L_Coulomb (.b.d) as
+        XL_Coulomb(L,a::Subshell,b::Orbital,c::Subshell,d::Orbital,primitives), for given rank L and orbital functions as well as the given
+        primitives, but using the kink-aware screened-potential construction (RadialIntegrals.buildScreenedPotential) instead of
+        RadialIntegrals.SlaterRkComponent's naive tensor-product double sum. The screened potential V_L(r), which depends only on the fixed
+        orbital pair (b,d), is built ONCE (adaptive quadrature) and then reused cheaply -- via the existing grid quadrature weights, since
+        V_L(r) is smooth once built -- for every B-spline pair (i,k) of the L- and S-block. Isolated from XL_Coulomb; shared by the
+        ALField/EOLField code lines, cf. SelfConsistent.computeTwoElectronV. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+"""
+function XL_CoulombKinkAware(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital, primitives::Bsplines.Primitives)
+    nsL = primitives.grid.nsL;        nsS = primitives.grid.nsS;    grid = primitives.grid
+    wm  = zeros(nsL+nsS, nsL+nsS)
+
+    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
+    la = Basics.subshell_l(a);             ja2 = Basics.subshell_2j(a)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c);             jc2 = Basics.subshell_2j(c)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        # The angular coefficients are NOT pre-filtered on this selection rule, so a combination whose
+        # reduced matrix element vanishes does reach here -- XL_Coulomb returns zero for the same reason,
+        # silently. The zero matrix IS the result; it is not an anomaly worth warning about.
+        return( wm )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a, L, c) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    wm = InteractionStrength.XL_CoulombKinkAwareKernel(L, b, d, primitives)
+
+    return( xc * wm )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAware(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital,
+                            primitives::Bsplines.Primitives, kernelCache::Dict{Tuple{Int64,Subshell,Subshell},Array{Float64,2}})`
+    ... as the method without a cache, but taking the subshell-independent matrix from kernelCache and computing it only when it is not
+        there; a (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+
+        THE CACHE IS VALID ONLY WHILE THE ORBITALS ARE FIXED, which for the average-level field means WITHIN ONE SWEEP:
+        `solveAverageLevelField` hands `computeFockMatrix` the old bVectors and reassigns them only at the end of an iteration, so the
+        partner orbitals do not move during a sweep. A cache carried across iterations would silently serve stale matrices, so the caller
+        must supply a fresh one each iteration. The key carries both orbital subshells, since the kernel depends on the pair (b,d) in
+        general even though the direct branch always calls it with b = d.
+"""
+function XL_CoulombKinkAware(L::Int64, a::Subshell, b::Orbital, c::Subshell, d::Orbital,
+                             primitives::Bsplines.Primitives,
+                             kernelCache::Dict{Tuple{Int64,Subshell,Subshell},Array{Float64,2}})
+    nsL = primitives.grid.nsL;        nsS = primitives.grid.nsS
+
+    la = Basics.subshell_l(a);             ja2 = Basics.subshell_2j(a)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c);             jc2 = Basics.subshell_2j(c)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( zeros(nsL+nsS, nsL+nsS) )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a, L, c) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    wm = get!(kernelCache, (L, b.subshell, d.subshell)) do
+             InteractionStrength.XL_CoulombKinkAwareKernel(L, b, d, primitives)
+         end
+
+    return( xc * wm )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombKinkAwareKernel(L::Int64, b::Orbital, d::Orbital, primitives::Bsplines.Primitives)`
+    ... builds the B-spline matrix of the screened potential of the orbital pair (b,d) at rank L, WITHOUT the angular prefactor; a (nsL+nsS)
+        x (nsL+nsS) matrix::Array{Float64,2} is returned.
+
+        This is the whole cost of XL_CoulombKinkAware and it does NOT depend on the subshell being refined -- that subshell enters only
+        through the scalar `xc` applied by the caller. Separating the two is what makes the matrix cacheable across a self-consistency
+        sweep: profiled on W+ [Xe] 4f^14 5d^4 6s, computeFockMatrix is 95% of the average-level SCF time, and the same matrix is rebuilt
+        3.5x (argon) to 9.1x (Th+) per iteration, the redundancy growing with the number of subshells.
+
+        THE EXTRACTION IS ARITHMETICALLY INERT BUT NOT BIT-IDENTICAL, and it is worth knowing why. The source operations and their order are
+        exactly those of the original loop, yet moving the loop into its own function changes the compiler's inlining and floating-point
+        contraction decisions, so results agree only to about 32 ULP -- measured, 7.2e-15 relative on the argon Fock matrices, with the
+        thorium-ion ones unchanged. That is far below the SCF's own convergence, which at the default accuracyScf leaves the orbitals moving
+        by ~4e-4, but it does mean a memoisation of this kernel cannot be verified by demanding identical converged energies: the last
+        digits of such an energy are the tolerance, not the change.
+"""
+function XL_CoulombKinkAwareKernel(L::Int64, b::Orbital, d::Orbital, primitives::Bsplines.Primitives)
+    nsL = primitives.grid.nsL;        nsS = primitives.grid.nsS;    grid = primitives.grid
+    wm  = zeros(nsL+nsS, nsL+nsS)
+
+    # Build the screened potential once for the fixed orbital pair (b,d); reused below for both L- and S-block.
+    # mtpOut is forced to the full grid extent: unlike SlaterRkKinkAware's orbital-orbital use (where the
+    # OTHER factor in the contraction is also naturally truncated to some orbital's own extent), here Vk gets
+    # contracted against B-spline ROW/COLUMN indices that span the FULL basis and can extend well past (b,d)'s
+    # own reach -- leaving mtpOut at its default silently drops that tail and was traced to a real bug (Ne's 1s
+    # orbital coming out measurably too deeply bound from a missing part of its screening by the 2p shell).
+    Vk = RadialIntegrals.buildScreenedPotential(L, b, d, grid; mtpOut=grid.NoPoints)
+
+    # Direct interaction; contract Vk against every B-spline pair of the L- and S-block
+    wm = zeros(nsL+nsS, nsL+nsS)
+    for  i = 1:nsL
+        for  k = 1:nsL
+            Ba = primitives.bsplinesL[i];    Bc = primitives.bsplinesL[k]
+            # A B-SPLINE IS NON-ZERO ONLY ON grid.r[lower:upper], so the product of two is non-zero only on the
+            # INTERSECTION of their supports -- and for most (i,k) that intersection is EMPTY.  Until 15-Sep-2026
+            # this built two full-length arrays per pair and summed over the whole grid, multiplying by zeros
+            # almost everywhere;  measured then, one spline covers 12.5 % of the grid, and those two `zeros`
+            # calls were 26 % of ALL allocation in a RAS layer.  The bounds below make non-overlapping pairs cost
+            # nothing (lo > hi, the loop does not run) and an overlapping pair cost only its own support.
+            lo = max(2, Ba.lower, Bc.lower);    hi = min(Ba.upper, Bc.upper, length(Vk))
+            wa = 0.
+            for  r = lo:hi
+                wa = wa + Ba.bs[r-Ba.lower+1] * Bc.bs[r-Bc.lower+1] * grid.wr[r] * Vk[r]
+            end
+            wm[i,k] = wa
+        end
+    end
+    for  i = 1:nsS
+        for  k = 1:nsS
+            Ba = primitives.bsplinesS[i];    Bc = primitives.bsplinesS[k]
+            lo = max(2, Ba.lower, Bc.lower);    hi = min(Ba.upper, Bc.upper, length(Vk))   ## see the LL block
+            wa = 0.
+            for  r = lo:hi
+                wa = wa + Ba.bs[r-Ba.lower+1] * Bc.bs[r-Bc.lower+1] * grid.wr[r] * Vk[r]
+            end
+            wm[nsL+i,nsL+k] = wa
+        end
+    end
+
+
+    return( wm )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombReference(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)`  
+    ... computes the the effective Coulomb interaction strengths X^L_Coulomb (abcd) for given rank L and orbital functions a, b, c and d at
+        the given grid but without optimization. A value::Float64 is returned.
+"""
+function XL_CoulombReference(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, grid::Radial.Grid)
+    # Test for the triangular-delta conditions and calculate the reduced matrix elements of the C^L tensors
+    la = Basics.subshell_l(a.subshell);    ja2 = Basics.subshell_2j(a.subshell)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d.subshell);    jd2 = Basics.subshell_2j(d.subshell)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||   
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( 0. )
+    end
+    xc = AngularMomentum.CL_reduced_me(a.subshell, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d.subshell)
+    if   rem(L,2) == 1    xc = - xc    end 
+    
+    XL_Coulomb = xc * RadialIntegrals.SlaterRkReference(L, a, b, c, d, grid)
+    return( XL_Coulomb )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombTensor(L::Int64, a::Subshell, b::Orbital, c::Orbital, cVector::Vector{Float64},
+                                            d::Subshell, cacheLL::RadialIntegrals.ScreenedPotentialCache,
+                                            cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                                            cacheSS::RadialIntegrals.ScreenedPotentialCache,
+                                            primitives::Bsplines.Primitives)`
+    ... computes the same (exchange) Coulomb interaction strengths X^L_Coulomb (.bc.) as
+        XL_Coulomb(L,a::Subshell,b::Orbital,c::Orbital,d::Subshell,primitives) / XL_CoulombKinkAware of the same signature, but using
+        PRECOMPUTED RadialIntegrals.ScreenedPotentialCache tensors -- built ONCE, outside the SCF iteration, via
+        RadialIntegrals.buildScreenedPotentialCache for rank L -- instead of any per-call adaptive quadrature. Re-deriving the original
+        (validated) block structure carefully shows that, in each block, the B-spline row index pairs with orbital c's component matching
+        the COLUMN's type (P for an L-column, Q for an S-column), while orbital b's component matching the ROW's type pairs with the column
+        B-spline index. Consequently it is orbital c -- not b -- whose OWN B-spline expansion coefficients (cVector, the B-spline
+        coefficient vector carried alongside the orbital during SCF) are needed, to build, for each row i, a "partial potential" Psi_i(s) =
+        sum_m cVector[m] * Phi_(i,m)(s) as a CHEAP weighted sum of already-cached, already-kink-aware Phi_(i,m) entries (only ~band terms,
+        no quadrature at all); orbital b itself stays a plain tabulated orbital, exactly like the column B-spline, entering only the final
+        cheap grid-quadrature dot product. Three caches are needed because the row/column-type combination can be LL, LS, SL, or SS -- and,
+        unlike the "direct" signature, a single screened potential cannot be shared across the whole (nsL+nsS) x (nsL+nsS) matrix here,
+        since both B-spline indices (row and column) sit on opposite sides of the two-electron kernel. cacheLL and cacheSS are ordinary
+        same-basis caches (bsplinesL, bsplinesL) and (bsplinesS, bsplinesS); cacheLS is the cross-basis cache (bsplinesL, bsplinesS) and is
+        also used, with indices swapped at lookup, for the SL combination -- see RadialIntegrals.buildScreenedPotentialCache. This turns
+        what used to be an expensive per-call adaptive-quadrature computation into one with NO further quadrature at all, for every SCF
+        iteration and every exchange coefficient that shares this rank L, once the caches themselves have been built (see
+        SelfConsistent.solveAverageLevelField for how they get built and cached once per SCF run). Isolated from XL_Coulomb; only used by
+        the average-level (ALField) code line. A (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+"""
+function XL_CoulombTensor(L::Int64, a::Subshell, b::Orbital, c::Orbital, cVector::Vector{Float64}, d::Subshell,
+                                cacheLL::RadialIntegrals.ScreenedPotentialCache,
+                                cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                                cacheSS::RadialIntegrals.ScreenedPotentialCache,
+                                primitives::Bsplines.Primitives)
+    nsL = primitives.grid.nsL;  nsS = primitives.grid.nsS;  grid = primitives.grid
+    wm  = zeros(nsL+nsS, nsL+nsS)
+
+    la = Basics.subshell_l(a);             ja2 = Basics.subshell_2j(a)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d);             jd2 = Basics.subshell_2j(d)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        # The angular coefficients are NOT pre-filtered on this selection rule, so a combination whose
+        # reduced matrix element vanishes does reach here -- XL_Coulomb returns zero for the same reason,
+        # silently. The zero matrix IS the result; it is not an anomaly worth warning about.
+        return( wm )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    if  length(cVector) != nsL+nsS    error("stop a; cVector must hold both L- and S-basis expansion coefficients")   end
+    wm = InteractionStrength.XL_CoulombTensorKernel(L, b, cVector, cacheLL, cacheLS, cacheSS, primitives)
+
+    return( xc * wm )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombTensor(L::Int64, a::Subshell, b::Orbital, c::Orbital, cVector::Vector{Float64}, d::Subshell,
+                            cacheLL::RadialIntegrals.ScreenedPotentialCache, cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                            cacheSS::RadialIntegrals.ScreenedPotentialCache, primitives::Bsplines.Primitives,
+                            kernelCache::Dict{Tuple{Int64,Subshell},Array{Float64,2}})`
+    ... as the method without a kernelCache, but taking the subshell-independent exchange matrix from it and computing it only when absent;
+        a (nsL+nsS) x (nsL+nsS) matrixV::Array{Float64,2} is returned.
+
+        The same lifetime rule applies as for XL_CoulombKinkAware: the cache holds matrices built from the partner ORBITALS, so it is valid
+        within one self-consistency sweep and must be renewed for the next. Keying on the partner subshell alone is sufficient because b and
+        cVector always describe the same partner in this branch.
+"""
+function XL_CoulombTensor(L::Int64, a::Subshell, b::Orbital, c::Orbital, cVector::Vector{Float64}, d::Subshell,
+                          cacheLL::RadialIntegrals.ScreenedPotentialCache,
+                          cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                          cacheSS::RadialIntegrals.ScreenedPotentialCache,
+                          primitives::Bsplines.Primitives,
+                          kernelCache::Dict{Tuple{Int64,Subshell},Array{Float64,2}})
+    nsL = primitives.grid.nsL;  nsS = primitives.grid.nsS
+
+    la = Basics.subshell_l(a);             ja2 = Basics.subshell_2j(a)
+    lb = Basics.subshell_l(b.subshell);    jb2 = Basics.subshell_2j(b.subshell)
+    lc = Basics.subshell_l(c.subshell);    jc2 = Basics.subshell_2j(c.subshell)
+    ld = Basics.subshell_l(d);             jd2 = Basics.subshell_2j(d)
+
+    if  AngularMomentum.triangularDelta(ja2+1,jc2+1,L+L+1) * AngularMomentum.triangularDelta(jb2+1,jd2+1,L+L+1) == 0   ||
+        rem(la+lc+L,2) == 1   ||   rem(lb+ld+L,2) == 1
+        return( zeros(nsL+nsS, nsL+nsS) )
+    end
+
+    xc = AngularMomentum.CL_reduced_me(a, L, c.subshell) * AngularMomentum.CL_reduced_me(b.subshell, L, d)
+    if   rem(L,2) == 1    xc = - xc    end
+
+    if  length(cVector) != nsL+nsS    error("cVector must hold both L- and S-basis expansion coefficients")   end
+
+    wm = get!(kernelCache, (L, b.subshell)) do
+             InteractionStrength.XL_CoulombTensorKernel(L, b, cVector, cacheLL, cacheLS, cacheSS, primitives)
+         end
+
+    return( xc * wm )
+end
+
+
+"""
+`InteractionStrength.XL_CoulombTensorKernel(L::Int64, b::Orbital, cVector::Vector{Float64},
+                            cacheLL::RadialIntegrals.ScreenedPotentialCache, cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                            cacheSS::RadialIntegrals.ScreenedPotentialCache, primitives::Bsplines.Primitives)`
+    ... builds the exchange B-spline matrix for the orbital b and the expansion cVector at rank L, WITHOUT the angular prefactor; a
+        (nsL+nsS) x (nsL+nsS) matrix::Array{Float64,2} is returned.
+
+        As for XL_CoulombKinkAwareKernel, the subshell being refined enters XL_CoulombTensor only through the scalar `xc`, so this matrix
+        depends solely on the rank and the partner orbital and can be reused for every subshell of a sweep. This is the larger of the two
+        hot branches: 58% of the average-level SCF time on W+ against 34% for the direct one.
+"""
+function XL_CoulombTensorKernel(L::Int64, b::Orbital, cVector::Vector{Float64},
+                                cacheLL::RadialIntegrals.ScreenedPotentialCache,
+                                cacheLS::RadialIntegrals.ScreenedPotentialCache,
+                                cacheSS::RadialIntegrals.ScreenedPotentialCache,
+                                primitives::Bsplines.Primitives)
+    nsL = primitives.grid.nsL;  nsS = primitives.grid.nsS;  grid = primitives.grid
+    wm  = zeros(nsL+nsS, nsL+nsS)
+
+    cP = cVector[1:nsL];   cQ = cVector[nsL+1:nsL+nsS]
+
+    # L-block rows: row B-spline "i" from bsplinesL
+    for  i = 1:nsL
+        PsiLL = zeros(grid.NoPoints)   # for L-columns (contracted below against c.P's expansion, cacheLL)
+        for  m = max(1,i-cacheLL.band):min(nsL,i+cacheLL.band)
+            Phi_im = get(cacheLL.Phi, (i,m), nothing)
+            if  isnothing(Phi_im) || cP[m] == 0.   continue   end
+            mtp = min(length(Phi_im), length(PsiLL))
+            for  r = 1:mtp   PsiLL[r] += cP[m] * Phi_im[r]   end
+        end
+        PsiLS = zeros(grid.NoPoints)   # for S-columns (contracted below against c.Q's expansion, cacheLS)
+        for  n = 1:nsS
+            Phi_in = get(cacheLS.Phi, (i,n), nothing)
+            if  isnothing(Phi_in) || cQ[n] == 0.   continue   end
+            mtp = min(length(Phi_in), length(PsiLS))
+            for  r = 1:mtp   PsiLS[r] += cQ[n] * Phi_in[r]   end
+        end
+
+        for  k = 1:nsL
+            # THE SPLINE IS NON-ZERO ONLY ON grid.r[lower:upper], so the integrand is too.  Until 15-Sep-2026
+            # this materialised the spline into a full-length `zeros` array and summed from r = 2 over the whole
+            # grid, multiplying by zeros outside the support -- measured then, one spline covers 12.5 % of the
+            # grid and these four `zeros` calls were 55 % of ALL allocation in a RAS layer.  Reading `Bd.bs`
+            # directly over its own support removes the array and the wasted arithmetic together.
+            Bd = primitives.bsplinesL[k]
+            lo = max(2, Bd.lower);    hi = min(length(PsiLL), length(b.P), Bd.upper)
+            wa = 0.
+            for  s = lo:hi   wa += PsiLL[s] * b.P[s] * Bd.bs[s-Bd.lower+1] * grid.wr[s]   end
+            wm[i,k] = wa
+        end
+        for  k = 1:nsS
+            Bd = primitives.bsplinesS[k]
+            lo = max(2, Bd.lower);    hi = min(length(PsiLS), length(b.P), Bd.upper)
+            wa = 0.
+            for  s = lo:hi   wa += PsiLS[s] * b.P[s] * Bd.bs[s-Bd.lower+1] * grid.wr[s]   end
+            wm[i,nsL+k] = wa
+        end
+    end
+
+    # S-block rows: row B-spline "i" from bsplinesS
+    for  i = 1:nsS
+        PsiSL = zeros(grid.NoPoints)   # for L-columns; cacheLS was built as (bsplinesL, bsplinesS), so the
+        for  m = 1:nsL                 # row (S-basis) index is now the SECOND slot: look up (m,i), not (i,m)
+            Phi_mi = get(cacheLS.Phi, (m,i), nothing)
+            if  isnothing(Phi_mi) || cP[m] == 0.   continue   end
+            mtp = min(length(Phi_mi), length(PsiSL))
+            for  r = 1:mtp   PsiSL[r] += cP[m] * Phi_mi[r]   end
+        end
+        PsiSS = zeros(grid.NoPoints)   # for S-columns (cacheSS)
+        for  n = max(1,i-cacheSS.band):min(nsS,i+cacheSS.band)
+            Phi_in = get(cacheSS.Phi, (i,n), nothing)
+            if  isnothing(Phi_in) || cQ[n] == 0.   continue   end
+            mtp = min(length(Phi_in), length(PsiSS))
+            for  r = 1:mtp   PsiSS[r] += cQ[n] * Phi_in[r]   end
+        end
+
+        for  k = 1:nsL
+            Bd = primitives.bsplinesL[k]
+            lo = max(2, Bd.lower);    hi = min(length(PsiSL), length(b.Q), Bd.upper)
+            wa = 0.
+            for  s = lo:hi   wa += PsiSL[s] * b.Q[s] * Bd.bs[s-Bd.lower+1] * grid.wr[s]   end
+            wm[nsL+i,k] = wa
+        end
+        for  k = 1:nsS
+            Bd = primitives.bsplinesS[k]
+            lo = max(2, Bd.lower);    hi = min(length(PsiSS), length(b.Q), Bd.upper)
+            wa = 0.
+            for  s = lo:hi   wa += PsiSS[s] * b.Q[s] * Bd.bs[s-Bd.lower+1] * grid.wr[s]   end
+            wm[nsL+i,nsL+k] = wa
+        end
+    end
+
+
+    return( wm )
+end
+
+
+"""
 `InteractionStrength.XL_plasma_ionSphere(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, lambda::Float64)`  
-    ... computes the effective interaction strengths X^L_ion-sphere (abcd) for given rank L and orbital functions 
-        a, b, c and d and for the plasma parameter lambda. A value::Float64 is returned.  **Not yet implemented !**
+    ... computes the effective interaction strengths X^L_ion-sphere (abcd) for given rank L and orbital functions a, b, c and d and for the
+        plasma parameter lambda. NOT IMPLEMENTED: it raises, and names the Debye-Hueckel alternative in doing so.
 """
 function XL_plasma_ionSphere(L::Int64, a::Orbital, b::Orbital, c::Orbital, d::Orbital, lambda::Float64)
-    error("Not yet implemented")
+    error("\n\nInteractionStrength.XL_plasma_ionSphere() is NOT IMPLEMENTED.\n\n"                               *
+          "The ion-sphere model screens the electron-electron interaction with a SHARP cutoff at the ion-sphere\n" *
+          "radius, and its Slater-type radial integral has never been written for this code.\n\n"                 *
+          "    The implemented plasma screening is Debye-Hueckel:  InteractionStrength.XL_Coulomb_DH(L, a, b,\n"   *
+          "    c, d, grid, lambda), which builds on RadialIntegrals.SlaterRkDebyeHueckel. Note it takes the\n"     *
+          "    radial grid as an argument, which this routine does not, so it is not a drop-in substitution.\n")
 end
 
 
 """
-`InteractionStrength.X_smsA(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... computes the the effective interaction strengths X^1_sms,A (abcd) for fixed rank 1 and orbital functions 
-        a, b, c and d at the given grid. A value::Float64 is returned.
-"""
-function X_smsA(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
-    wa = AngularMomentum.CL_reduced_me_sms(a.subshell, 1, c.subshell) * 
-            AngularMomentum.CL_reduced_me_sms(b.subshell, 1, d.subshell) *
-            RadialIntegrals.Vinti(a, c, grid) * RadialIntegrals.Vinti(b, d, grid) / 2
-    ## println("**  <$(a.subshell) || Vinti || $(c.subshell)>  = $(RadialIntegrals.Vinti(a, c, grid)) " )
-    ## println("**  <$(b.subshell) || Vinti || $(d.subshell)>  = $(RadialIntegrals.Vinti(b, d, grid)) " )
-    return( wa )
-end
+`InteractionStrength.zeeman_Delta_n1(a::Orbital, b::Orbital, grid::Radial.Grid)`
+    ... computes the <a|| Delta n^(1) ||b> reduced matrix element for the Zeeman-Schwinger contribution to the coupling to an external
+        magnetic field for orbital functions a, b. A value::Float64 is returned.
 
-
-"""
-`InteractionStrength.X_smsB(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)`  
-    ... computes the the effective interaction strengths X^1_sms,B (abcd) for fixed rank 1 and orbital functions 
-        a, b, c and d at the given grid. A value::Float64 is returned.
-"""
-function X_smsB(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
-    ##x println("")
-    ##x @show AngularMomentum.CL_reduced_me_sms(b.subshell, 1, d.subshell) 
-    ##x @show RadialIntegrals.Vinti(b, d, grid)
-    ##x @show RadialIntegrals.isotope_smsB(a, c, nm.Z, grid)
-    wa = - AngularMomentum.CL_reduced_me_sms(b.subshell, 1, d.subshell) * RadialIntegrals.Vinti(b, d, grid) *
-            RadialIntegrals.isotope_smsB(a, c, nm.Z, grid) / 2
-    return( wa )
-end
-
-
-"""
-`InteractionStrength.X_smsC(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)` 
-    ... computes the the effective interaction strengths X^1_sms,C (abcd) for fixed rank 1 and orbital functions 
-        a, b, c and d at the given grid. A value::Float64 is returned.
-"""
-function X_smsC(a::Orbital, b::Orbital, c::Orbital, d::Orbital, nm::Nuclear.Model, grid::Radial.Grid)
-    wa = - AngularMomentum.CL_reduced_me_sms(b.subshell, 1, d.subshell) * 
-            AngularMomentum.CL_reduced_me_sms(a.subshell, 1, c.subshell) * 
-            RadialIntegrals.Vinti(b, d, grid) * RadialIntegrals.isotope_smsC(a, c, nm.Z, grid) / 2
-    return( wa )
-end
-
-
-"""
-`InteractionStrength.zeeman_Delta_n1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| Delta n^(1) ||b> reduced matrix element for the Zeeman-Schwinger contribution to the coupling 
-        to an external magnetic field for orbital functions a, b. A value::Float64 is returned.
+        Note (25-Jul-2026): the prefactor is (g_s-2)/4, not the (g_s-2)/2 of Andersson & Jonsson (2008), CPC, Eq. (26)/(52) as literally
+        printed -- found and fixed after the printed formula gave a Delta N1 contribution to g_J exactly 2x too large, confirmed against two
+        independent references: (i) the standard non-relativistic Lande g_J decomposition for H(2p_1/2) and H(2p_3/2) (different kappa,
+        opposite-sign corrections, both matched after the /4 fix to 5-6 significant figures), and (ii) the paper's own published He 1s2p g_J
+        table (Fig. 10: 1.5011166/1.5011183/0.9999936 for 3P1/3P2/1P1), matched to 5-6 significant figures only after this fix, not before.
+        Likely root cause (plausible, not fully proven): the Sigma operator in Eq. (26) is Pauli-normalized (eigenvalue +/-1), while the
+        physical magnetic-moment operator needs S (eigenvalue +/-1/2) -- a factor-of-2 normalization slip, not a JAC transcription error,
+        since the code faithfully reproduced what Eq. (52) says.
 """
 function zeeman_Delta_n1(a::Orbital, b::Orbital, grid::Radial.Grid)
     ka = a.subshell.kappa
     kb = b.subshell.kappa
 
     rad = RadialIntegrals.rkDiagonal(0, a.P, b.P, grid) * (ka + kb - 1) + RadialIntegrals.rkDiagonal(0, a.Q, b.Q, grid) * (ka + kb + 1)
-    ang = AngularMomentum.CL_reduced_me_rb(Subshell(1, -ka), 1, b.subshell)
+    # the former CL_reduced_me_rb convention: divided by sqrt(2 j + 1) of the FIRST argument, which here is
+    # the SIGN-FLIPPED kappa, i.e. j(-ka) and not j(ka) (10-Aug-2026).
+    ang = AngularMomentum.CL_reduced_me(Subshell(1, -ka), 1, b.subshell) /
+              sqrt( Basics.subshell_2j(Subshell(1, -ka)) + 1 )
 
-    return ( (Defaults.getDefaults("electron g-factor") - 2)/2 * rad * ang )
-end    
+    return ( (Defaults.getDefaults("electron g-factor") - 2)/4 * rad * ang )
+end
 
 
 """
-`InteractionStrength.zeeman_n1(a::Orbital, b::Orbital, grid::Radial.Grid)`  
-    ... computes the <a|| n^(1) ||b> reduced matrix element for the Zeeman coupling to an external magnetic field for 
-        orbital functions a, b. A value::Float64 is returned. 
+`InteractionStrength.zeeman_n1(a::Orbital, b::Orbital, grid::Radial.Grid)`
+    ... computes the <a|| n^(1) ||b> reduced matrix element for the Zeeman coupling to an external magnetic field for orbital functions a,
+        b. A value::Float64 is returned.
+
+        THIS INTEGRAL CARRIES THE WIGNER-ECKART FACTOR ITSELF, and a caller must therefore NOT supply it. The angular part is divided here
+        by sqrt(2 j + 1) -- of the FIRST argument, which at this point is the SIGN-FLIPPED kappa, so j(-ka) rather than j(ka). A rank-1
+        spin-angular coefficient is consequently used BARE against this function, as LandeZeeman.amplitude does with coeff.T, and inserting
+        a further sqrt(2 j_a + 1) at the call site would double it. This is the exception to the convention that the factor sits inside the
+        coefficient; nothing at a call site reveals it, which is why it is stated here.
 """
 function zeeman_n1(a::Orbital, b::Orbital, grid::Radial.Grid)
     ka = a.subshell.kappa
     kb = b.subshell.kappa
 
     rad = RadialIntegrals.rkNonDiagonal(1, a, b, grid)
-    ang = AngularMomentum.CL_reduced_me_rb(Subshell(1, -ka), 1, b.subshell)
+    # the former CL_reduced_me_rb convention: divided by sqrt(2 j + 1) of the FIRST argument, which here is
+    # the SIGN-FLIPPED kappa, i.e. j(-ka) and not j(ka) (10-Aug-2026).
+    ang = AngularMomentum.CL_reduced_me(Subshell(1, -ka), 1, b.subshell) /
+              sqrt( Basics.subshell_2j(Subshell(1, -ka)) + 1 )
 
     return ( -rad * ang/(2 * Defaults.getDefaults("alpha")) * (ka + kb) )
 end
 
 
 end # module
-

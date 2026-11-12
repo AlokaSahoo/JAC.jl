@@ -6,7 +6,7 @@
 """
 module PhotoExcitation
 
-using Printf, ..AngularMomentum, ..Basics,  ..Basics,  ..Defaults, ..ManyElectron, ..Radial, ..PhotoEmission, ..TableStrings
+using Printf, ..AngularMomentum, ..Basics,  ..BiOrthogonal, ..Defaults, ..ManyElectron, ..Radial, ..PhotoEmission, ..Statistical, ..TableStrings
 
 """
 `struct  PhotoExcitation.Settings  <:  AbstractProcessSettings`  ... defines a type for the details and parameters of computing photo-excitation  lines.
@@ -17,7 +17,12 @@ using Printf, ..AngularMomentum, ..Basics,  ..Basics,  ..Defaults, ..ManyElectro
                                                             for given Stokes parameter of the incident plane-wave photons.
     + calcPhotonDm            ::Bool                    ... True, if the photon density matrix of a subsequently emitted fluorescence photon 
                                                             is to be calculated and false otherwise. 
-    + calcTensors             ::Bool                    ... True, if statistical tensors of the excited atom are to be calculated, false otherwise. 
+    + calcTensors             ::Bool                    ... True, if statistical tensors of the excited atom are to be calculated, false otherwise.
+    + calcBiorthogonal        ::Bool                    ... True, if the initial- and final-state multiplets are first
+                                                            brought into a bi-orthogonal representation
+                                                            (`BiOrthogonal.computeTransformation`) before the transition
+                                                            amplitudes are evaluated, and false (the default) if the
+                                                            two multiplets are used as they are.
     + printBefore             ::Bool                    ... True, if all energies and lines are printed before their evaluation.
     + lineSelection           ::LineSelection           ... Specifies the selected levels, if any.
     + photonEnergyShift       ::Float64                 ... An overall energy shift for all photon energies.
@@ -31,8 +36,9 @@ struct Settings  <:  AbstractProcessSettings
     gauges                    ::Array{UseGauge,1}
     calcForStokes             ::Bool
     calcPhotonDm              ::Bool  
-    calcTensors               ::Bool  
-    printBefore               ::Bool 
+    calcTensors               ::Bool
+    calcBiorthogonal          ::Bool
+    printBefore               ::Bool
     lineSelection             ::LineSelection
     photonEnergyShift         ::Float64
     mimimumPhotonEnergy       ::Float64   
@@ -45,15 +51,15 @@ end
 `PhotoExcitation.Settings()`  ... 'empty' constructor for the default values of photo-excitation line computations
 """
 function Settings()
-    Settings(EmMultipole[], UseGauge[], false, false, false, false, LineSelection(), 0., 0., 1.0e6, Basics.ExpStokes())
+    Settings(EmMultipole[], UseGauge[], false, false, false, false, false, LineSelection(), 0., 0., 1.0e6, Basics.ExpStokes())
 end
 
 
 """
 `PhotoExcitation.Settings(set::PhotoExcitation.Settings;`
 
-        multipoles=..,          gauges=..,                  calcForStokes=..,           calcPhotonDm=..,    
-        calcTensors=..,         printBefore=..,             lineSelection=..,    
+        multipoles=..,          gauges=..,                  calcForStokes=..,           calcPhotonDm=..,
+        calcTensors=..,         calcBiorthogonal=..,        printBefore=..,             lineSelection=..,
         photonEnergyShift=..,   mimimumPhotonEnergy=..,     maximumPhotonEnergy=..,     stokes=..)
                     
     ... constructor for modifying the given PhotoExcitation.Settings by 'overwriting' the previously selected parameters.
@@ -61,24 +67,26 @@ end
 function Settings(set::PhotoExcitation.Settings;    
     multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,        gauges::Union{Nothing,Array{UseGauge,1}}=nothing,  
     calcForStokes::Union{Nothing,Bool}=nothing,                     calcPhotonDm::Union{Nothing,Bool}=nothing,    
-    calcTensors::Union{Nothing,Bool}=nothing,                       printBefore::Union{Nothing,Bool}=nothing,  
-    lineSelection::Union{Nothing,LineSelection}=nothing, 
+    calcTensors::Union{Nothing,Bool}=nothing,                       calcBiorthogonal::Union{Nothing,Bool}=nothing,
+    printBefore::Union{Nothing,Bool}=nothing,
+    lineSelection::Union{Nothing,LineSelection}=nothing,
     photonEnergyShift::Union{Nothing,Float64}=nothing,              mimimumPhotonEnergy::Union{Nothing,Float64}=nothing,     
     maximumPhotonEnergy::Union{Nothing,Float64}=nothing,            stokes::Union{Nothing,ExpStokes}=nothing)  
     
-    if  multipoles          == nothing   multipolesx          = set.multipoles              else  multipolesx          = multipoles            end 
-    if  gauges              == nothing   gaugesx              = set.gauges                  else  gaugesx              = gauges                end 
-    if  calcForStokes       == nothing   calcForStokesx       = set.calcForStokes           else  calcForStokesx       = calcForStokes         end 
-    if  calcPhotonDm        == nothing   calcPhotonDmx        = set.calcPhotonDm            else  calcPhotonDmx        = calcPhotonDm          end 
-    if  calcTensors         == nothing   calcTensorsx         = set.calcTensors             else  calcTensorsx         = calcTensors           end 
-    if  printBefore         == nothing   printBeforex         = set.printBefore             else  printBeforex         = printBefore           end 
-    if  lineSelection       == nothing   lineSelectionx       = set.lineSelection           else  lineSelectionx       = lineSelection         end 
-    if  photonEnergyShift   == nothing   photonEnergyShiftx   = set.photonEnergyShift       else  photonEnergyShiftx   = photonEnergyShift     end 
-    if  mimimumPhotonEnergy == nothing   mimimumPhotonEnergyx = set.mimimumPhotonEnergy     else  mimimumPhotonEnergyx = mimimumPhotonEnergy   end 
-    if  maximumPhotonEnergy == nothing   maximumPhotonEnergyx = set.maximumPhotonEnergy     else  maximumPhotonEnergyx = maximumPhotonEnergy   end 
-    if  stokes              == nothing   stokesx              = set.stokes                  else  stokesx              = stokes                end 
+    if  isnothing(multipoles)            multipolesx          = set.multipoles              else  multipolesx          = multipoles            end 
+    if  isnothing(gauges)                gaugesx              = set.gauges                  else  gaugesx              = gauges                end 
+    if  isnothing(calcForStokes)         calcForStokesx       = set.calcForStokes           else  calcForStokesx       = calcForStokes         end 
+    if  isnothing(calcPhotonDm)          calcPhotonDmx        = set.calcPhotonDm            else  calcPhotonDmx        = calcPhotonDm          end 
+    if  isnothing(calcTensors)           calcTensorsx         = set.calcTensors             else  calcTensorsx         = calcTensors           end
+    if  isnothing(calcBiorthogonal)      calcBiorthogonalx    = set.calcBiorthogonal        else  calcBiorthogonalx    = calcBiorthogonal      end
+    if  isnothing(printBefore)           printBeforex         = set.printBefore             else  printBeforex         = printBefore           end
+    if  isnothing(lineSelection)         lineSelectionx       = set.lineSelection           else  lineSelectionx       = lineSelection         end 
+    if  isnothing(photonEnergyShift)     photonEnergyShiftx   = set.photonEnergyShift       else  photonEnergyShiftx   = photonEnergyShift     end 
+    if  isnothing(mimimumPhotonEnergy)   mimimumPhotonEnergyx = set.mimimumPhotonEnergy     else  mimimumPhotonEnergyx = mimimumPhotonEnergy   end 
+    if  isnothing(maximumPhotonEnergy)   maximumPhotonEnergyx = set.maximumPhotonEnergy     else  maximumPhotonEnergyx = maximumPhotonEnergy   end 
+    if  isnothing(stokes)                stokesx              = set.stokes                  else  stokesx              = stokes                end 
     
-    Settings( multipolesx, gaugesx, calcForStokesx, calcPhotonDmx, calcTensorsx, printBeforex, lineSelectionx,
+    Settings( multipolesx, gaugesx, calcForStokesx, calcPhotonDmx, calcTensorsx, calcBiorthogonalx, printBeforex, lineSelectionx,
                 photonEnergyShiftx, mimimumPhotonEnergyx, maximumPhotonEnergyx, stokesx)
 end
 
@@ -90,6 +98,7 @@ function Base.show(io::IO, settings::PhotoExcitation.Settings)
     println(io, "calcForStokes:            $(settings.calcForStokes)  ")
     println(io, "calcPhotonDm:             $(settings.calcPhotonDm)  ")
     println(io, "calcTensors:              $(settings.calcTensors)  ")
+    println(io, "calcBiorthogonal:         $(settings.calcBiorthogonal)  ")
     println(io, "printBefore:              $(settings.printBefore)  ")
     println(io, "lineSelection:            $(settings.lineSelection)  ")
     println(io, "photonEnergyShift:        $(settings.photonEnergyShift)  ")
@@ -111,8 +120,8 @@ end
     + crossSection   ::EmProperty                  ... Total cross section of this line.
     + staTensor      ::Array{TensorComp,1}         ... Array of statistical tensor components rho_kq
     + hasSublines    ::Bool                        ... Determines whether the individual sublines are defined in terms of their 
-                                                        multipolarity, amplitude, or not; cf. PhotoEmission.Channel
-    + channels       ::Array{PhotoEmission.Channel,1}  ... List of radiative (photon) channels
+                                                        multipolarity, amplitude, or not
+    + channels       ::Array{MultipoleAmplitude,1}     ... one entry per multipole, each carrying BOTH gauges
 """
 struct  Line
     initialLevel     ::Level
@@ -122,7 +131,7 @@ struct  Line
     crossSection     ::EmProperty
     staTensor        ::Array{TensorComp,1}
     hasSublines      ::Bool
-    channels         ::Array{PhotoEmission.Channel,1}
+    channels         ::Array{MultipoleAmplitude,1}
 end 
 
 
@@ -131,7 +140,7 @@ end
     ... constructor an photo-excitation line between a specified initial and final level.
 """
 function Line(initialLevel::Level, finalLevel::Level, omega::Float64, crossSection::EmProperty)
-    Line(initialLevel, finalLevel, omega, EmProperty(0., 0.), crossSection, false, PhotoEmission.Channel[])
+    Line(initialLevel, finalLevel, omega, EmProperty(0., 0.), crossSection, false, MultipoleAmplitude[])
 end
 
 
@@ -154,40 +163,47 @@ end
         the amplitudes and properties have now been evaluated.
 """
 function  computeAmplitudesProperties(line::PhotoExcitation.Line, grid::Radial.Grid, settings::PhotoExcitation.Settings; printout::Bool=true)
-    newChannels = PhotoEmission.Channel[];    Ji2 = Basics.twice(line.initialLevel.J);    Jf2 = Basics.twice(line.finalLevel.J)
-    for  channel  in  line.channels
-        amplitude = PhotoEmission.amplitude("absorption", channel.multipole, channel.gauge, line.omega, 
+    newChannels = MultipoleAmplitude[];    Ji2 = Basics.twice(line.initialLevel.J);    Jf2 = Basics.twice(line.finalLevel.J)
+    for  ma  in  line.channels
+        mp = ma.multipole
+        if  string(mp)[1] == 'E'
+            ampC = PhotoEmission.amplitude(Absorption(), mp, Basics.Coulomb,   line.omega,
                                             line.finalLevel, line.initialLevel, grid, printout=printout)
-        push!( newChannels, PhotoEmission.Channel(channel.multipole, channel.gauge, amplitude) )
+            ampB = PhotoEmission.amplitude(Absorption(), mp, Basics.Babushkin, line.omega,
+                                            line.finalLevel, line.initialLevel, grid, printout=printout)
+            amp  = EmPropertyC(ampC, ampB)
+        else
+            ampM = PhotoEmission.amplitude(Absorption(), mp, Basics.Magnetic,  line.omega,
+                                            line.finalLevel, line.initialLevel, grid, printout=printout)
+            amp  = EmPropertyC(ampM)
+        end
+        push!( newChannels, MultipoleAmplitude(mp, amp) )
     end
     # Calculate the absorption oscillator strength
-    oscCoulomb = oscBabushkin = 0.;   omega = line.omega;   alpha = Defaults.getDefaults("alpha")
-    for  channel  in  newChannels
-        ##x wa = line.omega / (Basics.twice(channel.multipole.L) + 1) * (alpha * line.omega)^(2*channel.multipole.L - 2)
-        wa = 8pi * alpha * line.omega / (Ji2 + 1) * (Jf2 + 1) / 2.
-        #x @show  channel
-        if      channel.gauge == Basics.Coulomb     oscCoulomb   = oscCoulomb    +  channel.amplitude * conj(channel.amplitude) * wa
-        elseif  channel.gauge == Basics.Babushkin   oscBabushkin = oscBabushkin  +  channel.amplitude * conj(channel.amplitude) * wa
-        elseif  channel.gauge == Basics.Magnetic    oscBabushkin = oscBabushkin  +  channel.amplitude * conj(channel.amplitude) * wa
-                                                    oscCoulomb   = oscCoulomb    +  channel.amplitude * conj(channel.amplitude) * wa
-        else    error("stop a")
-        end
+    ## The three-way gauge branch is gone: abs2 of an EmPropertyC is an EmProperty, and a magnetic amplitude
+    ## has equal components, so it enters BOTH sums by itself -- which is exactly what the Magnetic branch
+    ## used to say in two lines.
+    osc = EmProperty(0., 0.);   omega = line.omega;   alpha = Defaults.getDefaults("alpha")
+    for  ma  in  newChannels
+        wa  = 8pi * alpha * line.omega / (Ji2 + 1) * (Jf2 + 1) / 2.
+        osc = osc + wa * abs2(ma.amplitude)
     end
-    # Calculate the crossSection and stastistical tensors if requested
-    csCoulomb = csBabushkin = 0.;   
-    for  channel  in  newChannels
-        if      channel.gauge == Basics.Coulomb     csCoulomb   = csCoulomb    +  channel.amplitude * conj(channel.amplitude)
-        elseif  channel.gauge == Basics.Babushkin   csBabushkin = csBabushkin  +  channel.amplitude * conj(channel.amplitude)
-        elseif  channel.gauge == Basics.Magnetic    csBabushkin = csBabushkin  +  channel.amplitude * conj(channel.amplitude)
-                                                    csCoulomb   = csCoulomb    +  channel.amplitude * conj(channel.amplitude)
-        else    error("stop b")
-        end
-    end
-    oscFactor    = (Ji2 + 1) / (Jf2 + 1) / 2. * Defaults.getDefaults("speed of light: c")^3 / line.omega^2
-    ## oscFactor    = oscFactor / (Jf2 + 1)                                                            ## Schippers (Oct. 2023)
-    csFactor     = 2 * pi^3 * Defaults.getDefaults("alpha") / (line.omega * (Ji2 + 1)) ## / (Jf2 + 1)  ## Schippers (Oct. 2023)
+    oscCoulomb = osc.Coulomb;    oscBabushkin = osc.Babushkin
+    ## The absorption oscillator strength must carry the statistical weight 1/(2J_i+1) of the INITIAL level.
+    ## The factor wa above already supplies (2J_f+1)/(2(2J_i+1)); an earlier oscFactor of
+    ## (Ji2+1)/(Jf2+1)/2 * c^3/omega^2 cancelled both weights again and left f without any J-dependence,
+    ## so that f came out too large by (2J_i+1)/2.  This was found by checking f_ik of this module against
+    ## the Einstein A_ki of PhotoEmission for the same pair of multiplets, where
+    ##     A_ki = 2 alpha^3 omega^2 (g_i/g_k) f_ik
+    ## is an identity: the ratio came out as exactly 2/(2J_i+1) for every line and every J_i.
+    oscFactor    = Defaults.getDefaults("speed of light: c")^3 / (line.omega^2 * (Jf2 + 1))
     oscStrength  = EmProperty(oscFactor*oscCoulomb, oscFactor*oscBabushkin)
-    crossSection = EmProperty(csFactor*csCoulomb, csFactor*csBabushkin)
+    ## The INTEGRATED cross section  int sigma dE = 2 pi^2 alpha f_ik  (in atomic units of area * energy).
+    ## This -- and not a peak value -- is what can be given without a line profile; the former expression
+    ## 2 pi^3 alpha / (omega (2J_i+1)) * sum |A|^2 was a fixed multiple of f_ik with no omega dependence
+    ## at all, and hence no cross section in any measurable sense.
+    csFactor     = 2 * pi^2 * alpha
+    crossSection = EmProperty(csFactor*oscStrength.Coulomb, csFactor*oscStrength.Babushkin)
     staTensor    = TensorComp[]
     if  settings.calcTensors    push!(staTensor, TensorComp(0, 0, 1.))      end
     
@@ -214,8 +230,11 @@ end
     ... to compute the photo-excitation amplitudes and all properties as requested by the given settings. A list 
         of lines::Array{PhotoExcitation.Lines} is returned.
 """
-function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, grid::Radial.Grid, 
+function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, grid::Radial.Grid,
                         settings::PhotoExcitation.Settings; output=true)
+    if  settings.calcBiorthogonal
+        initialMultiplet, finalMultiplet = BiOrthogonal.computeTransformation(initialMultiplet, finalMultiplet, grid)
+    end
     println("")
     printstyled("PhotoExcitation.computeLines(): The computation of the excitation cross sections, etc. starts now ... \n", color=:light_green)
     printstyled("----------------------------------------------------------------------------------------------------- \n", color=:light_green)
@@ -234,7 +253,11 @@ function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, g
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     if  printSummary    PhotoExcitation.displayCrossSections(iostream, newLines, settings)   end
     #
-    if    output    return( lines )
+    ## Return newLines, not lines:  the latter are the lines as set up by determineLines(), i.e. before any
+    ## amplitude has been evaluated, and carry oscStrength = crossSection = EmProperty(0., 0.).  The printed
+    ## tables were always correct, but every caller -- Basics.perform() for an Atomic.Computation with a
+    ## PhotoExc() process among them -- silently received zeros.
+    if    output    return( newLines )
     else            return( nothing )
     end
 end
@@ -251,7 +274,7 @@ end
 function  computeLinesCascade(finalMultiplet::Multiplet, initialMultiplet::Multiplet, grid::Radial.Grid, 
                               settings::PhotoExcitation.Settings, initialLevelSelection::LevelSelection; output::Bool=true, printout::Bool=true) 
     # Define a common subshell list for both multiplets
-    subshellList = Basics.generate("subshells: ordered list for two bases", finalMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
+    subshellList = Basics.generate(OrderedSubshellList(), finalMultiplet.levels[1].basis, initialMultiplet.levels[1].basis)
     Defaults.setDefaults("relativistic subshell list", subshellList; printout=false)
     lines = PhotoExcitation.determineLines(finalMultiplet, initialMultiplet, settings)
     # Display all selected lines before the computations start
@@ -260,16 +283,16 @@ function  computeLinesCascade(finalMultiplet::Multiplet, initialMultiplet::Multi
     newLines = PhotoExcitation.Line[]
     for  (i,line)  in  enumerate(lines)
         if  rem(i,200) == 0    println("> Excitation line $i:")   end
-        ##x @show Basics.selectLevel(line.initialLevel, initialLevelSelection)
         if  !Basics.selectLevel(line.initialLevel, initialLevelSelection)     continue    
-        ## else @show "jump to be calculated";    continue 
         end
         newLine = PhotoExcitation.computeAmplitudesProperties(line, grid, settings, printout=printout) 
         #
         # Don't add this line if it does not contribute to the decay
-        wa = 0.
-        for  ch in newLine.channels   wa = wa + abs(ch.amplitude)^2    end
-        if   wa == 0.    continue    end
+        ## abs2 of an EmPropertyC is an EmProperty, so the sum is gauge-paired; either component answers the
+        ## question "did this line contribute at all".
+        wa = EmProperty(0., 0.)
+        for  ma in newLine.channels   wa = wa + abs2(ma.amplitude)    end
+        if   wa.Coulomb == 0.  &&  wa.Babushkin == 0.    continue    end
         push!( newLines, newLine)
     end
     # Print all results to a summary file, if requested
@@ -283,15 +306,108 @@ end
 
 
 """
+`PhotoExcitation.computeExcitedLevelTensors(kmax::Int64, Ji::AngularJ64, fKey::LevelKey,`
+                            `channels::Array{MultipoleAmplitude,1}, stokes::ExpStokes, gauge::Basics.EmGauge;`
+                            `axis::Basics.AbstractQuantizationAxis=Basics.DefaultQuantizationAxis())`  
+    ... computes the statistical tensors of a level that has been EXCITED FROM AN UNPOLARIZED LEVEL Ji by plane-wave
+        photons whose polarization is given by the Stokes parameters, with the photon beam as the quantization axis.
+        The sublevel density matrix is formed directly from the Wigner-Eckart decomposition,
+
+            rho(M_f,M_f')  =  1/(2J_i+1) SUM_(M_i) SUM_(lambda,lambda') rho^gamma_(lambda lambda')
+                              SUM_(L,L')  <J_i M_i, L lambda | J_f M_f> <J_i M_i, L' lambda' | J_f M_f'>
+                              i^(L-L'+p-p') lambda^p lambda'^p'  A_L conj(A_L')
+
+        and passed to `Statistical.computeTensors`, which owns the definition of rho_kq for the whole code.  Summing over M_i, M_f and M_f' explicitly costs nothing at these angular
+        momenta and avoids a Racah reduction whose 6j phases cannot be checked independently.
+
+        THE PHOTON DENSITY MATRIX FOLLOWS THE CONVENTION ALREADY IN USE in `PhotoIonization`: in the helicity basis
+        rho^gamma_(lambda lambda) = 1 + lambda P3 and rho^gamma_(lambda != lambda') = P1 - i lambda P2, with the factor
+        lambda^p on each amplitude and p = 1 for an electric multipole.  What that means for P1 and P2 was MEASURED,
+        not assumed: linearly polarized light on J_i = 0 -> J_f = 1 must leave a pure M = 0 state about the
+        polarization direction, for which A_20 = -sqrt(2), and rotating the computed tensor there reproduces that to
+        2e-16 at beta = pi/2 with alpha = 0 for P1 and alpha = pi/4 for P2.  So P1 is linear along x and P2 linear at
+        45 degrees.  A `tensors::Array{Statistical.Tensor,1}` is returned.
+
+        IT LIVES HERE RATHER THAN IN `Statistical` because it is the physics of ONE process: the photon density matrix,
+        the multipole phase and the Wigner-Eckart decomposition all belong to photoexcitation, while `Statistical`
+        holds only what any process needs.  `PhotoExcitationFluores` reaches for it across the module boundary, which
+        is the honest arrangement -- excitation followed by fluorescence IS this excitation.
+"""
+function  computeExcitedLevelTensors(kmax::Int64, Ji::AngularJ64, fKey::LevelKey,
+                            channels::Array{MultipoleAmplitude,1}, stokes::ExpStokes, gauge::Basics.EmGauge;
+                            axis::Basics.AbstractQuantizationAxis=Basics.DefaultQuantizationAxis())
+    Jf  = fKey.sym.J
+    Jix = AngularMomentum.oneJ(Ji);               Jfx = AngularMomentum.oneJ(Jf)
+    MiList = AngularMomentum.m_values(Ji);        MfList = AngularMomentum.m_values(Jf)
+    rhoGamma(l::Int64, lp::Int64) = l == lp ? ComplexF64(1.0 + l*stokes.P3, 0.) : ComplexF64(stokes.P1, -l*stokes.P2)
+    amp(ma::MultipoleAmplitude) = gauge == Basics.Babushkin ? ma.amplitude.Babushkin : ma.amplitude.Coulomb
+    wgt = 1.0 / (Basics.twice(Ji) + 1)
+
+    dm = Dict{Tuple{AngularM64,AngularM64},ComplexF64}()
+    for  Mf in MfList
+        for  Mfp in MfList
+            wa = ComplexF64(0.)
+            for  Mi in MiList
+                for  lambda in [-1, 1]
+                    for  lambdap in [-1, 1]
+                        rg = rhoGamma(lambda, lambdap);    if  abs(rg) == 0.    continue    end
+                        for  cha in channels
+                            L = cha.multipole.L;    p = cha.multipole.electric ? 1 : 0
+                            cg1 = AngularMomentum.ClebschGordan(Jix, AngularMomentum.oneM(Mi), 1.0*L, 1.0*lambda,
+                                                                Jfx, AngularMomentum.oneM(Mf))
+                            if  cg1 == 0.    continue    end
+                            for  chp in channels
+                                Lp = chp.multipole.L;    pp = chp.multipole.electric ? 1 : 0
+                                cg2 = AngularMomentum.ClebschGordan(Jix, AngularMomentum.oneM(Mi), 1.0*Lp, 1.0*lambdap,
+                                                                    Jfx, AngularMomentum.oneM(Mfp))
+                                if  cg2 == 0.    continue    end
+                                wa = wa + (1.0im)^(L - Lp + p - pp) * lambda^p * lambdap^pp * cg1 * cg2 * rg * wgt *
+                                          amp(cha) * conj(amp(chp))
+                            end
+                        end
+                    end
+                end
+            end
+            if  abs(wa) > 0.    dm[(Mf,Mfp)] = wa    end
+        end
+    end
+
+    return( Statistical.computeTensors(kmax, dm, fKey; axis=axis) )
+end
+
+
+"""
 `PhotoExcitation.computeStatisticalTensor(k::Int64, q::Int64, line::PhotoExcitation.Line, stokes::ExpStokes)`  
-    ... to compute the statistical tensor (component) rho_{k,q} of the final level for the excitation of unpolarized atoms by 
-        plane-wave photons, whose polarization is described by the given (experimental) Stokes parameters. 
-        A rho_kq::EmProperty is returned.
+    ... computes the statistical tensor component rho_kq of the EXCITED level for the excitation of unpolarized atoms by
+        plane-wave photons whose polarization is given by the (experimental) Stokes parameters; the quantization axis is
+        the photon beam.  A `rho::EmPropertyC` is returned, holding both gauges, and it is COMPLEX: for linearly
+        polarized light the excited ensemble carries coherence between sublevels differing by two units, so the q = +-2
+        components are genuinely complex whenever P2 does not vanish.
+
+        THE WORK IS DONE BY `PhotoExcitation.computeExcitedLevelTensors`, which builds the sublevel density matrix of a
+        level excited from an unpolarized one and hands it to `Statistical`, so that this module and
+        `PhotoExcitationFluores` cannot drift apart in either.
+
+        THE PHOTON DENSITY MATRIX FOLLOWS THE CONVENTION ALREADY IN USE in `PhotoIonization`: in the helicity basis
+        rho^gamma_(lambda lambda) = 1 + lambda P3 and rho^gamma_(lambda != lambda') = P1 - i lambda P2, with the factor
+        lambda^p attached to each amplitude and p = 1 for an electric multipole.  Using the same convention as the one
+        module that already computes this quantity is the point: the two are meant to be comparable.
+
+        WHAT THAT CONVENTION MEANS FOR P1 AND P2 was measured rather than assumed.  Linearly polarized light exciting
+        J_i = 0 -> J_f = 1 must leave a PURE M = 0 state about the polarization direction, for which A_20 = -sqrt(2);
+        rotating the computed tensor there reproduces that number to 2e-16 at beta = pi/2 with alpha = 0 for P1 and
+        alpha = pi/4 for P2.  So P1 is linear polarization along x and P2 linear at 45 degrees, and the geometry
+        forces the check to fail if the photon density matrix, the multipole phase or the rotation is wrong.
 """
 function  computeStatisticalTensor(k::Int64, q::Int64, line::PhotoExcitation.Line, stokes::ExpStokes)
-    if  k == q  ||  k == -q   rhoCoulomb = -3.;    rhoBabushkin = -3.    else   rhoCoulomb = 0.;    rhoBabushkin = 0.    end
-    rho = EmProperty( rhoCoulomb, rhoBabushkin )
-    return( rho )
+    fKey = Basics.LevelKey( LevelSymmetry(line.finalLevel.J, line.finalLevel.parity), line.finalLevel.index,
+                            line.finalLevel.energy, 1.)
+    tsC  = PhotoExcitation.computeExcitedLevelTensors(k, line.initialLevel.J, fKey, line.channels, stokes, Basics.Coulomb)
+    tsB  = PhotoExcitation.computeExcitedLevelTensors(k, line.initialLevel.J, fKey, line.channels, stokes, Basics.Babushkin)
+    rhoC = Statistical.tensorValue(k, q, tsC; withZeros=true)
+    rhoB = Statistical.tensorValue(k, q, tsB; withZeros=true)
+
+    return( EmPropertyC(rhoC, rhoB) )
 end
 
 
@@ -301,22 +417,16 @@ end
         into account the particular settings of for this computation; an Array{PhotoExcitation.Channel,1} is returned.
 """
 function determineChannels(finalLevel::Level, initialLevel::Level, settings::PhotoExcitation.Settings)
-    channels = PhotoEmission.Channel[];   
+    channels = MultipoleAmplitude[];   
     symi = LevelSymmetry(initialLevel.J, initialLevel.parity);    symf = LevelSymmetry(finalLevel.J, finalLevel.parity) 
+    ## The gauge loop and its hasMagnetic flag are gone: one entry per multipole, carrying both gauges.  The
+    ## flag existed only to stop a magnetic multipole being emitted once per requested gauge, and there is no
+    ## gauge loop left for it to guard.
     for  mp in settings.multipoles
         if   AngularMomentum.isAllowedMultipole(symi, mp, symf)
-            hasMagnetic = false
-            for  gauge in settings.gauges
-                # Include further restrictions if appropriate
-                if     string(mp)[1] == 'E'  &&   gauge == Basics.UseCoulomb      push!(channels, PhotoEmission.Channel(mp, Basics.Coulomb,   0.) )
-                elseif string(mp)[1] == 'E'  &&   gauge == Basics.UseBabushkin    push!(channels, PhotoEmission.Channel(mp, Basics.Babushkin, 0.) )  
-                elseif string(mp)[1] == 'M'  &&   !(hasMagnetic)               push!(channels, PhotoEmission.Channel(mp, Basics.Magnetic,  0.) );
-                                                    hasMagnetic = true; 
-                end 
-            end
+            push!(channels, MultipoleAmplitude(mp, EmPropertyC(Complex(0.), Complex(0.))))
         end
     end
-    ##x println("PhotoExcitation.determineChannels-aa: channels = $channels ")
     return( channels )  
 end
 
@@ -450,11 +560,16 @@ function  displayLines(stream::IO, lines::Array{PhotoExcitation.Line,1})
         sa = sa * TableStrings.center(18, TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index); na=2)
         sa = sa * TableStrings.center(18, TableStrings.symmetries_if(isym, fsym); na=4)
         sa = sa * @sprintf("%.8e", Defaults.convertUnits("energy: from atomic", line.omega)) * "    "
+        ## One entry per (multipole, GAUGE): an electric multipole is one amplitude holding two gauges, a
+        ## magnetic one has no gauge freedom.  The gauge belongs to this table, not to the amplitude.
         mpGaugeList = Tuple{Basics.EmMultipole,Basics.EmGauge}[]
-        for  i in 1:length(line.channels)
-            push!( mpGaugeList, (line.channels[i].multipole, line.channels[i].gauge) )
+        for  ma in line.channels
+            if  string(ma.multipole)[1] == 'E'
+                push!( mpGaugeList, (ma.multipole, Basics.Coulomb) );   push!( mpGaugeList, (ma.multipole, Basics.Babushkin) )
+            else
+                push!( mpGaugeList, (ma.multipole, Basics.Magnetic) )
+            end
         end
-        ##x println("PhotoExcitation.diplayLines-ad: mpGaugeList = ", mpGaugeList)
         sa = sa * TableStrings.multipoleGaugeTupels(50, mpGaugeList)
         println(stream, sa )
     end
@@ -475,6 +590,10 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
     nx = 122
     println(stream, " ")
     println(stream, "  Photoexcitation resonance strength as derived from oscillator strength:")
+    println(stream, " ")
+    println(stream, "    f_ik is the PLAIN absorption oscillator strength, i.e. it carries the statistical weight")
+    println(stream, "    1/(2J_i+1) of the initial level;  multiply by (2J_i+1) to obtain the weighted g*f.")
+    println(stream, "    S = int sigma dE = 2 pi^2 alpha f_ik  is the integrated (resonance) strength.")
     println(stream, " ")
     println(stream, "  ", TableStrings.hLine(nx))
     sa = "  ";   sb = "  "
@@ -510,10 +629,16 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
     println(stream, "  ", TableStrings.hLine(nx))
     #
     #
-    # Photoexcitation cross sections from line strength for (completely) linearly-polarized plane-wave photons
-    nx = 103
+    # Photoexcitation integrated cross sections from the oscillator strength
+    nx = 111
     println(stream, " ")
-    println(stream, "  Photoexcitation cross sections for (completely) linearly-polarized plane-wave photons:  ... not yet correct !!")
+    println(stream, "  Photoexcitation integrated cross sections  int sigma dE = 2 pi^2 alpha f_ik :")
+    println(stream, " ")
+    println(stream, "    A bound-bound excitation has no cross section without a line profile, so the INTEGRATED")
+    println(stream, "    cross section is quoted; it is the same quantity as the column S above, in cross-section")
+    println(stream, "    times energy units.  For a Lorentzian resonance of total width Gamma (radiative plus")
+    println(stream, "    Auger) of the upper level, the peak cross section follows as")
+    println(stream, "        sigma_peak = 2 / (pi Gamma) * int sigma dE .")
     println(stream, " ")
     println(stream, "  ", TableStrings.hLine(nx))
     sa = "  ";   sb = "  "
@@ -522,9 +647,9 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
     sa = sa * TableStrings.center(14, "Energy"   ; na=3);               
     sb = sb * TableStrings.center(14,TableStrings.inUnits("energy"); na=3)
     sa = sa * TableStrings.center(10, "Multipoles"; na=2);                        sb = sb * TableStrings.hBlank(14)
-    sa = sa * TableStrings.center(28, "Cou -- cross section -- Bab"; na=0);       
-    sb = sb * TableStrings.center(28, TableStrings.inUnits("cross section")*"       "*
-                                        TableStrings.inUnits("cross section"); na=1)
+    sa = sa * TableStrings.center(36, "Cou -- int sigma dE -- Bab"; na=0);
+    sb = sb * TableStrings.center(36, TableStrings.inUnits("cross section")*" "*TableStrings.inUnits("energy")*"    "*
+                                        TableStrings.inUnits("cross section")*" "*TableStrings.inUnits("energy"); na=1)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
     #   
     for  line in lines
@@ -539,10 +664,10 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
         end
         multipoles = unique(multipoles);   mpString = TableStrings.multipoleList(multipoles) * "          "
         sa = sa * TableStrings.flushleft(11, mpString[1:10];  na=5)
-        sa = sa * @sprintf("%.4e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Coulomb))     * "   "
-        sa = sa * @sprintf("%.4e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Babushkin))   * "    "
-        ##x sa = sa * @sprintf("%.6e", line.anisotropy.Coulomb)      * "    "
-        ##x sa = sa * @sprintf("%.6e", line.anisotropy.Babushkin)    * "    "
+        ## crossSection is an area * energy, so BOTH unit conversions have to be applied
+        wcs = Defaults.convertUnits("energy: from atomic", 1.0)
+        sa = sa * @sprintf("%.4e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Coulomb)   * wcs) * "        "
+        sa = sa * @sprintf("%.4e", Defaults.convertUnits("cross section: from atomic", line.crossSection.Babushkin) * wcs) * "    "
         println(stream, sa)
     end
     println(stream, "  ", TableStrings.hLine(nx))
@@ -551,7 +676,7 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
     if  settings.calcForStokes
         stokes = settings.stokes
         println(stream, " ")
-        println(stream, "  Photoexcitation cross sections for incident plane-wave photons with given $stokes:  ... not yet correct !!")
+        println(stream, "  Photoexcitation cross sections for incident plane-wave photons with given $stokes (still under development):")
         println(stream, " ")
         println(stream, "  ", TableStrings.hLine(nx))
         sa = "  ";   sb = "  "
@@ -586,11 +711,11 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
     #
     #
     if  settings.calcTensors
-        nx = 145
+        nx = 195
         stokes = settings.stokes
         println(stream, " ")
         println(stream, "  Statistical tensors rho_kq  and alignment parameters A_kq for the excitation by incident plane-wave photons")
-        println(stream, "  with given $stokes:  ... not yet correct !!")
+        println(stream, "  with given $stokes:")
         println(stream, " ")
         println(stream, "  ", TableStrings.hLine(nx))
         sa = "  ";   sb = "  "
@@ -600,8 +725,8 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
         sb = sb * TableStrings.center(14,TableStrings.inUnits("energy"); na=3)
         sa = sa * TableStrings.center(10, "Multipoles"; na=1);                        sb = sb * TableStrings.hBlank(12)
         sa = sa * TableStrings.center(12, "     k    q    "; na=0);                   sb = sb * TableStrings.hBlank(14)
-        sa = sa * TableStrings.center(26, "Cou -- rho_kq -- Bab"; na=5);              sb = sb * TableStrings.hBlank(14)   
-        sa = sa * TableStrings.center(26, "Cou --  A_kq  -- Bab"; na=2);              sb = sb * TableStrings.hBlank(14)   
+        sa = sa * TableStrings.center(48, "Cou -- rho_kq (re, im) -- Bab"; na=5);    sb = sb * TableStrings.hBlank(14)   
+        sa = sa * TableStrings.center(48, "Cou --  A_kq  (re, im) -- Bab"; na=2);    sb = sb * TableStrings.hBlank(14)   
         println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
         for  line in lines
             sa  = "";    isym = LevelSymmetry( line.initialLevel.J, line.initialLevel.parity)
@@ -617,17 +742,22 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
             sa = sa * TableStrings.flushleft(11, mpString[1:10];  na=3)
             println(stream, sa);   sc = TableStrings.hBlank( length(sa)-1 )
             tc00   = PhotoExcitation.computeStatisticalTensor(0, 0, line, stokes)
-            for  k = 2:2
+            for  k = 1:2
                 for  q = -k:k
                     tc = PhotoExcitation.computeStatisticalTensor(k, q, line, stokes)
                     if  abs(tc.Coulomb) == abs(tc.Babushkin) == 0.    continue    end
-                    #
-                    aCoulomb = tc.Coulomb / tc00.Coulomb;    aBabushkin = tc.Babushkin / tc00.Babushkin
+                    # The components are complex in general, since linearly polarized light leaves the excited
+                    # ensemble with coherence between sublevels two units apart; both parts are printed.
+                    if  abs(tc00.Coulomb) == 0.  ||  abs(tc00.Babushkin) == 0.
+                        aCoulomb = ComplexF64(0.);   aBabushkin = ComplexF64(0.)
+                    else
+                        aCoulomb = tc.Coulomb / tc00.Coulomb;    aBabushkin = tc.Babushkin / tc00.Babushkin
+                    end
                     sd = sc * TableStrings.level(k) * TableStrings.level(q) * "   "
-                    sd = sd * @sprintf("%.6e", tc.Coulomb)     * "  "
-                    sd = sd * @sprintf("%.6e", tc.Babushkin)   * "    "
-                    sd = sd * @sprintf("%.6e", aCoulomb)       * "  "
-                    sd = sd * @sprintf("%.6e", aBabushkin)     * "    "
+                    sd = sd * @sprintf("%.4e %+.4e", real(tc.Coulomb),   imag(tc.Coulomb))     * "  "
+                    sd = sd * @sprintf("%.4e %+.4e", real(tc.Babushkin), imag(tc.Babushkin))   * "    "
+                    sd = sd * @sprintf("%.4e %+.4e", real(aCoulomb),     imag(aCoulomb))       * "  "
+                    sd = sd * @sprintf("%.4e %+.4e", real(aBabushkin),   imag(aBabushkin))     * "    "
                     println(stream, sd)
                 end
             end
@@ -645,6 +775,18 @@ function  displayCrossSections(stream::IO, lines::Array{PhotoExcitation.Line,1},
         println(stream, "  Not yet implemented !!")
     end
     #
+    # HOW FAR THE TWO GAUGES AGREE, printed beside the results they qualify;  the same measure and thresholds
+    # PhotoEmission applies, through Basics.gaugeConsistency.  The indicator is free here: the quantity is
+    # already held in both gauges, so this only reads what has been computed.
+    rows = Tuple{String,Float64,EmProperty}[]
+    for  line  in  lines
+        label = TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index) * "  " *
+                TableStrings.symmetries_if(LevelSymmetry(line.initialLevel.J, line.initialLevel.parity),
+                                           LevelSymmetry(line.finalLevel.J, line.finalLevel.parity))
+        push!( rows, (label, Defaults.convertUnits("energy: from atomic", line.omega), line.crossSection) )
+    end
+    Basics.displayGaugeConsistency(stream, rows; caption="photoexcitation cross sections")
+
     return( nothing )
 end
 
@@ -660,8 +802,12 @@ function  estimateCrossSection(lines::Array{PhotoExcitation.Line,1}, omega::Floa
     function gaussianDistribution(omega::Float64, Er::Float64, gamma::Float64, gf::Basics.EmProperty)
         # Return zero if outside of interval
         if abs(Er - omega) > 10 * gamma    return(Basics.EmProperty(0.))   end
-        # Account for the factor to bring 109.7617 Mb / eV first back to atomic units
-        factor = 109.7617 * Defaults.convertUnits("cross section: from barn to atomic unit", 1.0e6) / 
+        ## Bring the integrated strength 109.7617 f [Mb eV] back to atomic units.  BOTH conversions have to
+        ## MULTIPLY: the second one divided instead, which inflated every simulated resonance by exactly
+        ## 1/(1 eV in a.u.)^2 = 27.2114^2 = 740.46.  The corrected factor equals 2 pi^2 alpha = 0.1440440 to
+        ## five digits, which is the same constant that underlies the 109.761 Mb eV column of
+        ## PhotoExcitation.displayCrossSections.
+        factor = 109.7617 * Defaults.convertUnits("cross section: from barn to atomic unit", 1.0e6) *
                             Defaults.convertUnits("energy: from eV to atomic", 1.0)
         wa = (Er - omega)^2  +  gamma^2/4
         wa = factor * gamma / (2pi) / wa
@@ -675,7 +821,6 @@ function  estimateCrossSection(lines::Array{PhotoExcitation.Line,1}, omega::Floa
         end  
     end
     
-    ##x if  cs != Basics.EmProperty(0.)   @show  omega, gamma, cs    end
     
     return( cs )
 end

@@ -198,7 +198,7 @@ rOrb_1s = Orbital( Subshell("1s_1/2"), true, true, e1s_1, Orb_1s[1], Orb_1s[2], 
 ```
 
 ```@example hydrogenic
-plot("radial orbitals: both", Orbital[nrOrb_1s, rOrb_1s], grid; N = 230)
+plot(RadialOrbitalsBoth(), Orbital[nrOrb_1s, rOrb_1s], grid; N = 230)
 savefig("hdy-3.svg"); nothing # hide
 ```
 
@@ -235,7 +235,7 @@ If we would like to compute a relativistic orbital by taking into account the ty
 define a nuclear model: 
 
 ```@example hydrogenic
-Nucleus = Model(Z, "Fermi")
+Nucleus = Nuclear.Model(Z, Nuclear.FermiNucleus())
 ```
 
 and set it as an argument value of the radialOrbital-function. By comparing the analytic orbitals which are based on a 
@@ -245,14 +245,14 @@ is well visible for small r.
 
 ```@example hydrogenic
 nuc_orb_1s = HydrogenicIon.radialOrbital(Subshell("1s_1/2"),Nucleus, grid)
-plot("radial orbitals: both", [nuc_orb_1s,rOrb_1s], grid; N = 230)
+plot(RadialOrbitalsBoth(), Orbital[nuc_orb_1s,rOrb_1s], grid; N = 230)
 savefig("hdy-4.svg"); nothing # hide
 ```
 
 ![](hdy-4.svg)
 
 ```@example hydrogenic
-plot("radial orbitals: both", [nuc_orb_1s,rOrb_1s], grid; N = 75)
+plot(RadialOrbitalsBoth(), Orbital[nuc_orb_1s,rOrb_1s], grid; N = 75)
 savefig("hdy-2.svg"); nothing # hide
 ```
 
@@ -273,7 +273,7 @@ we first need to specify a radial grid as well as the nuclear model for the subs
 
 ```@example scfci
 grid     = Radial.Grid(true)
-nucModel = Nuclear.Model(6., "Fermi")
+nucModel = Nuclear.Model(6., Nuclear.FermiNucleus())
 ```
 
 For a *quick* computation of the ground level of C$^{2+}$ ions, we can simply use the **standard settings** as given 
@@ -281,8 +281,7 @@ by `AsfSettings()`:
 
 ```@example scfci
 multiplet     = SelfConsistent.performSCF([Configuration("1s^2 2s^2")], nucModel, grid, AsfSettings());
-Basics.tabulate(stdout, "multiplet: energies", multiplet, Array(1:length(multiplet.levels)) )       # hide
-Basics.tabulate(stdout, "multiplet: energy of each level relative to lowest level", multiplet, Array(1:length(multiplet.levels)) )  # hide
+Basics.tabulate(stdout, multiplet, Array(1:length(multiplet.levels)) )       # hide
 ```
 
 ... and, similarly, also for the 10 lowest levels of C$^{2+}$ ions as they arise from the
@@ -291,8 +290,7 @@ $C^{2+} 1s^2 (2s^2 + 2s2p + 2p^2)$ configurations:
 ```@example scfci
 multiplet     = SelfConsistent.performSCF([Configuration("1s^2 2s^2"), Configuration("1s^2 2s 2p"), Configuration("1s^2 2p^2")], 
                               nucModel, grid, AsfSettings());
-Basics.tabulate(stdout, "multiplet: energies", multiplet, Array(1:length(multiplet.levels)) )   # hide
-Basics.tabulate(stdout, "multiplet: energy of each level relative to lowest level", multiplet, Array(1:length(multiplet.levels)) )  # hide
+Basics.tabulate(stdout, multiplet, Array(1:length(multiplet.levels)) )   # hide
 ```
 
 
@@ -353,8 +351,7 @@ asfSettings = AsfSettings(defaultAsfSettings; generateScf=true, jjLS=LSjjSetting
 multiplet     = SelfConsistent.performSCF([Configuration("1s^2 2s^2"), Configuration("1s^2 2s 2p"), 
                                Configuration("1s^2 2p^2"), Configuration("1s^2 3s^2"), 
                                Configuration("1s^2 3p^2")],  nucModel, grid, asfSettings);
-Basics.tabulate(stdout, "multiplet: energies", multiplet, Array(1:length(multiplet.levels)) )   # hide
-Basics.tabulate(stdout, "multiplet: energy of each level relative to lowest level", multiplet, Array(1:length(multiplet.levels)) )  # hide
+Basics.tabulate(stdout, multiplet, Array(1:length(multiplet.levels)) )   # hide
 ```
 
 We finish this (simple) tutorial by enlarging the configuration basis for the low-lying levels but by restricting 

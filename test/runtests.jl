@@ -1,12 +1,82 @@
 using Test
-using JenaAtomicCalculator, ..Defaults, ..TestFrames
+# TestFrames IS NOT EXPORTED, and is asked for by name here.  Rule 16 of CLAUDE.md opens "TestFrames is never
+# published.  It is the test suite" -- and from 1.0.0 an exported name is a PROMISE to keep that API, which would
+# make renaming a test function a breaking change.  The suite must stay free to change whenever the tests change,
+# so the name is imported explicitly instead.  `using ..TestFrames` stood here and did nothing: the name was in
+# fact arriving from the top-level export list, which is why removing that export broke this file.
+using JenaAtomicCalculator, JenaAtomicCalculator.TestFrames, JenaAtomicCalculator.Defaults
+
+## Clear the .sum files of the PREVIOUS run, before this one starts.  Each test that opens a summary writes a
+## test-<Name>-new.sum here and never removes it, so they accumulate -- 51 had collected by 29-Aug-2026.
+## Deliberately done at the START and not at the end, unlike the zzz-*.jld block below: after a FAILING run those
+## files are the evidence of what the test actually produced, and deleting them on the way out would throw away
+## the one thing worth reading.  Cleaning on the way in gives the same tidiness and keeps the evidence.
+## test/approved/ is a subdirectory and readdir() does not descend, so the 33 approved references are out of reach.
+let  dir = @__DIR__
+    stale = filter(f -> startswith(f, "test-") && endswith(f, "-new.sum"), readdir(dir))
+    for  f in stale   rm(joinpath(dir, f), force = true)   end
+    if  length(stale) > 0
+        printstyled("\nCleared $(length(stale)) .sum file(s) from the previous run in $(dir) \n", color = :cyan)
+    end
+end
 
 @testset "Name" begin
     printstyled("\nPerform tests on the JAC program; this may take a while .... \n", color=:cyan)
-    ## Defaults.Constants.define("print test: open", pwd() * "/runtests.report")
+    # To see WHY a test failed, uncomment the next line: it turns on the per-test diagnostics that every
+    # `if printTest   info(iostream, "...")   end` in TestFrames writes.  They are off by default because a
+    # passing suite has nothing to say.
+    #     Defaults.setDefaults("print test: open", joinpath(@__DIR__, "runtests.report"))
+    # The line that stood here until 29-Aug-2026 read `Defaults.Constants.define(...)`, which is not an API
+    # this package has -- there is no Constants submodule and no `define` -- so uncommenting it would have
+    # RAISED rather than enabled anything.  Nobody found out, because nobody uncommented it; and the 77
+    # diagnostics behind it were themselves calling an `info` that was only defined on 28-Aug-2026.
 
     @testset "JAC methods" begin
-        @test TestFrames.testMethod_Wigner_3j() 
+        @test TestFrames.testMethod_Wigner_3j()
+        @test TestFrames.testMethod_HydrogenicRates()
+        @test TestFrames.testMethod_OrbitalOrthonormality()
+        @test TestFrames.testMethod_BreitInteraction()
+        @test TestFrames.testMethod_Opacities()
+        @test TestFrames.testMethod_SpinAngular()
+        @test TestFrames.testMethod_SpinAngularTwoParticleLS()
+        @test TestFrames.testMethod_DensityAtNucleus()
+        @test TestFrames.testMethod_HyperfinePncFactors()
+        @test TestFrames.testMethod_DocstringPointers()
+        @test TestFrames.testMethod_ThomasReicheKuhn()  ## added 31-Aug-2026; the ONE check here that pins an
+                                                        ## ABSOLUTE scale -- sum f = N, which no wrongly scaled
+                                                        ## spectrum can satisfy
+        @test TestFrames.testModule_AngularMomentum()   ## the four added 28-Aug-2026 are closed-form or
+        @test TestFrames.testModule_HydrogenicIon()     ## identity checks: inverses, limits, orthogonality
+        @test TestFrames.testModule_Nuclear()           ## and exact hydrogenic values -- so none of them
+        @test TestFrames.testModule_RadialIntegrals()   ## can pass on a stale stored reference
+        @test TestFrames.testModule_Bsplines()      ## added 28-Aug-2026; exercises BOTH Rule 12 guards from
+                                                    ## both sides -- they must refuse a 0.05 a.u. box
+        @test TestFrames.testModule_StarkZeeman()   ## added 28-Aug-2026; the centre of gravity cannot move
+        @test TestFrames.testModule_HfsPaschenBack()   ## added 26-Oct-2026; bit-for-bit against StarkZeeman at I=0
+        @test TestFrames.testModule_Hamiltonian()          ## added 28-Aug-2026; trace, the variational bound,
+        @test TestFrames.testModule_InteractionStrength()  ## and two quadratures of one operator
+        @test TestFrames.testModule_SelfConsistent()  ## added 28-Aug-2026; the converged SCF is a FIXED POINT,
+                                                      ## and a frozen subshell does not move at all
+        @test TestFrames.testModule_Radial()        ## the three added 29-Aug-2026 check documented RECIPES and exact
+        @test TestFrames.testModule_LSjj()          ## IDENTITIES -- the grid formulae, the orthogonality of the
+        @test TestFrames.testModule_BiOrthogonal()  ## jj-LS matrices, and Cleft' S Cright = 1
+        @test TestFrames.testModule_BiOrthogonalRotation()  ## added 01-Nov-2026; a closed-subspace
+                                                            ## rotation must preserve every orbital norm
+        @test TestFrames.testModule_Continuum()     ## added 29-Aug-2026; the free wave against its own closed forms --
+                                                    ## P^2 + (P'/q)^2 = 2/(pi q), the centrifugal phase, and five refusals
+        @test TestFrames.testModule_DalgarnoLewis()  ## added 11-Oct-2026; chi against the explicit sum over the
+                                                     ## complete eigenbasis of the SAME matrix -- a pure identity
+        @test TestFrames.testModule_RandomPhase()    ## added 11-Oct-2026; the independent-particle limit adds no
+                                                     ## physics of its own; the couplingEnabled guard fires
+        @test TestFrames.testModule_matrixElementHminusE()  ## added 23-Oct-2026 (item 98); H - E must reproduce
+                                                            ## V^(e-e) EXACTLY on a two-orbital difference and must
+                                                            ## DIFFER on a same-kappa one-orbital one -- both
+                                                            ## populations asserted non-empty, or it tests nothing
+    end
+
+    @testset "JAC structs" begin
+        @test TestFrames.testStructConstructors()
+        @test TestFrames.testMethod_SettingsCopyConstructors()
     end
 
     @testset "JAC evaluations" begin
@@ -24,44 +94,218 @@ using JenaAtomicCalculator, ..Defaults, ..TestFrames
     @testset "JAC representations" begin
         @test TestFrames.testRepresentation_MeanFieldBasis_CiExpansion() 
         @test TestFrames.testRepresentation_RasExpansion() 
+        @test TestFrames.testRepresentation_CoreValencePerturbation() 
         @test TestFrames.testRepresentation_GreenExpansion() 
     end
 
     @testset "JAC amplitudes" begin
         @test TestFrames.testModule_MultipoleMoment() 
-        @test TestFrames.testModule_ParityNonConservation() 
+        @test TestFrames.testModule_WeakInteractionMoment() 
     end
 
     @testset "JAC properties" begin
         @test TestFrames.testModule_Einstein()
-        ## @test TestFrames.testModule_Hfs()   
+        @test  TestFrames.testModule_Hfs()             ## re-enabled 16-Aug-2026; the blocker was calcHfMultiplet, not calcNondiagonal
         @test TestFrames.testModule_LandeZeeman() 
         @test TestFrames.testModule_IsotopeShift()   
         @test TestFrames.testModule_AlphaVariation() 
         @test TestFrames.testModule_FormFactor() 
         @test TestFrames.testModule_DecayYield()
         @test TestFrames.testModule_MultipolePolarizibility()
+        @test TestFrames.testModule_DispersionCoefficient()   ## added 19-Oct-2026; the Casimir-Polder
+                                                              ## prefactors, the closed-form omega integral,
+                                                              ## and C_3(H 1s) = 1/4 from the dipole sum rule
+        @test TestFrames.testModule_ReducedDensityMatrix()  ## added 28-Aug-2026; algebraic invariants of
+                                                            ## rho^(1p), no stored .sum
+        @test TestFrames.testModule_StarkShift()   ## added 29-Aug-2026; the tensor term is traceless in M and the
+                                                   ## shift is exactly quadratic in the field
+        @test TestFrames.testModule_CrystalField()  ## added 29-Aug-2026; Kramers degeneracy, the traceless centre of
+                                                    ## gravity, and a spectrum unmoved by rotating the lattice
+        @test TestFrames.testModule_Statistical()   ## added 31-Aug-2026; rho_00 = trace/sqrt(2J+1) absolutely, the
+                                                    ## Hermiticity rho_(k,-q) = (-1)^q conj(rho_kq), k > 2J vanishes,
+                                                    ## and an isotropic ensemble has no alignment
+        @test TestFrames.testModule_WeakInteractionEnhancement()
+                                                    ## added 31-Aug-2026; the PNC amplitude is purely IMAGINARY and
+                                                    ## connects EQUAL parities, the EDM one is REAL and connects
+                                                    ## OPPOSITE parities with equal J -- exact opposites in both
+        @test TestFrames.testModule_NuclearShielding()
+                                                    ## added 29-Sep-2026; the angular normalisation ALONE, with no
+                                                    ## orbitals and no stored .sum: (8/5)|<l||C2||l>|^2 must equal
+                                                    ## Sternheimer's 48/25, 16/7, 224/75, and the relativistic sum
+                                                    ## over spin-orbit partners must be exactly twice the
+                                                    ## non-relativistic value.  One constant multiplies every number
+                                                    ## the module returns, and nothing else could reveal it wrong.
+        @test TestFrames.testModule_NistCalibration()
+                                                    ## added 14-Oct-2026; a hand-built 3-level multiplet, no grid, no
+                                                    ## orbitals: a matched level gets exactly ground + NIST-cm^-1 in
+                                                    ## a.u., an unmatched one is untouched and flagged, excludeLevels
+                                                    ## suppresses a match, re-calibrating cm.multiplet a second time
+                                                    ## reproduces the first result exactly (idempotence), and
+                                                    ## calibrating a CalibratedMultiplet directly raises an error.
+        @test TestFrames.testModule_UncertaintyEstimate()
+                                                    ## added 14-Oct-2026; hand-built variants, no grid, no orbitals:
+                                                    ## spread and relative spread match plain arithmetic, a single
+                                                    ## variant is refused (no spread with one point), and a zero
+                                                    ## mean is refused (relative spread undefined).
+        @test TestFrames.testModule_AdjustedLevels()
+                                                    ## added 14-Oct-2026; a small, real He-like C V 1s2p J=1 block:
+                                                    ## the module's own parallel one-body/two-body matrix construction
+                                                    ## reproduces Hamiltonian.setupMatrix EXACTLY at the unscaled
+                                                    ## combination (the one check that matters most here), and fitting
+                                                    ## against a deliberately 10%-off target moves the scale factor
+                                                    ## measurably away from 1.0 with a near-zero residual.
+        @test TestFrames.testModule_SuperConfigurations()
+                                                    ## added 15-Oct-2026; C I 2s^2 2p^2 (5 CSFs, J=0,1,2): degeneracy
+                                                    ## matches the exact CSF count, the mean matches a brute-force
+                                                    ## full diagonalization to the known ~1e-9-relative precision of
+                                                    ## the reused BasicsAZ.meanEnergyInClosedForm, and the variance
+                                                    ## -- this module's own new content, via Tr(H^2) without
+                                                    ## diagonalizing -- matches the SAME brute-force statistic to
+                                                    ## 1e-3 relative, the residual traced entirely to the mean's own
+                                                    ## imprecision propagating through variance = <E^2> - mean^2.
+        @test TestFrames.testModule_SuperGroup()
+                                                    ## added 17-Oct-2026 (competition item C9, narrowed); C I
+                                                    ## 2s^2 2p^2 + 2p^4 pooled: the pooled degeneracy/mean/variance
+                                                    ## match an independent hand evaluation of the SAME
+                                                    ## combined-sample formula, and the pooled variance strictly
+                                                    ## exceeds the within-group-only average, confirming the
+                                                    ## between-configuration term is present and adding, not
+                                                    ## subtracting. The mean's exactness under CI mixing and the
+                                                    ## variance's measured 19.5% shortfall on a realistic mixing
+                                                    ## pair are recorded in buildSuperGroup's own docstring, not
+                                                    ## re-run here (needs a second SCF + full CI, too slow routinely).
     end
 
     @testset "JAC processes" begin
         @test TestFrames.testModule_PhotoEmission()
         @test TestFrames.testModule_PhotoExcitation()
+        @test TestFrames.testModule_StarkBroadening()   ## added 21-Oct-2026; scaffold + perturber-gathering only,
+                                                        ## no width/shift formula yet -- see the module's own docstring
+        @test TestFrames.testModule_ThreeBodyRecombination()   ## added 21-Oct-2026; Saha/Milne core against
+                                                                ## ImpactIonization, on a cheap Li-like/Be-like C capture
+        @test TestFrames.testModule_ImpactExcitation()
+                                                   ## added 01-Sep-2026; Omega(i->f) = Omega(f->i) exactly, on
+                                                   ## H-like C5+ where the module is known to work, and the
+                                                   ## statistical 2p_3/2 : 2p_1/2 ratio of 2
+        @test TestFrames.testModule_MultiPhotonIonization()
+                                                   ## added 01-Sep-2026; the hydrogenic Z^-6 law for sigma^(2),
+                                                   ## the monochromatic/bichromatic meeting as omega1 -> omega2,
+                                                   ## and the RELATIVE resonance guard refusing 1s -> 2p
         @test TestFrames.testModule_PhotoIonization()
         @test TestFrames.testModule_PhotoRecombination()
+        @test TestFrames.testModule_PhotoRecombination_anisotropyNormalization()
         @test TestFrames.testModule_AutoIonization()  
+        @test TestFrames.testModule_AutoIonization_partialWaveDivision()
         @test TestFrames.testModule_DielectronicRecombination()  
-        ## @test TestFrames.testModule_PhotoExcitationFluores() 
-        ## @test TestFrames.testModule_PhotoExcitationAutoion() 
-        ## @test TestFrames.testModule_RayleighCompton() 
-        ## @test TestFrames.testModule_MultiPhotonDeExcitation() 
-        ## @test TestFrames.testModule_CoulombExcitation() 
+        @test TestFrames.testModule_HyperfineInduced()
+        @test TestFrames.testModule_RayleighCompton()
+        @test TestFrames.testModule_MultiPhotonTransition()
+        @test TestFrames.testModule_CoulombExcitation()
+        @test TestFrames.testModule_GeneralizedOscillatorStrength()   ## added 28-Aug-2026; sanity only --
+        @test TestFrames.testModule_PhotoRecombinationInterference()  ## absolute checks, no stored .sum
+        @test TestFrames.testModule_PhotoIonizationInterference()     ## absolute checks, no stored .sum
+        @test TestFrames.testModule_ParticleScattering()   ## added 17-Aug-2026 with the Dirac rebuild; replaces a
+                                                           ## Settings() constructor entry that could not fail
+        @test TestFrames.testModule_TwoElectronOnePhoton()      ## added 28-Aug-2026: a two-route agreement, and
+        @test TestFrames.testModule_ResonantImpactIonization()  ## exact scaling laws -- no stored .sum in either
+        @test TestFrames.testModule_ElectronCapture()   ## added 02-Sep-2026: detailed balance against AutoIonization
+        @test TestFrames.testModule_PhotoDoubleIonization()  ## added 15-Sep-2026: the output path, mirror
+                                                             ## symmetry and the quadrature -- NOT the scale, which
+                                                             ## is parked under Rule 13
+                                                        ## for the reversed pair, plus the alignment selection rules
     end
 
     @testset "JAC cascades" begin
         @test TestFrames.testModule_Cascade_StepwiseDecay()
-        ## @test TestFrames.testModule_Cascade_PhotonIonization()
-        ## @test TestFrames.testModule_Cascade_PhotonExcitation()
-        ## @test TestFrames.testModule_Cascade_Simulation()
+        @test TestFrames.testModule_Cascade_PhotonIonization()
+        @test TestFrames.testModule_Cascade_PhotonExcitation()
+        @test TestFrames.testModule_Cascade_PhotoAbsorption()
+        @test TestFrames.testModule_Cascade_DielectronicCapture()
+        @test TestFrames.testModule_Cascade_ResonantIonization()
+        @test TestFrames.testModule_Cascade_EiiRateCoefficients()
+        @test  TestFrames.testModule_Cascade_Simulation()   ## re-enabled 16-Aug-2026; data file regenerated and the Simulation API call brought up to date
     end
 
+    @testset "JAC empirical" begin
+        @test TestFrames.testModule_Empirical()
+        @test TestFrames.testModule_ImpactIonization()
+        @test TestFrames.testModule_Semiempirical()
+    end
+
+    @testset "JAC plasma" begin
+        @test TestFrames.testModule_AverageAtom()   ## added 11-Oct-2026, the first test of this testset; five
+                                                    ## exact identities -- the angular factor as algebra,
+                                                    ## neutrality, density-against-state-sum, the free box states
+                                                    ## as the ideal gas, and the 1s Thomas-Reiche-Kuhn sum --
+                                                    ## plus two numbers PUBLISHED by Johnson, Guet and Bertsch.
+                                                    ## No stored reference of our own, so it cannot go stale.
+        @test TestFrames.testModule_SuperConfigurationOpacity()
+                                                    ## added 16-Oct-2026; C I 2s^2 2p^2 / 2s 2p^3 / 2p^4: each
+                                                    ## group's degeneracy against the exact microstate count,
+                                                    ## populations summing to 1, and the T -> 0 limit putting
+                                                    ## essentially all population on the lowest-mean-energy
+                                                    ## group -- the defining property of a Boltzmann weight.
+        @test TestFrames.testModule_SuperConfigurationIonization()
+                                                    ## added 17-Oct-2026; three carbon charge states: stage
+                                                    ## populations sum to 1, electron density matches the
+                                                    ## charge-neutrality sum built from them, and BOTH
+                                                    ## adjacent-pair population ratios independently satisfy
+                                                    ## the textbook two-level Saha equation built from nothing
+                                                    ## but the scheme's own groups -- the equivalence of the
+                                                    ## grand-canonical and pairwise formulas, proved not assumed.
+        @test TestFrames.testModule_SuperConfigurationMixtureOpacity()
+                                                    ## added 17-Oct-2026 (item C20), EXTENDED 18-Oct-2026 to the
+                                                    ## stage axis AND (same day) to bound-free: species-axis
+                                                    ## checks 1-4 (mixing rule, species reduction, Planck-of-
+                                                    ## constant, no Rosseland key) run UNEDITED as the backward-
+                                                    ## compat proof; checks 5-7 -- stage reduction against
+                                                    ## SuperConfigurationIonizationScheme's own validated numbers,
+                                                    ## a HOMOGENEITY check (splitting one species into two
+                                                    ## identical halves must be invisible to the coupled
+                                                    ## balance), and a real two-stage opacity mix matched to an
+                                                    ## independent hand re-derivation; check 8 -- bound-free on
+                                                    ## that SAME two-stage pair, independently re-derived via
+                                                    ## Empirical.photoionizationCrossSection, plus the proof that
+                                                    ## turning it on leaves the bound-bound spectrum unchanged and
+                                                    ## the original (no boundFreeApprox) mixture carries none of
+                                                    ## the new keys; check 9 -- ADDED 19-Oct-2026, free-free on
+                                                    ## the same pair, independently re-derived via
+                                                    ## Empirical.freeFreeAbsorptionCoefficient, the same
+                                                    ## backward-compatibility proof, plus two literal spot values
+                                                    ## of the embedded Sutherland (1998) Gaunt-factor table.
+        @test TestFrames.testModule_KineticChargeBalance()
+                                                    ## added 22-Oct-2026; 3-stage carbon chain (C^3+/C^4+/C^5+),
+                                                    ## every leg Plasma.EmpiricalTreatment so the test stays fast:
+                                                    ## populations non-negative and summing to 1, essentially all
+                                                    ## population on the lowest-charge stage at T_e = 1e4 K, the
+                                                    ## nStages < 2 guard raising, and -- the regression this test
+                                                    ## exists for -- the global "nuclear: charge" default restored
+                                                    ## to its PRIOR value rather than left at the scheme's own Z.
+    end
+
+    @testset "JAC strongfield" begin
+        ## no tests defined yet
+    end
+
+    @testset "JAC Liouville" begin
+        @test TestFrames.testModule_Liouville()
+    end
+
+    @testset "JAC DeepLearning" begin
+        @test TestFrames.testModule_DeepLearning()
+    end
+
+end
+
+## Clean the run debris.  Each cascade computation dumps its results to a zzz-*.jld file whose name carries the date and the
+## hour, so the suite leaves one file behind per scheme and per hour it is run in, without bound -- 109 files and 51 MB had
+## accumulated since 5-Aug-2026.  The dumps exist so that a single cascade can be reloaded by hand (the schemes print the
+## JLD2.load call for it); nothing reads them back, and least of all this suite.  The glob is anchored on the zzz- prefix and
+## the .jld suffix and does not descend, so test/approved/ -- which holds a .jld reference -- is out of its reach.
+let  dir = @__DIR__
+    debris = filter(f -> startswith(f, "zzz-") && endswith(f, ".jld"), readdir(dir))
+    bytes  = sum(f -> filesize(joinpath(dir, f)), debris; init = 0)
+    for  f in debris   rm(joinpath(dir, f), force = true)   end
+    printstyled("\nRemoved $(length(debris)) cascade dump file(s), $(round(bytes / 2^20, digits = 1)) MB, from $(dir) \n",
+                color = :cyan)
 end

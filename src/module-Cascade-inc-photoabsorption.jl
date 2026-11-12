@@ -11,11 +11,11 @@
         The results of a photoabsorption cascade computation are comprised into (output) data::ExcitationData, while 
         nothing is returned otherwise.
 
-`Cascade.perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; output=true, outputToFile::Bool=true)`   
+`Cascade.perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)`   
     ... to perform the same but to return the complete output in a dictionary that is written to disk and can be used in subsequent
         cascade simulation. The particular output depends on the specifications of the cascade.
 """
-function perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true)
+function perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; output::Bool=false, outputToFile::Bool=true, outputDirectory::String="")
     if  output    results = Dict{String, Any}()    else    results = nothing    end
     printSummary, iostream = Defaults.getDefaults("summary flag/stream")
     #
@@ -47,20 +47,20 @@ function perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; outpu
     if output   &&   scheme.calcDirect 
         results = Base.merge( results, Dict("name"                          => comp.name) ) 
         results = Base.merge( results, Dict("cascade scheme"                => comp.scheme) ) 
-        results = Base.merge( results, Dict("initial multiplets:"           => iOut["initial multiplets:"]) )    
-        results = Base.merge( results, Dict("photoionized multiplets:"      => iOut["generated multiplets:"]) )    
-        results = Base.merge( results, Dict("photoionization lines:"        => iOut["photoionization lines:"]) )
-        push!(data, Cascade.Data{PhotoIonization.Line}(iOut["photoionization lines:"]) )
+        results = Base.merge( results, Dict("initial multiplets:"           => iOut[ResultKeys.InitialMultiplets]) )    
+        results = Base.merge( results, Dict("photoionized multiplets:"      => iOut[ResultKeys.GeneratedMultiplets]) )    
+        results = Base.merge( results, Dict("photoionization lines:"        => iOut[PhotoIonization.Settings]) )
+        push!(data, Cascade.Data{PhotoIonization.Line}(iOut[PhotoIonization.Settings]) )
         results = Base.merge( results, Dict("cascade data:"                 => data ) )
     end
     #
     if output   &&   scheme.calcResonant 
         results = Base.merge( results, Dict("name"                          => comp.name) ) 
         results = Base.merge( results, Dict("cascade scheme"                => comp.scheme) ) 
-        results = Base.merge( results, Dict("initial multiplets:"           => eOut["initial multiplets:"]) )    
-        results = Base.merge( results, Dict("photoexcited multiplets:"      => eOut["generated multiplets:"]) )    
-        results = Base.merge( results, Dict("photoexcitation lines:"        => eOut["photoexcitation lines:"]) )
-        push!(data, Cascade.Data{PhotoExcitation.Line}(eOut["photoexcitation lines:"]) )
+        results = Base.merge( results, Dict("initial multiplets:"           => eOut[ResultKeys.InitialMultiplets]) )    
+        results = Base.merge( results, Dict("photoexcited multiplets:"      => eOut[ResultKeys.GeneratedMultiplets]) )    
+        results = Base.merge( results, Dict("photoexcitation lines:"        => eOut[PhotoExcitation.Settings]) )
+        push!(data, Cascade.Data{PhotoExcitation.Line}(eOut[PhotoExcitation.Settings]) )
         results = Base.merge( results, Dict("cascade data:"                 => data ) )
     end
     #
@@ -71,8 +71,8 @@ function perform(scheme::PhotoAbsorptionScheme, comp::Cascade.Computation; outpu
                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file.")
         if  printSummary   println(iostream, "\n* Write all results to disk; use:\n   JLD2.save(''$filename'', results) \n   using JLD2 " *
                                                 "\n   results = JLD2.load(''$filename'')    ... to load the results back from file." )      end      
-        JLD2.@save filename results
+        Cascade.writeDataFile(filename, results)
     end
     
-    return( results )
+    return( results isa Dict{String,Any} ? Basics.PerformResults(results) : results )
 end

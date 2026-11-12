@@ -1,35 +1,4 @@
 
-#== Observations at code-review, June 2023
-
-+ It will be desirable to agree about a common style ... which is easy for all three of us (Danish, Kefei, me, Fang ??)
-    to use and follow ... and without destroying/violating the existing pieces.
-+ Lets have a discussion together with (open) module-StrongField.jl, module-StrongField-inc-hydrogenic.jl,
-    module-StrongField-inc-postProcessing.jl, example-Hb.jl 
-    ... to create more understanding for each other ... and, hopefully, to prepare the code for series extensions.
-    
-
-+ The assignment of individual procedures to building blocks of the SFA is often not (really) clear;
-    it might be necessary to establish/improve parts of the JAC manual to make this assignment in
-    names and content more explicit.
-+ Names of procedures are sometimes "cryptic": What is your style of selecting names and name spaces.
-+ The header/description of routines should be improved (though, we have some basis).
-    In particular, each doc-line of a procedure should tell explicit of what::type is returned.
-    This makes it easier to identify the place of a procedure in a given hierarchy, and whether other 
-    procedures exist in different approximations, etc. ... but which lead to the same bulding block.
-+ How much in-line comments are appropriate for a good code ??
-+ Which of this or any analogue code did you realized in your own frame ?? ... At present, I assume you have
-    some dipole/non-dipole codes in the standard expansion ... but not much in the partial-wave decomposition.
-+ Shall we include Kefei into this discussion ?? ... How careful does he deal with codes ?? ...
-+ Angular momenta are treated in JAC as AngularJ64 and AngularM64-type variables. ... How do you treat them ??
-    ... Shall we adopt the code to use internal code with some given definition ... instead of ad-hoc implementations ??
-    Could this be a good starting to get the existing part running (again) ... and to prepare it for re-scattering 
-    amplitudes, etc.
-+ How shall we decide about the plot-features ?? ... Which experiences exist ... and do they belong to such an
-    atomic code ?? ... Should we prepare these plot routines in a more systematic fashion, perhaps with some 
-    astract data types ??
-+ Let's discuss the example in ... include("../examples/example-Hb.jl")
-    and conclude of what would be the right test example to make the code ready for the next steps/improvements.
-==#
 
 
 
@@ -37,6 +6,37 @@
 """
 `module  JAC.StrongField
 ... a submodel of JAC that contains all methods to set-up and perform strong-field computations. 
+
+    STATUS, 26-Aug-2026:  POSTPONED BY THE MAINTAINER UNTIL 2027, together with examples/example-Id.jl.  This is a
+    decision, not an oversight, and it repeats one already taken some weeks earlier.  DO NOT PICK THIS MODULE UP, and do
+    not "helpfully" repair what is described below, without asking the maintainer first.
+
+    WHAT IS CONCRETELY KNOWN, so that the work can be resumed rather than re-discovered:
+
+    The SFA amplitude path does not run.  `StrongField.perform` gets as far as building its continuum orbitals and
+    printing "Computing SFA amplitudes...", then fails with
+
+        MethodError: no method matching AngularM64(::Float64)        module-StrongField.jl:1165
+
+    The immediate cause is `ms = 1/2 + kms` at line 1160, which is FLOAT division and so yields 0.5 rather than 1//2.
+    It is NOT a one-character fix.  Neither `AngularJ64(::Float64)` nor `AngularM64(::Float64)` exists -- both were
+    checked -- and the defect is systematic rather than local:  `pReducedME` is declared `jp::Float64, j::Float64` and
+    hands both to `AngularJ64`, and line 768 computes `jp = 1/2 * (2*kjp + 1)`.  The whole SFA path therefore carries
+    half-integer angular momenta as `Float64` while the constructors accept only `Integer` and `Rational{Int64}`.
+    Resuming means converting that convention to `Rational` through `pReducedME` and every caller that feeds it, not
+    patching line 1160.
+
+    WHAT IS NOT PROGRESS, and must not be read as any:  on 26-Aug-2026 `examples/example-Id.jl` was changed from
+    `StrongField2.` to `StrongField.` throughout, and the name `StrongField2` -- which is EXPORTED but has never been
+    defined -- was removed from the export list in `JenaAtomicCalculator.jl`.  That was housekeeping on a dangling name,
+    nothing more.  Its only effect on the physics is that the example now REACHES the defect above instead of failing
+    earlier on a module that does not exist.  No amplitude has been computed and no result verified;  both branches of
+    example-Id.jl remain undated and carry `# Last visit:  26-Aug-2026`.
+
+    A CAUTION ON THE FAILURE MODE.  What is known to fail is a crash, which is loud.  It has NOT been established that
+    the rest of the module is sound -- nothing here has been run to completion in a long time, precisely because the
+    example named a module that does not exist -- so a number obtained from this module before the conversion above is
+    finished should not be trusted merely because it appeared.
 """
 module StrongField
 
@@ -281,7 +281,36 @@ end
     ... constructor for the default values of SFA computations.
 """
 function Settings()
-    Settings([E1], [UseCoulomb], true, true, false, false, true)
+    Settings([E1], "Coulomb", true, true, false, false, true)
+end
+
+
+"""
+`StrongField.Settings(set::StrongField.Settings;`
+
+    multipoles..., gauge..., printAmplitudes..., coupledBasis..., hydrogenic..., hydrogenic1s..., mAverage...)
+
+    ... constructor for modifying the given StrongField.Settings by 'overwriting' the previously selected parameters.
+        A settings::StrongField.Settings is returned.
+"""
+function Settings(set::StrongField.Settings;
+                        multipoles::Union{Nothing,Array{EmMultipole,1}} = nothing,
+                        gauge::Union{Nothing,String} = nothing,
+                        printAmplitudes::Union{Nothing,Bool} = nothing,
+                        coupledBasis::Union{Nothing,Bool} = nothing,
+                        hydrogenic::Union{Nothing,Bool} = nothing,
+                        hydrogenic1s::Union{Nothing,Bool} = nothing,
+                        mAverage::Union{Nothing,Bool} = nothing )
+
+    if  isnothing(multipoles)        multipolesx      = set.multipoles        else   multipolesx      = multipoles        end
+    if  isnothing(gauge)             gaugex           = set.gauge             else   gaugex           = gauge             end
+    if  isnothing(printAmplitudes)   printAmplitudesx = set.printAmplitudes   else   printAmplitudesx = printAmplitudes   end
+    if  isnothing(coupledBasis)      coupledBasisx    = set.coupledBasis      else   coupledBasisx    = coupledBasis      end
+    if  isnothing(hydrogenic)        hydrogenicx      = set.hydrogenic        else   hydrogenicx      = hydrogenic        end
+    if  isnothing(hydrogenic1s)      hydrogenic1sx    = set.hydrogenic1s      else   hydrogenic1sx    = hydrogenic1s      end
+    if  isnothing(mAverage)          mAveragex        = set.mAverage          else   mAveragex        = mAverage          end
+
+    Settings( multipolesx, gaugex, printAmplitudesx, coupledBasisx, hydrogenicx, hydrogenic1sx, mAveragex )
 end
 
 
@@ -537,7 +566,7 @@ end
 
 
 """
-`StrongField.computeOutcome(observable::StrongField.SfaEnergyDistribution, amplitudes::Array{SphericalAmplitude,3})`  
+`StrongField.computeOutcome(obs::StrongField.SfaEnergyDistribution, amplitudes::Array{SphericalAmplitude,3})`  
     ... computes the requested photoelectron energy distribution and returns the results in the variable
         outcome::StrongField.OutcomeEnergyDistribution.
 """
@@ -559,7 +588,7 @@ end
 
 
 """
-`StrongField.computeOutcome(observable::StrongField.SfaMomentumDistribution, amplitudes::Array{SphericalAmplitude,3})`  
+`StrongField.computeOutcome(obs::StrongField.SfaMomentumDistribution, amplitudes::Array{SphericalAmplitude,3})`  
     ... computes the requested photoelectron momentum distribution and returns the results in the variable
         outcome::StrongField.OutcomeMomentumDistribution
 """
@@ -585,7 +614,7 @@ end
 
 
 """
-`StrongField.computeOutcome(observable::StrongField.SfaAzimuthalAngularDistribution, amplitudes::Array{SphericalAmplitude,3})`  
+`StrongField.computeOutcome(obs::StrongField.SfaAzimuthalAngularDistribution, amplitudes::Array{SphericalAmplitude,3})`  
     ... computes the requested photoelectron angular distribution and returns the results in the variable
         outcome::StrongField.OutcomeAzimuthalAngularDistribution
 """
@@ -607,7 +636,7 @@ end
 
 
 """
-`StrongField.computeOutcome(observable::StrongField.SfaPolarAngularDistribution, amplitudes::Array{SphericalAmplitude,3})`  
+`StrongField.computeOutcome(obs::StrongField.SfaPolarAngularDistribution, amplitudes::Array{SphericalAmplitude,3})`  
     ... computes the requested photoelectron angular distribution and returns the results in the variable
         outcome::StrongField.OutcomePolarAngularDistribution
 """
@@ -640,13 +669,6 @@ function computePulseShapeIntegrals(envelope::Pulse.AbstractEnvelope, beam::Abst
     fVolkovPlus    = Pulse.pulseShapeIntegral(true,  envelope, beam, polarization, thetap, phip, energyp, initialEn, 0)
     fVolkovMinus   = Pulse.pulseShapeIntegral(false, envelope, beam, polarization, thetap, phip, energyp, initialEn, 0)
     fVolkovSquared = Pulse.pulseShapeQuadIntegral(envelope, beam, polarization,    thetap, phip, energyp, initialEn, 0)
-    
-    #== 
-    println("> Pulse-shape integral for a $(string(envelope)) with A0=$(beam.A0), omega=$(beam.omega) [a.u.], cep=$(beam.cep)" * 
-            " and for $(string(polarization)) light are:" )
-    println("    F^(Volkov) [+; omega; f^(env); A]   = $fVolkovPlus" )
-    println("    F^(Volkov) [-; omega; f^(env); A]   = $fVolkovMinus" )
-    println("    F^(quad, Volkov) [f^(env); A]       = $fVolkovSquared" )  ==#
     
     return( (fVolkovPlus, fVolkovMinus, fVolkovSquared) )
 end
@@ -821,10 +843,10 @@ function  computeSphericalAmplitudes(comp::StrongField.Computation)
                             wplus = wplus +  
                                     KWignerEckart * (-1)^q * Basics.determinePolarizationVector(q, comp.polarization, star=false)    * 
                                         AngularMomentum.sphericalYlm(lp, floor(Int,mj-msp-q), amp.theta, amp.phi)                      *
-                                        AngularMomentum.ClebschGordan_old(  AngularJ64(Rational(lp)),   AngularM64(Rational(mj-msp-q)), 
+                                        AngularMomentum.ClebschGordan(      AngularJ64(Rational(lp)),   AngularM64(Rational(mj-msp-q)), 
                                                                             AngularJ64(1//2),           AngularM64(Rational(msp)), 
                                                                             AngularJ64(Rational(jp)),   AngularM64(Rational(mj-q)) )   *
-                                        AngularMomentum.ClebschGordan_old(  AngularJ64(Rational(j)),    AngularM64(Rational(mj)), 
+                                        AngularMomentum.ClebschGordan(      AngularJ64(Rational(j)),    AngularM64(Rational(mj)), 
                                                                             AngularJ64(1),              AngularM64(Rational(-q)), 
                                                                             AngularJ64(Rational(jp)),   AngularM64(Rational(mj-q)) )   * 
                                         reducedME
@@ -832,10 +854,10 @@ function  computeSphericalAmplitudes(comp::StrongField.Computation)
                             wminus = wminus +  
                                         KWignerEckart * Basics.determinePolarizationVector(q, comp.polarization, star=true)             * 
                                         AngularMomentum.sphericalYlm(lp, floor(Int,mj-msp+q), amp.theta, amp.phi)                       *
-                                        AngularMomentum.ClebschGordan_old(  AngularJ64(Rational(lp)),   AngularM64(Rational(mj-msp+q)), 
+                                        AngularMomentum.ClebschGordan(      AngularJ64(Rational(lp)),   AngularM64(Rational(mj-msp+q)), 
                                                                             AngularJ64(1//2),           AngularM64(Rational(msp)), 
                                                                             AngularJ64(Rational(jp)),   AngularM64(Rational(mj+q)) )    *
-                                        AngularMomentum.ClebschGordan_old(  AngularJ64(Rational(j)),    AngularM64(Rational(mj)), 
+                                        AngularMomentum.ClebschGordan(      AngularJ64(Rational(j)),    AngularM64(Rational(mj)), 
                                                                             AngularJ64(1),              AngularM64(Rational(q)), 
                                                                             AngularJ64(Rational(jp)),   AngularM64(Rational(mj+q)) )    * 
                                         reducedME
@@ -856,7 +878,7 @@ function  computeSphericalAmplitudes(comp::StrongField.Computation)
                 # Compute the total amplitude
                 wa = (fVolkovPlus * wminus + fVolkovMinus * wplus) + 
                         fVolkovSquared * AngularMomentum.sphericalYlm(l, floor(Int,mj-msp), amp.theta, amp.phi)       *
-                                        AngularMomentum.ClebschGordan_old(  AngularJ64(Rational(l)), AngularM64(Rational(mj-msp)), 
+                                        AngularMomentum.ClebschGordan(      AngularJ64(Rational(l)), AngularM64(Rational(mj-msp)), 
                                                                             AngularJ64(1//2),        AngularM64(Rational(msp)), 
                                                     AngularJ64(Rational(j)), AngularM64(Rational(mj)) )   * scalarProd
                 
@@ -951,12 +973,12 @@ function  computeSphericalAmplitudesUncoupled(comp::StrongField.Computation)
                 for  q in [-1, 0, 1]
                     wplus = wplus + KWignerEckart * AngularMomentum.sphericalYlm(lp, m-q, amp.theta, amp.phi) * (-1)^q  * 
                             Basics.determinePolarizationVector(q, comp.polarization, star=false)                        *
-                            AngularMomentum.ClebschGordan_old( AngularJ64(Rational(l)),  AngularM64(Rational(m)),  AngularJ64(1), 
+                            AngularMomentum.ClebschGordan(     AngularJ64(Rational(l)),  AngularM64(Rational(m)),  AngularJ64(1), 
                                     AngularM64(Rational(-q)), AngularJ64(Rational(lp)), AngularM64(Rational(m-q)) ) * reducedME
                             
                     wminus = wminus + KWignerEckart * AngularMomentum.sphericalYlm(lp, m+q, amp.theta, amp.phi)         * 
                             Basics.determinePolarizationVector(q, comp.polarization, star=true)                         *
-                            AngularMomentum.ClebschGordan_old( AngularJ64(Rational(l)), AngularM64(Rational(m)),  AngularJ64(1),
+                            AngularMomentum.ClebschGordan(     AngularJ64(Rational(l)), AngularM64(Rational(m)),  AngularJ64(1),
                                         AngularM64(Rational(q)), AngularJ64(Rational(lp)), AngularM64(Rational(m+q)) )  * reducedME
                 end
             end
@@ -1051,14 +1073,14 @@ function  computeSphericalAmplitudesUncoupledLengthGauge(comp::StrongField.Compu
                 for  q in [-1, 1]
                     wplus = wplus + AngularMomentum.sphericalYlm(lp, m-q, thetap, phip) * (-1)^q           * 
                                     Basics.determinePolarizationVector(q, comp.polarization, star=false)   * 
-                                    AngularMomentum.ClebschGordan_old( AngularJ64(l),  AngularM64(m),  AngularJ64(1), 
+                                    AngularMomentum.ClebschGordan(     AngularJ64(l),  AngularM64(m),  AngularJ64(1), 
                                                                         AngularM64(-q), AngularJ64(lp), AngularM64(m-q) )
                     ## (-im)^lp * (-1)   * AngularMomentum.ClebschGordan(l, m, 1, -q, lp, m-q) * (-1) *
                     ##                     AngularMomentum.ClebschGordan(lp, 0, 1, 0, l, 0)
 
                     wminus = wminus + AngularMomentum.sphericalYlm(lp, m+q, thetap, phip)                 * 
                                         Basics.determinePolarizationVector(q, comp.polarization, star=true) *
-                                        AngularMomentum.ClebschGordan_old( AngularJ64(l), AngularM64(m),  AngularJ64(1), 
+                                        AngularMomentum.ClebschGordan(     AngularJ64(l), AngularM64(m),  AngularJ64(1), 
                                                                             AngularM64(q), AngularJ64(lp), AngularM64(m+q) )
                     ## AngularMomentum.ClebschGordan(l, m, 1, q, lp, m+q)*(-im)^lp * (-1) *
                     ## AngularMomentum.ClebschGordan(lp, 0, 1, 0, l, 0) 
@@ -1200,9 +1222,9 @@ function  pReducedME(Pepsplp::Array{ComplexF64,1}, lp::Int, jp::Float64, l::Int,
             mj = ml + ms
             for    mlp = -lp:lp
                 mjp = mlp + ms
-                fac = fac + AngularMomentum.ClebschGordan_old(  AngularJ64(lp), AngularM64(mlp) , AngularJ64(1//2),           
+                fac = fac + AngularMomentum.ClebschGordan(      AngularJ64(lp), AngularM64(mlp) , AngularJ64(1//2),           
                                                                 AngularM64(ms), AngularJ64(jp),   AngularM64(mjp) )       * 
-                            AngularMomentum.ClebschGordan_old(  AngularJ64(l),  AngularM64(ml),   AngularJ64(1//2), 
+                            AngularMomentum.ClebschGordan(      AngularJ64(l),  AngularM64(ml),   AngularJ64(1//2), 
                                                                 AngularM64(ms), AngularJ64(j),    AngularM64(mj)  )
             end
         end
@@ -1334,7 +1356,7 @@ function ReducedTime(epsiloni::Float64, volkov::AbstractVolkovState, envelope::P
     else            orderGLt = 1000
     end
 
-    gaussLegendret = Radial.GridGL("Finite",0.,Tp,orderGLt)
+    gaussLegendret = Radial.GridGL(Radial.GridGaussLegendreFinite(),0.,Tp,orderGLt)
     tgrid = gaussLegendret.t;       weightst = gaussLegendret.wt 
 
     #Define Gauss-Legendre grid for r integral
@@ -1377,7 +1399,7 @@ function ReducedTime(epsiloni::Float64, volkov::AbstractVolkovState, envelope::P
         # Compute the reduced matrix element of the position operator at gridpoint t
         rIntegral = RadialIntegrals.rkDiagonal(1, conj( Pepsplp), Pnl, grid)
         rIntegral = rIntegral * (-im)^lp * sqrt(2*l+1) * (-1)^(l+1-lp) * 
-                    AngularMomentum.ClebschGordan_old( AngularJ64(l), AngularM64(0),  AngularJ64(1), 
+                    AngularMomentum.ClebschGordan(     AngularJ64(l), AngularM64(0),  AngularJ64(1), 
                                                         AngularM64(0), AngularJ64(lp), AngularM64(0) )
         
         # Compute Volkov phase at gridpoint t

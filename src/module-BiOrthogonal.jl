@@ -1,59 +1,439 @@
 
 """
-`module  JAC.BiOrthogonal`  
+`module  JAC.BiOrthogonal`
 	... a submodel of JAC that contains all methods for a bi-orthogonal transformation of two non-orthogonal orbitals set.
+
+    Validated (1-Aug-2026) against three independent known-answer tests, following the artificial-rotation
+    methodology suggested by Olsen, Godefroid, Jönsson, Malmqvist & Froese Fischer, Phys. Rev. E 52, 4499
+    (1995), Sec. V: (1) closed-core self-overlap under a manufactured 1s/2s rotation, exact to 1e-15;
+    (2) a full production PhotoEmission E1 rate (Fe X 3p^6 -> 3p^5) under the same closed-core rotation,
+    matching a shared-basis reference to ~1e-10 relative; (3) an open-shell/virtual-mixing self-overlap
+    (occupied 3s rotated with virtual 4s, forcing a genuine CI counter-rotation) plus length- and
+    velocity-form dipole matrix elements, matching to ~1e-8 - 1e-10 relative. All three confirm
+    `computeTransformationMatrices` and `generateCounterRotatingCiMatrices` exactly reconstruct the known
+    physical answer under invertible orbital rotations, including cases requiring nontrivial CI mixing.
+    This does NOT explain the puzzling near-identical gauge-ratio shift observed for a genuine K-hole
+    SCF-relaxation case (Ne K-alpha, example-Da.jl branch 0) -- that remains open and is more likely a
+    physical-relaxation or transition-operator question than a defect in this module.
 """
 module BiOrthogonal
 
 
-using Printf, JAC, ..Basics,  ..Defaults, ..ManyElectron, ..Radial
-
+using Printf, LinearAlgebra, ..Basics,  ..Defaults, ..ManyElectron, ..Radial, ..RadialIntegrals, ..SpinAngular
 
 
 """
-`BiOrthogonal.computeTransformation(leftMp::Multiplet, rightMp::Multiplet)`  
-    ... computes the bi-orthogonal transformation of the two given multiplets by rotating the radial functions 
-        by counter-rotating the corresponding CI coefficients. A tuple of two multiplets
-        tpl(newLeftMp::::Multiplet, newRightMp::Multiplet) is returned.
+`BiOrthogonal.alignOrbitalSigns(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)`
+    ... makes every right orbital agree in OVERALL SIGN with its left partner of the same subshell, which the
+        biorthogonalisation below requires and which no sign convention can guarantee on its own.  A tuple
+        tpl(newRightBasis::Basis, phases::Array{Float64,1}, flipped::Array{Subshell,1}) is returned: the basis with
+        the offending orbitals negated, the per-CSF phase that negation implies, and the subshells that were
+        flipped.  Nothing is changed when every overlap is already positive, and the phases are then all +1.
+
+        WHY IT IS NEEDED, and it is a property of the METHOD rather than a defect of the orbitals.
+        `BiOrthogonal.appendixB` factorises the overlap T = L U with NO pivoting, so `Cleft = inv(L)'` is UNIT
+        upper triangular -- every eigenvalue 1, its logarithm always real -- while `C11 = inv(U)` has eigenvalues
+        1/u_ii.  **One negative pivot therefore makes one eigenvalue of Cright negative, and a real matrix with a
+        negative eigenvalue has no real logarithm**: `log(C)` returns a complex matrix, every entry of it becomes
+        complex, and the first nonzero one assigned into a `Dict{...,Float64}` threw an `InexactError` naming
+        neither the module nor the cause, three call levels below what the user invoked.  Verified in isolation:
+        a near-identity overlap gives pivots +0.90 +1.07 +1.03 +0.86 and a REAL log, and negating one orbital
+        gives +0.90 +1.07 -1.03 +0.86 and a COMPLEX one whose largest imaginary part is exactly pi.
+
+        AND THE CURE IS A GAUGE CHOICE, NOT AN APPROXIMATION.  An orbital's overall sign is arbitrary; negating
+        phi multiplies a CSF by (-1)^n, with n that orbital's occupation in the CSF, because the CSF is built from
+        n copies of it.  Applying that phase to the CI coefficients alongside the negation leaves every
+        expectation value and every transition amplitude unchanged, and it makes the transformation a proper
+        rotation, which is what having a real generator means.
+
+        A SOUND SIGN CONVENTION UPSTREAM DOES NOT REMOVE THE CASE, which is worth saying because it was the
+        suspicion this item carried.  `Bsplines.canonicalSign` already fixes each orbital by the sign of its
+        LARGEST B-spline coefficient -- a robust rule, and a real improvement on the `sum(P[1:30])` test it
+        replaced.  But it canonicalises each basis SEPARATELY, and two independently optimised RAS bases hold
+        genuinely DIFFERENT radial functions under the same label;  their overlap may be negative however each
+        one was canonicalised.  The alignment has to be made between the two bases, which is here.
 """
-function  computeTransformation(leftMp::Multiplet, rightMp::Multiplet)
-    return( 1.0 )
+function  alignOrbitalSigns(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)
+    flipped = Subshell[]
+    newOrbs = Dict{Subshell, Orbital}()
+    for  (sh, orb)  in  rightBasis.orbitals
+        if  haskey(leftBasis.orbitals, sh)  &&
+                    RadialIntegrals.overlap(leftBasis.orbitals[sh], orb, grid) < 0.
+            newOrbs[sh] = Orbital(orb.subshell, orb.isBound, orb.useStandardGrid, orb.energy,
+                                  -orb.P, -orb.Q, -orb.Pprime, -orb.Qprime, orb.grid)
+            push!(flipped, sh)
+        else
+            newOrbs[sh] = orb
+        end
+    end
+    phases = ones(length(rightBasis.csfs))
+    if  !isempty(flipped)
+        for  (r, csf)  in  enumerate(rightBasis.csfs)
+            n = 0
+            for  (k, sh)  in  enumerate(rightBasis.subshells)
+                if  sh in flipped  &&  k <= length(csf.occupation)    n = n + csf.occupation[k]    end
+            end
+            phases[r] = isodd(n) ? -1.0 : 1.0
+        end
+    end
+    newRightBasis = Basis(true, rightBasis.NoElectrons, rightBasis.subshells, rightBasis.csfs,
+                          rightBasis.coreSubshells, newOrbs)
+
+    return( (newRightBasis, phases, flipped) )
+end
+
+
+"""
+`BiOrthogonal.computeTransformation(leftMp::Multiplet, rightMp::Multiplet, grid::Radial.Grid)`
+    ... computes the bi-orthogonal transformation of the two given multiplets by rotating the radial functions
+        and by counter-rotating the corresponding CI coefficients. leftMp and rightMp must have the same
+        number of electrons and be generated on the same radial grid; grid must be passed explicitly (an
+        orbital's own `.grid` field is only a placeholder whenever `useStandardGrid == true`, which is the
+        normal case). A warning (not an error) is issued if either multiplet's CSF list is not closed
+        under de-excitation (see `checkClosureUnderDeexcitation`), in which case the transformation is only
+        approximate. A tuple of two multiplets tpl(newLeftMp::Multiplet, newRightMp::Multiplet) is
+        returned: same levels (J, parity, index, energy, relativeOcc) as the input, but each with a new,
+        shared, biorthonormal `Basis` and a counter-rotated `mc` vector.
+"""
+function  computeTransformation(leftMp::Multiplet, rightMp::Multiplet, grid::Radial.Grid)
+    leftBasis  = leftMp.levels[1].basis
+    rightBasis = rightMp.levels[1].basis
+
+    for  (label, basis)  in  [("leftMp", leftBasis), ("rightMp", rightBasis)]
+        violations = BiOrthogonal.checkClosureUnderDeexcitation(basis)
+        if  !isempty(violations)
+            @warn "BiOrthogonal.computeTransformation: $label's CSF list is not closed under de-excitation " *
+                    "($(length(violations)) violation(s)); the bi-orthogonal transformation will only be " *
+                    "approximate. First violation: $(violations[1])"
+        end
+    end
+
+    # THE RIGHT ORBITALS ARE SIGN-ALIGNED TO THE LEFT ONES FIRST, because appendixB factorises the overlap with NO
+    # pivoting and one negative pivot leaves Cright with a negative eigenvalue -- which has no real logarithm.  The
+    # phase that the negation implies is carried into the CI coefficients below, so this changes no physics.
+    (rightBasis, rightPhases, flippedShells) = BiOrthogonal.alignOrbitalSigns(leftBasis, rightBasis, grid)
+    if  !isempty(flippedShells)
+        println(">> [BiOrthogonal] sign-aligned " * string(length(flippedShells)) * " right orbital(s) to their " *
+                "left partners: " * join(string.(flippedShells), ", ") * ".  An orbital's overall sign is " *
+                "arbitrary, and the matching phase (-1)^occupation is applied to the CI coefficients, so no " *
+                "expectation value or amplitude changes.")
+    end
+    transformation                     = BiOrthogonal.computeTransformationMatrices(leftBasis, rightBasis, grid)
+    newLeftOrbitals, newRightOrbitals  = BiOrthogonal.generateBiorthogonalShellMatrices(leftBasis, rightBasis, grid)
+    Mleft                              = BiOrthogonal.generateCounterRotatingCiMatrices(leftBasis,  transformation, :left)
+    Mright                             = BiOrthogonal.generateCounterRotatingCiMatrices(rightBasis, transformation, :right)
+
+    newLeftBasis  = Basis(true, leftBasis.NoElectrons,  leftBasis.subshells,  leftBasis.csfs,  leftBasis.coreSubshells,  newLeftOrbitals)
+    newRightBasis = Basis(true, rightBasis.NoElectrons, rightBasis.subshells, rightBasis.csfs, rightBasis.coreSubshells, newRightOrbitals)
+
+    newLeftLevels  = [ Level(lv.J, lv.M, lv.parity, lv.index, lv.energy, lv.relativeOcc, lv.hasStateRep, newLeftBasis,  Mleft  * lv.mc)  for lv in leftMp.levels  ]
+    newRightLevels = [ Level(lv.J, lv.M, lv.parity, lv.index, lv.energy, lv.relativeOcc, lv.hasStateRep, newRightBasis,
+                             Mright * (rightPhases .* lv.mc))  for lv in rightMp.levels ]
+
+    return( (Multiplet(leftMp.name * " (bi-orthogonal)", newLeftLevels), Multiplet(rightMp.name * " (bi-orthogonal)", newRightLevels)) )
+end
+
+
+"""
+`BiOrthogonal.appendixB(S::Matrix{Float64})`
+    ... solves the differing-dimension biorthonormalisation of Appendix B of Olsen, Godefroid, Jönsson,
+        Malmqvist & Froese Fischer, Phys. Rev. E 52, 4499 (1995), for an overlap matrix S of size n x m with
+        m >= n. Writing S = (T Z) with T square of order n, the returned pair (Cleft, Cright) -- of orders n
+        and m -- satisfies Cleft' * S * Cright = (I 0) exactly, I being the unit matrix of order n. The square
+        problem on T is solved by a SYMMETRIC (Loewdin) split of its singular-value decomposition, and Eq. (B6)
+        then reduces to C12 = -C11 * (Cleft' * Z), since Eq. (B4) already identifies Cleft' * T as inv(C11) --
+        which holds for this split exactly as it does for a triangular one.
+        A tuple tpl(Cleft::Matrix{Float64}, Cright::Matrix{Float64}) is returned.
+
+        WHY NOT THE UNPIVOTED LU THIS USED UNTIL 01-Nov-2026, and the measurement that settled it.  The condition
+        Cleft' * S * Cright = (I 0) does not fix the pair;  an LU split gives Cleft = inv(L)', which is unit
+        triangular and so leaves every orbital NORM untouched, while Cright = inv(U) carries the WHOLE scaling.
+        The two sides are then treated unequally, and for T a pure ROTATION the right-hand orbitals come back
+        with norms 1/cos(theta) although a rotation can change no norm at all.  The symmetric split has
+        Sigma = I for a rotation, so BOTH factors are orthogonal and BOTH sets of norms are preserved exactly.
+
+        THAT WAS NOT COSMETIC.  `BiOrthogonal.computeTransformation` returns correctly biorthogonal but
+        UNNORMALISED orbitals -- it must, since biorthogonality excludes normalisation -- and the N-vs-(N-1)
+        consumers (`AutoIonization`, `PhotoIonization` with calcBiorthogonal = true) then rebuild a MEAN FIELD
+        from the transformed ionic core in order to generate the continuum orbital.  Measured on Mg, Z = 12,
+        initial [Ne] 3p^2 + [Ne] 3s^2 against final [Ne] 3s, with 1s and 2s mixed by theta = 0.37 -- a pure
+        relabelling of a uniformly closed pair, with provably ZERO physical consequence: under the LU split that
+        core's density carried 11.300876 electrons instead of 11, its DFS screening shifted by ~0.3 charge units
+        at every radius, and the Auger rate of a line that is BIT-IDENTICALLY invariant without the
+        transformation moved by +84.7 %.  The error scales as theta^2, i.e. with the NORM defect
+        1/cos(theta) - 1, and not as theta, the orbital mixing -- which is what identified the cause.  The
+        same-N consumers (`PhotoEmission`, `PhotoExcitation`, `GeneralizedOscillatorStrength`) never rebuild a
+        mean field, which is why they validated while this did not.  See `tools/probeBiorthogonalNormDefect.jl`
+        and `TestFrames.testModule_BiOrthogonalRotation`.
+"""
+function  appendixB(S::Matrix{Float64})
+    n, m = size(S)
+    m < n   &&   error("BiOrthogonal.appendixB(): expects m >= n, got $n x $m.")
+    T = S[:, 1:n];    Z = S[:, n+1:m]
+    F     = LinearAlgebra.svd(T)
+    # A SINGULAR VALUE AT ZERO MEANS THE TWO SETS DO NOT SPAN THE SAME SPACE, and no biorthonormal pair exists;
+    # this says so rather than returning an inverse square root of zero
+    if  minimum(F.S) < 1.0e-10
+        error("BiOrthogonal.appendixB(): the overlap block is singular -- smallest singular value " *
+              "$(minimum(F.S)).  The two orbital sets do not span a common space for this kappa, so no "       *
+              "biorthonormal pair exists.  This usually means one side carries an orbital with no counterpart " *
+              "on the other -- a dummy continuum placeholder, for instance.")
+    end
+    # THE FACTORS ARE BUILT SO THAT THE SVD'S OWN GAUGE FREEDOM CANNOT REACH THEM, and that is not a refinement:
+    # the singular vectors are fixed only up to (U, V) -> (U W, V W) for any orthogonal W commuting with Sigma,
+    # which for a ROTATION -- where every singular value is 1 -- is complete freedom.  The bare pair U*Sigma^-1/2
+    # and V*Sigma^-1/2 therefore returns an ARBITRARY orthogonal matrix, and since the new orbitals are built as
+    # newOrb_i = sum_j orb_j * C[j,i], an arbitrary C RELABELS them: `1s` comes back as mostly `2s`.  Measured
+    # 01-Nov-2026, that moved an Auger rate by a factor 31000 and produced a reflection whose logarithm is
+    # complex.  Appending U' on the right of both makes each factor invariant under W, reduces both to the unit
+    # matrix for T = I, and leaves both ORTHOGONAL for T a rotation -- which is the norm preservation this
+    # function exists to provide.
+    U = Matrix(F.U);    V = Matrix(F.V);    invSqrt = LinearAlgebra.Diagonal(1.0 ./ sqrt.(F.S))
+    Cleft = U * invSqrt * U'
+    C11   = V * invSqrt * U'
+    C12   = -C11 * (Cleft' * Z)
+    Cright                 = zeros(m, m)
+    Cright[1:n, 1:n]       = C11
+    Cright[1:n, n+1:m]     = C12
+    Cright[n+1:m, n+1:m]   = Matrix{Float64}(LinearAlgebra.I, m-n, m-n)
+
+    return( (Cleft, Cright) )
+end
+
+
+"""
+`BiOrthogonal.computeTransformationMatrices(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)`
+    ... computes, for every kappa symmetry present in leftBasis or rightBasis, the pair of upper-triangular
+        orbital transformation matrices (Cleft, Cright) that bring the (in general non-orthogonal) orbital
+        sets of leftBasis and rightBasis into biorthonormal form, following Olsen, Godefroid, Jönsson,
+        Malmqvist & Froese Fischer, Phys. Rev. E 52, 4499 (1995): for a fixed orbital ordering (here, by
+        increasing principal quantum number n within a kappa symmetry), requiring the transformation
+        matrices to be upper triangular reduces their determination to a triangular (LU) factorization of
+        the overlap matrix S_ij = <phi_i^left|phi_j^right>. With S = L*U (L unit-lower-triangular, U
+        upper-triangular, no pivoting so the chosen n-ordering is preserved), Cleft = inv(L)' and
+        Cright = inv(U) satisfy Cleft' * S * Cright = I exactly.
+
+        THE DIFFERING-DIMENSION CASE IS SUPPORTED (Appendix B of the same paper, added 04-Sep-2026). Nothing in
+        the biorthonormality condition requires the two sides to carry the same number of orbitals for a given
+        kappa. With n orbitals on the smaller side and m > n on the larger, the n x m overlap matrix splits as
+        S = (T Z) with T square of order n, and Cleft' * S * Cright = (I 0) is met by the ansatz
+        Cright = [C11 C12; 0 I]. Eqs. (B4) and (B6) then give Cleft' * T * C11 = I -- which is exactly the
+        square problem already solved above, on T -- and C12 = -(Cleft' * T)^(-1) * Cleft' * Z. Since (B4)
+        identifies Cleft' * T as inv(C11), the inverse is already in hand and C12 = -C11 * (Cleft' * Z); no
+        second factorisation is needed. Either side may be the larger, the two cases being related by
+        transposition. BOTH RETURNED MATRICES REMAIN SQUARE -- of order n_left and n_right -- so everything
+        downstream, which only forms linear combinations within one side, is unaffected.
+        A Dict{Int64, Tuple{Array{Subshell,1},
+        Array{Subshell,1}, Matrix{Float64}, Matrix{Float64}}}, keyed by kappa and giving the (ordered)
+        subshell lists together with (Cleft, Cright) for that symmetry block, is returned.
+"""
+function  computeTransformationMatrices(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)
+    kappas = unique( [sh.kappa for sh in leftBasis.subshells] ∪ [sh.kappa for sh in rightBasis.subshells] )
+    result = Dict{Int64, Tuple{Array{Subshell,1},Array{Subshell,1},Matrix{Float64},Matrix{Float64}}}()
+
+    for  kappa  in  kappas
+        lList = sort( [sh for sh in leftBasis.subshells  if sh.kappa == kappa], by = sh -> sh.n )
+        rList = sort( [sh for sh in rightBasis.subshells if sh.kappa == kappa], by = sh -> sh.n )
+        nl = length(lList);   nr = length(rList)
+        (nl == 0  ||  nr == 0)  &&  continue
+        S  = zeros(nl, nr)
+        for  i = 1:nl,  j = 1:nr
+            S[i,j] = RadialIntegrals.overlap(leftBasis.orbitals[lList[i]], rightBasis.orbitals[rList[j]], grid)
+        end
+
+        # THE SQUARE CASE GOES THROUGH appendixB TOO, rather than carrying its own copy of the factorisation.
+        # With m == n that function's Z block is empty and it reduces to exactly the square problem, so this is
+        # one implementation instead of two -- and the two had drifted: the inline copy here kept the unpivoted
+        # LU after appendixB moved to a symmetric split on 01-Nov-2026, which left the defect that change was
+        # made to remove alive on every equal-dimension block, i.e. on the common case.
+        if      nl <= nr
+            Cleft, Cright = BiOrthogonal.appendixB(S)
+        else
+            ## the mirror case: transpose, solve with the two sides exchanged, and hand back swapped
+            Crm, Clm      = BiOrthogonal.appendixB( Matrix(S') )
+            Cleft, Cright = Clm, Crm
+        end
+        result[kappa] = (lList, rList, Cleft, Cright)
+    end
+
+    return( result )
+end
+
+
+"""
+`BiOrthogonal.generateBiorthogonalShellMatrices(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)`
+    ... generates the biorthogonal forms of the orbitals of leftBasis and rightBasis, by applying the
+        transformation matrices from `computeTransformationMatrices` to the radial functions (P, Q, Pprime,
+        Qprime) of every orbital, kappa symmetry by kappa symmetry. Since orbitals of different length
+        (different last tabulated grid point) can occur for the same kappa, each is zero-padded up to the
+        longest orbital of its own side before the linear combination is formed. A tuple
+        tpl(newLeftOrbitals::Dict{Subshell,Orbital}, newRightOrbitals::Dict{Subshell,Orbital}) is returned,
+        with the SAME subshell keys as the original bases -- only the radial functions have changed. An orbital
+        whose kappa occurs on one side only has no partner to be made biorthogonal to, and is returned unchanged.
+"""
+function  generateBiorthogonalShellMatrices(leftBasis::Basis, rightBasis::Basis, grid::Radial.Grid)
+    transformation = BiOrthogonal.computeTransformationMatrices(leftBasis, rightBasis, grid)
+    newLeft  = Dict{Subshell,Radial.Orbital}()
+    newRight = Dict{Subshell,Radial.Orbital}()
+
+    padTo(v::Array{Float64,1}, len::Int64) = length(v) >= len ? v[1:len] : vcat(v, zeros(len - length(v)))
+
+    ## THE TWO SIDES ARE LOOPED SEPARATELY, each with its OWN dimension.  A single n taken from the
+    ## left list was correct only while the two sides were required to have equally many orbitals per
+    ## kappa; with Appendix B in place they need not, and sharing n would silently skip right-hand
+    ## orbitals (n_right > n_left) or index past the end of the left list (n_left > n_right).
+    for  (_, (lList, rList, Cleft, Cright))  in  transformation
+        nl    = length(lList);   nr = length(rList)
+        lOrbs = [leftBasis.orbitals[sh]  for sh in lList]
+        rOrbs = [rightBasis.orbitals[sh] for sh in rList]
+        lenL  = maximum( length(o.P) for o in lOrbs )
+        lenR  = maximum( length(o.P) for o in rOrbs )
+
+        for  i = 1:nl
+            newP  = sum( padTo(lOrbs[j].P,      lenL) * Cleft[j,i]  for j = 1:nl )
+            newQ  = sum( padTo(lOrbs[j].Q,      lenL) * Cleft[j,i]  for j = 1:nl )
+            newPp = sum( padTo(lOrbs[j].Pprime, lenL) * Cleft[j,i]  for j = 1:nl )
+            newQp = sum( padTo(lOrbs[j].Qprime, lenL) * Cleft[j,i]  for j = 1:nl )
+            newLeft[lList[i]]  = Radial.Orbital(lList[i], lOrbs[i].isBound, lOrbs[i].useStandardGrid,
+                                                    lOrbs[i].energy, newP, newQ, newPp, newQp, grid)
+        end
+
+        for  i = 1:nr
+            newP  = sum( padTo(rOrbs[j].P,      lenR) * Cright[j,i] for j = 1:nr )
+            newQ  = sum( padTo(rOrbs[j].Q,      lenR) * Cright[j,i] for j = 1:nr )
+            newPp = sum( padTo(rOrbs[j].Pprime, lenR) * Cright[j,i] for j = 1:nr )
+            newQp = sum( padTo(rOrbs[j].Qprime, lenR) * Cright[j,i] for j = 1:nr )
+            newRight[rList[i]] = Radial.Orbital(rList[i], rOrbs[i].isBound, rOrbs[i].useStandardGrid,
+                                                    rOrbs[i].energy, newP, newQ, newPp, newQp, grid)
+        end
+    end
+
+    for  sh in leftBasis.subshells    if  !haskey(newLeft,  sh)    newLeft[sh]  = leftBasis.orbitals[sh]     end   end
+    for  sh in rightBasis.subshells   if  !haskey(newRight, sh)    newRight[sh] = rightBasis.orbitals[sh]    end   end
+
+    return( (newLeft, newRight) )
 end
 
 
 
 """
-`BiOrthogonal.computeTransformationMatrices()`  
-    ... computes the transformation matrices for rotating the radial functions and for counter-rotating CI coefficients.
+`BiOrthogonal.checkClosureUnderDeexcitation(basis::Basis)`
+    ... checks whether the CSF list of basis is closed under de-excitation (Olsen, Godefroid, Jönsson,
+        Malmqvist & Froese Fischer, Phys. Rev. E 52, 4499 (1995)): for every CSF and every occupied
+        subshell nl with n > n', if the (lower) subshell n'l is also present in basis.subshells and is
+        not already fully occupied in that CSF, then moving one electron from nl to n'l (all other
+        occupations unchanged) must produce the occupation pattern of some CSF already in basis.csfs.
+        This is checked at the level of occupation-number patterns only (not the full recoupling of
+        seniority/subshellJ/subshellX), which is a necessary but not by itself sufficient condition for
+        closure -- for the RAS/CAS-type configuration lists this transformation is intended for, an
+        occupation-pattern match is expected to reflect true closure in practice. A
+        Array{String,1} of human-readable violation descriptions is returned (empty if closed).
 """
-function  computeTransformationMatrices()
-    return( 1.0 )
+function  checkClosureUnderDeexcitation(basis::Basis)
+    violations = String[]
+    occupationSets = Set( csf.occupation  for  csf in basis.csfs )
+
+    for  csf  in  basis.csfs
+        # basis.subshells, not Defaults.GBL_STANDARD_SUBSHELL_LIST -- the latter is mutable global state that
+        # may have since been overwritten by a later, unrelated SCF call (e.g. for a differently-sized basis
+        # on the other side of a bi-orthogonal transformation), while csf.occupation is always indexed
+        # against THIS basis's own (fixed) subshell list, regardless of csf.useStandardSubshells.
+        subshells = basis.subshells
+        for  (i, shi)  in  enumerate(subshells)
+            if  csf.occupation[i] == 0    continue    end
+            for  (j, shj)  in  enumerate(subshells)
+                if  Basics.subshell_l(shj) != Basics.subshell_l(shi)  ||  shj.n >= shi.n    continue    end
+                maxOccJ = Basics.subshell_2j(shj) + 1
+                if  csf.occupation[j] >= maxOccJ    continue    end
+
+                targetOcc        = copy(csf.occupation)
+                targetOcc[i]    -= 1
+                targetOcc[j]    += 1
+                if  !(targetOcc in occupationSets)
+                    push!(violations, "CSF (J=$(csf.J), parity=$(csf.parity), occupation=$(csf.occupation)): " *
+                                        "de-exciting $shi -> $shj is not closed within this basis.")
+                end
+            end
+        end
+    end
+
+    return( violations )
 end
 
 
-
 """
-`BiOrthogonal.generateBiorthogonalShellMatrices()`  
-    ... generates the biorthogonal forms of initial and final shells.
+`BiOrthogonal.generateCounterRotatingCiMatrices(basis::Basis, transformation::Dict, side::Symbol)`
+    ... generates the nCSF x nCSF matrix M that counter-rotates the CI (mixing-coefficient) vectors of
+        basis's levels to compensate for the orbital transformation encoded in transformation (the output
+        of `computeTransformationMatrices`); side is either :left or :right, selecting the (Cleft) or
+        (Cright) half of the transformation and the correspondingly-ordered subshell list for that side.
+        A general (not necessarily unitary) one-electron transformation new_creator_k = sum_l C_lk *
+        old_creator_l is implemented via the many-electron operator built from its matrix logarithm (a
+        standard result: the generator of a one-body basis change is the one-body operator with the SAME
+        matrix, in the log; holds for any invertible C, not only orthogonal/unitary ones). Concretely:
+        (i) per kappa symmetry, factor G = log(C) (upper triangular, since C is upper triangular with
+        nonzero diagonal); (ii) build the one-electron operator matrix Ghat over the full CSF list using
+        the SAME reduced one-body coupling coefficients JAC already uses for one-body Hamiltonian terms
+        (`SpinAngular.computeCoefficients(OneParticleOperator(0,plus), csfR, csfS, subshells)`,
+        weighted by G_ab instead of a radial integral). The coefficient is used BARE: since 27-Aug-2026 the
+        rank-0 coefficient carries sqrt(2 j_a + 1) itself, so no factor belongs at the call site. A one-particle toy-model check (N=1,
+        two orbitals) shows the OLD and NEW expansion coefficients are related by c_old = C * c_new
+        (not c_new = C * c_old) -- i.e. the CI vector transforms with the INVERSE of the orbital
+        transformation -- so (iii) M = exp(-Ghat) is returned. The transformed CI vector for a level is
+        mc_new = M * mc_old (same CSF ordering, only the coefficients change).
 """
-function  generateBiorthogonalShellMatrices()
-    return( 1.0 )
-end
+function  generateCounterRotatingCiMatrices(basis::Basis, transformation::Dict, side::Symbol)
+    nCSF  = length(basis.csfs)
+    Gmap  = Dict{Tuple{Subshell,Subshell},Float64}()
 
+    for  (_, (lList, rList, Cleft, Cright))  in  transformation
+        shellList = side == :left ? lList : (side == :right ? rList : error("side must be :left or :right"))
+        C         = side == :left ? Cleft : Cright
+        # A REAL LOGARITHM EXISTS ONLY WHERE NO EIGENVALUE IS NEGATIVE, and `BiOrthogonal.alignOrbitalSigns` is
+        # what normally ensures it.  Should one survive -- an overlap matrix far enough from the identity that a
+        # pivot turns negative although every diagonal overlap is positive -- this says SO, with the block and the
+        # offending eigenvalue, instead of letting a complex entry reach a Float64 dict and raise an InexactError
+        # that names neither this module nor the cause.
+        Graw      = log(C)
+        if  !(eltype(Graw) <: Real)
+            evs = LinearAlgebra.eigvals(C);    neg = evs[findall(e -> real(e) < 0. && abs(imag(e)) < 1.0e-8, evs)]
+            error("BiOrthogonal.generateCounterRotatingCiMatrices(): the $(side) transformation of the block " *
+                  "$(shellList) has no REAL matrix logarithm, so the counter-rotation cannot be built.  " *
+                  "Negative eigenvalue(s): $(neg).  This means one orbital of that block still carries the " *
+                  "opposite overall sign in the two bases after BiOrthogonal.alignOrbitalSigns, which aligns " *
+                  "them by their pairwise overlap;  a block whose overlap is far from the identity can do this " *
+                  "with every DIAGONAL overlap positive.  The transformation must be refused rather than " *
+                  "silently truncated to its real part, which would not be the counter-rotation of anything.")
+        end
+        G         = real(Graw)
+        n         = length(shellList)
+        for  a = 1:n,  b = 1:n
+            if  G[a,b] != 0.0    Gmap[(shellList[a], shellList[b])] = G[a,b]    end
+        end
+    end
 
+    opa   = SpinAngular.OneParticleOperator(0, Basics.plus)
+    Ghat  = zeros(nCSF, nCSF)
+    for  mu = 1:nCSF,  nu = 1:nCSF
+        coeffs = SpinAngular.computeCoefficients(opa, basis.csfs[mu], basis.csfs[nu], basis.subshells)
+        for  c  in  coeffs
+            if  haskey(Gmap, (c.a, c.b))
+                Ghat[mu,nu] += c.T * Gmap[(c.a, c.b)]
+            end
+        end
+    end
 
-"""
-`BiOrthogonal.generateCounterRotatingCiMatrices()`  
-    ... generates the counter-rotating matrices for the CI coefficients of the initial and final states.
-"""
-function  generateCounterRotatingCiMatrices()
-    return( 1.0 )
+    return( exp(-Ghat) )
 end
 
 end # module
 
 
 #========================================================
+DISABLED, and KEPT: design notes addressed to a collaborator, not code.  They record why the GRASP2018
+rbiotransform structure was not followed and what a compact Julia implementation needs instead.
+Labelled 13-Aug-2026.
+
 Comments & thoughts on the implementation of this module
 --------------------------------------------------------
 

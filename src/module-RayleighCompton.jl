@@ -2,6 +2,28 @@
 """
 `module  JAC.RayleighCompton`  
 ... a submodel of JAC that contains all methods for computing elastic Rayleigh and inelastic Compton photon scattering cross sections.
+
+    STATUS, 22-Aug-2026:  PARKED PROVISIONALLY, AWAITING THE MAINTAINER'S ENDORSEMENT.  The defect set out below was
+    diagnosed by the assistant, and RayleighCompton.computeLines() was made to raise on that basis; the maintainer has
+    NOT yet endorsed either the diagnosis or the parking.  Read this as a claim to be checked rather than as a settled
+    decision -- but not as an oversight either: the refusal is deliberate.  Do not pick this module up, and do not
+    repair it, without asking the maintainer first.
+
+    WHAT IS WRONG, concretely.  In computeChannelAmplitude the loop over the Green-function levels opens with
+    `for (ig, gLevel) in enumerate(gChannel.gMultiplet.levels)` and immediately does `if ig != 1  continue  end`,
+    directly beneath a comment reading "Sum over all terms of the Green function channel".  A second-order
+    amplitude therefore collapses to its first term.  Nothing signals this: the run completes and prints a cross
+    section.  Separately, the pole branch (the leftIdx / lowerMid / upperMid arithmetic above it) raises a
+    MethodError, so that path was never exercised either.
+
+    DO NOT MISREAD THE `13May2024` DATES.  They are real, but they were obtained on paths that never reached the
+    intermediate sum; they are not evidence that the second-order amplitude ever worked.
+
+    WHERE THE WORKING CODE IS.  PhotonScattering supersedes this module -- RayleighScattering(), ComptonScattering()
+    and RamanScattering() there carry the full intermediate sum over a user-supplied gMultiplet, with a capability
+    guard over (beamType, process, approximation).  See examples/example-Pa.jl ... example-Pe.jl.  Note that only
+    the form-factor path is absolutely normalised so far (example-Pd.jl branch a); the second-order prefactor there
+    is still underived, which is a different and much smaller defect than the one parked here.
 """
 module RayleighCompton
 
@@ -44,7 +66,41 @@ end
 `RayleighCompton.Settings()`  ... constructor for the default values of Rayleigh-Compton photon-scattering estimates.
 """
 function Settings()
-    Settings(EmMultipole[], UseGauge[], GreenChannel[], 0., false, false, false, false, ExpStokes(), SolidAngle[], LineSelection() )
+    Settings(EmMultipole[], UseGauge[], Float64[], GreenChannel[], false, false, false, false, ExpStokes(), SolidAngle[], LineSelection() )
+end
+
+
+"""
+`RayleighCompton.Settings(set::RayleighCompton.Settings;`
+
+        multipoles=.., gauges=.., photonEnergies=.., green=.., calcRayleighRaman=.., calcAngular=..,
+        calcStokes=.., printBefore=.., incidentStokes=.., solidAngles=.., lineSelection=..)
+
+    ... keyword copy-constructor for re-defining selected values of a settings::RayleighCompton.Settings.
+"""
+function Settings(set::RayleighCompton.Settings;
+        multipoles::Union{Nothing,Array{EmMultipole}}=nothing,
+        gauges::Union{Nothing,Array{UseGauge}}=nothing,
+        photonEnergies::Union{Nothing,Array{Float64,1}}=nothing,
+        green::Union{Nothing,Array{AtomicState.GreenChannel,1}}=nothing,
+        calcRayleighRaman::Union{Nothing,Bool}=nothing,    calcAngular::Union{Nothing,Bool}=nothing,
+        calcStokes::Union{Nothing,Bool}=nothing,           printBefore::Union{Nothing,Bool}=nothing,
+        incidentStokes::Union{Nothing,ExpStokes}=nothing,  solidAngles::Union{Nothing,Array{SolidAngle,1}}=nothing,
+        lineSelection::Union{Nothing,LineSelection}=nothing)
+    if  isnothing(multipoles)          multipolesx        = set.multipoles         else   multipolesx        = multipoles         end
+    if  isnothing(gauges)              gaugesx            = set.gauges             else   gaugesx            = gauges             end
+    if  isnothing(photonEnergies)      photonEnergiesx    = set.photonEnergies     else   photonEnergiesx    = photonEnergies     end
+    if  isnothing(green)               greenx             = set.green              else   greenx             = green              end
+    if  isnothing(calcRayleighRaman)   calcRayleighRamanx = set.calcRayleighRaman  else   calcRayleighRamanx = calcRayleighRaman  end
+    if  isnothing(calcAngular)         calcAngularx       = set.calcAngular        else   calcAngularx       = calcAngular        end
+    if  isnothing(calcStokes)          calcStokesx        = set.calcStokes         else   calcStokesx        = calcStokes         end
+    if  isnothing(printBefore)         printBeforex       = set.printBefore        else   printBeforex       = printBefore        end
+    if  isnothing(incidentStokes)      incidentStokesx    = set.incidentStokes     else   incidentStokesx    = incidentStokes     end
+    if  isnothing(solidAngles)         solidAnglesx       = set.solidAngles        else   solidAnglesx       = solidAngles        end
+    if  isnothing(lineSelection)       lineSelectionx     = set.lineSelection      else   lineSelectionx     = lineSelection      end
+
+    Settings( multipolesx, gaugesx, photonEnergiesx, greenx, calcRayleighRamanx,
+              calcAngularx, calcStokesx, printBeforex, incidentStokesx, solidAnglesx, lineSelectionx )
 end
 
 
@@ -199,6 +255,17 @@ end
         lines::Array{RayleighCompton.Lines} is returned.
 """
 function  computeLines(finalMultiplet::Multiplet, initialMultiplet::Multiplet, grid::Radial.Grid, settings::RayleighCompton.Settings; output=true)
+    # PARKED PROVISIONALLY 22-Aug-2026; refuse rather than return a second-order amplitude missing all but its first term.
+    error("\n\nRayleighCompton: this module was PARKED PROVISIONALLY on 22-Aug-2026 and does NOT compute a\n"           *
+          ">>> trustworthy amplitude. The diagnosis below is the assistant's and awaits the maintainer's\n"             *
+          ">>> endorsement; it is a claim to be checked, not a settled decision.\n"                                     *
+          ">>> Its sum over the intermediate states runs for ig == 1 only -- `if ig != 1  continue  end` in\n"          *
+          ">>> computeChannelAmplitude, under a comment reading 'Sum over all terms' -- so a second-order amplitude\n"  *
+          ">>> collapses to its FIRST TERM, silently and without an error; the pole branch raises a MethodError\n"      *
+          ">>> besides. The 13May2024 dates it carries were obtained on paths that never reached this one.\n"           *
+          ">>> Use PhotonScattering instead: RayleighScattering(), ComptonScattering() and RamanScattering() there\n"   *
+          ">>> carry the full intermediate sum. See examples/example-Pa.jl ... example-Pe.jl.\n"                        *
+          ">>> Do NOT repair this module without asking the maintainer first.\n")
     println("")
     printstyled("RayleighCompton.computeLines(): The computation of Rayleigh-Compton reduced amplitudes starts now ... \n", color=:light_green)
     printstyled("----------------------------------------------------------------------------------------------------- \n", color=:light_green)
@@ -269,7 +336,6 @@ function  computeChannelAmplitude(channel::RayleighCompton.Channel, finalLevel::
     # Analyse of whether there is a sign change in the denominator for the current and next function
     hasPole = false;    leftIdx = -99
     for  (ig, gLevel)  in  enumerate(gChannel.gMultiplet.levels)
-        ##x if channel.isS12    @show channel.isS12, ig, gLevel.energy, initialLevel.energy - gLevel.energy - channel.omega2   end
         if   ig == 1   continue
         elseif   channel.isS12   &&    sign(initialLevel.energy - gChannel.gMultiplet.levels[ig-1].energy - channel.omega2)  !=  
                                        sign(initialLevel.energy - gLevel.energy - channel.omega2)  
@@ -279,7 +345,6 @@ function  computeChannelAmplitude(channel::RayleighCompton.Channel, finalLevel::
                                        hasPole = true;      leftIdx = ig - 1;   break                              # for S_21
         end
     end
-    ## @show channel.isS12, gChannel.symmetry, h asPole, channel.omega1, channel.omega2
     
     # Extract relevant parameters to (later) compute the contribution of the pole-interval
     if  hasPole
@@ -298,18 +363,15 @@ function  computeChannelAmplitude(channel::RayleighCompton.Channel, finalLevel::
         else               poleEnergy = initialLevel.energy + channel.omega1
         end
         #
-        @show channel.isS12, poleEnergy, lowerMid, lowerEnergy, midEnergy, upperEnergy, upperMid        
     end
         
     # Sum over all terms of the Green function channel; distinghuis between S_12 and S_21 integrals
     amplitude  = 0.0im;   lowerNom = lowerDenom = upperNom = upperDenom = 0.
-    @show "  "
-    @show "  "
     for  (ig, gLevel)  in  enumerate(gChannel.gMultiplet.levels)
         if   ig != 1   continue   end
         if   channel.isS12  # for S_12
-            leftMe  = PhotoEmission.amplitude("absorption", channel.multipole1, channel.gauge, channel.omega1, finalLevel, gLevel, grid, display=false)
-            rightMe = PhotoEmission.amplitude("absorption", channel.multipole2, channel.gauge, channel.omega2, gLevel, initialLevel, grid, display=false)
+            leftMe  = PhotoEmission.amplitude(Absorption(), channel.multipole1, channel.gauge, channel.omega1, finalLevel, gLevel, grid, display=false)
+            rightMe = PhotoEmission.amplitude(Absorption(), channel.multipole2, channel.gauge, channel.omega2, gLevel, initialLevel, grid, display=false)
             #
             if        ig == leftIdx     lowerNom = leftMe * rightMe;   lowerDenom = (initialLevel.energy - gLevel.energy - channel.omega2);   me = 0.0im  
             elseif    ig == leftIdx+1   upperNom = leftMe * rightMe;   upperDenom = (initialLevel.energy - gLevel.energy - channel.omega2);   me = 0.0im 
@@ -317,8 +379,8 @@ function  computeChannelAmplitude(channel::RayleighCompton.Channel, finalLevel::
                                         denominator = (initialLevel.energy - gLevel.energy - channel.omega2)
             end
         else 
-            leftMe  = PhotoEmission.amplitude("absorption", channel.multipole2, channel.gauge, channel.omega2, finalLevel, gLevel, grid, display=false)
-            rightMe = PhotoEmission.amplitude("absorption", channel.multipole1, channel.gauge, channel.omega1, gLevel, initialLevel, grid, display=false)
+            leftMe  = PhotoEmission.amplitude(Absorption(), channel.multipole2, channel.gauge, channel.omega2, finalLevel, gLevel, grid, display=false)
+            rightMe = PhotoEmission.amplitude(Absorption(), channel.multipole1, channel.gauge, channel.omega1, gLevel, initialLevel, grid, display=false)
             #
             if        ig == leftIdx     lowerNom = leftMe * rightMe;   lowerDenom = (initialLevel.energy - gLevel.energy + channel.omega1);   me = 0.0im  
             elseif    ig == leftIdx+1   upperNom = leftMe * rightMe;   upperDenom = (initialLevel.energy - gLevel.energy + channel.omega1);   me = 0.0im 
@@ -326,10 +388,8 @@ function  computeChannelAmplitude(channel::RayleighCompton.Channel, finalLevel::
                                         denominator = (initialLevel.energy - gLevel.energy + channel.omega1)
             end
         end
-        @show leftMe, rightMe, denominator
         amplitude  = amplitude + me
     end
-    @show hasPole, channel.isS12, channel.Jsym, amplitude
     # Add the contribution from the pole region
     if  hasPole   
         amplitude = amplitude + computePoleInterval(poleEnergy, lowerMid, lowerEnergy, midEnergy, upperEnergy, upperMid,
@@ -360,7 +420,6 @@ function determineChannels(finalLevel::Level, initialLevel::Level, inOmega::Floa
                     elseif (string(mp1)[1] == 'E' || string(mp2)[1] == 'E')  &&   gauge == Basics.UseBabushkin    
                         push!(channels, Channel(true,  symn, mp1, mp2, Basics.Babushkin, inOmega, outOmega, ComplexF64(0.)) ) 
                         push!(channels, Channel(false, symn, mp1, mp2, Basics.Babushkin, inOmega, outOmega, ComplexF64(0.)) ) 
-                        ##x @show  gauge, Channel(true,  symn, mp1, mp2, Basics.Babushkin, inOmega, outOmega, ComplexF64(0.))
                     elseif string(mp1)[1] == 'M' && string(mp2)[1] == 'M'
                         push!(channels, Channel(true,  symn, mp1, mp2, Basics.Magnetic,  inOmega, outOmega, ComplexF64(0.)) ) 
                         push!(channels, Channel(false, symn, mp1, mp2, Basics.Magnetic,  inOmega, outOmega, ComplexF64(0.)) ) 

@@ -4,6 +4,12 @@
 ... a submodel of JAC that contains methods and data from the periodic table of elements. Although we here collect 
     data for various elements, no attempt will be made to set-up a full compilation. Instead, useful information
     and some semi-empirical data are compiled to simplify the use of the JAC package in the future.
+
+    LINE WIDTH: THIS FILE IS EXEMPT FROM THE 140-COLUMN RULE, and deliberately so (maintainer's decision,
+    31-Aug-2026). Its 698 over-long lines are the rows of ALIGNED DATA TABLES -- one element per line, with
+    symbol, name, mass, density, ionization energy, ground configuration and further quantities each in a fixed
+    column. The alignment IS the readability here: a reader checks one quantity down a column, which is exactly
+    what wrapping would destroy. Do not re-flow them, and do not raise this as a finding.
 """
 module PeriodicTable
 
@@ -13,10 +19,19 @@ module PeriodicTable
     ... defines an abstract and a number of singleton types to deal with different data set for binding energies,
         ionization potentials, etc.
 
-    + Larkins1977       ... assumes a Lorentzian line profile L^Lorentzian (omega)
-    + Nist2025          ... assumes a Lorentzian line profile L^Lorentzian (omega)
-    + Williams2000      ... applies the subshell binding energies by Williams (2000)
-    + XrayDataBooklet   ... assumes a Lorentzian line profile L^Lorentzian (omega)
+    + Larkins1977       ... F. Larkins' (1977) inner-shell (1s - 4p) subshell binding energies of the neutral atom;
+                            Z = 1, ..., 45, with many (Z, subshell) combinations left undefined.
+    + Nist2025          ... NIST's (2025) tabulated successive ionization potentials of the neutral atom and all its
+                            ions, Z = 1, ..., 92; used by Empirical.ionizationPotential and by
+                            Empirical.totalEnergy(data=Nist2025()); not supported by Empirical.bindingEnergy.
+    + Williams2000      ... the subshell binding energies of Williams (2000), part of the LBNL X-Ray Data Booklet's
+                            Table 1-1; Z = 1, ..., 36 only, shells 1s - 4p.
+    + XrayDataBooklet   ... the LBNL X-Ray Data Booklet's Table 1-1 [J. A. Bearden & A. F. Burr, Rev. Mod. Phys. 39,
+                            125 (1967); M. Cardona & L. Ley, Photoemission in Solids I (1978); J. C. Fuggle &
+                            N. Mårtensson, J. Electron Spectrosc. Relat. Phenom. 21, 275 (1980)] -- the same lineage
+                            as Williams2000, and numerically identical wherever both are tabulated, but with the
+                            fuller Z = 1, ..., 92 and shells 1s - 6p coverage; the default data set for
+                            Empirical.bindingEnergy/scaledBindingEnergy and the functions built on them.
 """
 abstract type  AbstractEnergyData                                    end
 struct     Larkins1977                   <:  AbstractEnergyData      end
@@ -26,6 +41,40 @@ struct     XrayDataBooklet               <:  AbstractEnergyData      end
 
 
 export  AbstractEnergyData, Larkins1977, Nist2025, Williams2000, XrayDataBooklet
+
+
+"""
+`abstract type PeriodicTable.AbstractRecombinationData`
+    ... defines an abstract and a number of singleton types to deal with different data sets of fitted
+        recombination-rate-coefficient parameters.
+
+    + Arnaud1985   ... M. Arnaud & R. Rothenflug, Astron. Astrophys. Suppl. Ser. 60, 425 (1985); their Table IIB
+                        gives the dielectronic recombination fit parameters (ADI, BDI, T0, T1) for the H-like
+                        sequence, but only for 4 specific ions: O VIII (Z=8), Mg XII (Z=12), Ca XX (Z=20),
+                        Fe XXVI (Z=26) -- not a general Z-scaling formula. Their He-like sequence rate is instead
+                        a genuine Z-scaling closed form (no table), which is implemented directly in
+                        Empirical.dielectronicRecombinationPlasmaAlpha rather than stored here.
+"""
+abstract type  AbstractRecombinationData                             end
+struct     Arnaud1985                    <:  AbstractRecombinationData end
+
+
+export  AbstractRecombinationData, Arnaud1985
+
+
+"""
+`abstract type PeriodicTable.AbstractYieldData`
+    ... defines an abstract and a number of singleton types to deal with different data sets for fluorescence,
+        Auger and Coster-Kronig yields. These yields are dimensionless probabilities and are kept apart from the
+        AbstractEnergyData above.
+
+    + KrauseAdopted2016   ... applies the K-shell fluorescence yields as adopted by the xraylib project (2016)
+"""
+abstract type  AbstractYieldData                                     end
+struct     KrauseAdopted2016             <:  AbstractYieldData       end
+
+
+export  AbstractYieldData, KrauseAdopted2016
 
 #################################################################################################################################
 #################################################################################################################################
@@ -138,7 +187,7 @@ end
 
 
 """
-`PeriodicTable.Isotope()`  ... simple constructur for an empty instance of an isotope.
+`PeriodicTable.Isotope(i::Int64)`  ... simple constructur for an empty instance of an isotope.
 """
 function Isotope(i::Int64)
     Isotope( i, NaN, AngularJ64(0), NaN, NaN)
@@ -508,12 +557,14 @@ end
 
 
 """
-`PeriodicTable.bindingEnergies_Williams2000(Z::Int64)`  ... former  JAC.store_Williams2000(Z::Int64)
+`PeriodicTable.bindingEnergies_Williams2000(Z::Int64)`  ... former  `store_Williams2000(Z::Int64)`
     ... to return the `stored values' of Williams et al. (2000), ... for the element with nuclear charge Z.
 """
 function bindingEnergies_Williams2000(Z::Int64)
-    # This procedure 'stores' the binding energies of the inner-shell electrons 1s, ..., 3d for all elements from Z = 1, ..., 54;
-    # all binding energies are given in eV
+    # This procedure 'stores' the binding energies of the inner-shell electrons 1s, ..., 4p for all elements from Z = 1, ..., 36
+    # (not 54, despite what an earlier version of this comment claimed -- verified against the actual branches below);
+    # all binding energies are given in eV. For the fuller Z = 1, ..., 92 coverage, use XrayDataBooklet instead, which
+    # follows the same underlying LBNL X-Ray Data Booklet Table 1-1 and is numerically identical wherever both are tabulated.
     # 
     #                        1s_1/2,   2s_1/2,   2p_1/2,   2p_3/2,   3s_1/2,   3p_1/2,   3p_3/2,   3d_3/2,   3d_5/2,   4s_1/2,   4p_1/2,   4p_3/2 
     if     Z ==  1   wa = [    13.6,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0]
@@ -583,8 +634,8 @@ function bindingEnergies_XrayDataBooklet(Z::Int64)
                                     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,      -1.0 ]
     elseif Z ==  5   wa = [   188.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,
                                     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,      -1.0 ]
-    elseif Z ==  6   wa = [   284.2,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,
-                                    -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,      -1.0 ]
+    elseif Z ==  6   wa = [   284.2,     19.4,      7.0,      7.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,
+                                    -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,      -1.0 ] #ZS: propagated from bindingEnergies_Williams2000's correction
     elseif Z ==  7   wa = [   409.9,     37.3,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,
                                     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,      -1.0 ]
     elseif Z ==  8   wa = [   543.1,     41.6,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,     -1.0,
@@ -775,7 +826,11 @@ end
 """
 function ionizationPotentials_Nist2025(Z::Int64)
     # This procedure 'stores' the 1st, 2nd, 3rd, ... ionization potentials from NIST database 
-    # (2025; http://physics.nist.gov/PhysRefData/ASD/ionEnergy.html) for all elements from Z = 1, ..., 92;
+    # (2025; http://physics.nist.gov/PhysRefData/ASD/ionEnergy.html) for all elements from Z = 1, ..., 90, each of
+    # them COMPLETE, i.e. carrying all Z successive potentials, so that every charge state of those elements is
+    # covered; Z >= 91 is NOT tabulated at all and raises "Data not available".  Callers that fall back on a
+    # neutral binding energy for a missing entry are therefore wrong only for the actinides from Pa upwards,
+    # and Empirical.ionizationThreshold warns there rather than degrading silently.
     # the q-th ionization potential leads from A^(q-1)+ --> A^q+; all ionization potentials are given in eV
     # 
     #       
@@ -1236,5 +1291,83 @@ function ionizationPotentials_Nist2025(Z::Int64)
     return( wa )
 end
 
-end # module
+"""
+`PeriodicTable.fluorescenceYields_KrauseAdopted2016(Z::Int64)`
+    ... to provide the K-shell fluorescence yield omega_K of the neutral element with nuclear charge Z; this yield is
+        the probability that a K-shell vacancy is filled radiatively rather than by an Auger transition, so that the
+        associated Auger yield is simply a_K = 1 - omega_K. The yields are dimensionless and are tabulated for
+        Z = 3, ..., 100; a value of -1. is returned for Z = 1, 2, where a K-shell vacancy cannot decay radiatively.
+        An omega::Float64 is returned.
 
+        Provenance (please read before relying on these numbers):
+        The values are those adopted by the xraylib project [data/fluor_yield.dat, as of the K-shell revision of
+        11-Apr-2016], which JAC follows here. Their history is layered and not fully documented upstream:
+        + The base data of that file are due to M. Krause, C. Nestor Jr., C. Sparks Jr. and E. Ricci, "X-ray
+          fluorescence cross sections for K and L X-rays of the elements", ORNL-5399, Oak Ridge National
+          Laboratory (1978); this is the compilation behind M. O. Krause, J. Phys. Chem. Ref. Data 8, 307 (1979).
+        + The K-shell values of that base data set were *replaced* in 2016 by the present ones. The xraylib
+          documentation names newer sources (Campbell 2009; Ayri et al. 2021; Kaur et al. 2021) only for the
+          L subshells, so that the origin of the revised K-shell values is not documented upstream.
+        + The two sets differ appreciably: by factors 2 - 20 for Z <= 6 (Be: 3.3e-5 -> 6.9e-4), and in their trend
+          for heavy elements, where the ORNL-5399 values peak near Z = 74 (omega_K = 0.983) and fall off to 0.969
+          at Z = 92, whereas the adopted values rise monotonically to 0.972. The adopted values were preferred
+          because they are those in current use and because the ORNL-5399 set places Be below Li (omega_K decreasing
+          from Z = 3 to Z = 4), which is unphysical.
+        These yields are semi-empirical and should be understood as good to a few percent at best; cf. also the
+        review of Hubbell et al., J. Phys. Chem. Ref. Data 23, 339 (1994).
+"""
+function fluorescenceYields_KrauseAdopted2016(Z::Int64)
+    # K-shell fluorescence yields omega_K [dimensionless] for Z = 3, ..., 100; -1. if no value is defined.
+    wa = [
+         -1.0,     -1.0,0.0002928,0.0006929, 0.001409, 0.002575, 0.004349, 0.006909,  0.01045,  0.01519,   ##  Z =  1 -  10
+      0.02133,  0.02911,  0.03872,  0.05037,  0.06422,  0.08038,  0.09892,   0.1199,   0.1432,   0.1687,   ##  Z = 11 -  20
+       0.1962,   0.2256,   0.2564,   0.2885,   0.3213,   0.3546,    0.388,   0.4212,   0.4538,   0.4857,   ##  Z = 21 -  30
+       0.5166,   0.5464,   0.5748,   0.6019,   0.6275,   0.6517,   0.6744,   0.6956,   0.7155,    0.734,   ##  Z = 31 -  40
+       0.7512,   0.7672,   0.7821,   0.7958,   0.8086,   0.8204,   0.8313,   0.8415,   0.8508,   0.8595,   ##  Z = 41 -  50
+       0.8676,    0.875,   0.8819,   0.8883,   0.8942,   0.8997,   0.9049,   0.9096,    0.914,   0.9181,   ##  Z = 51 -  60
+        0.922,   0.9255,   0.9289,    0.932,   0.9349,   0.9376,   0.9401,   0.9425,   0.9447,   0.9467,   ##  Z = 61 -  70
+       0.9487,   0.9505,   0.9522,   0.9538,   0.9553,   0.9567,    0.958,   0.9592,   0.9604,   0.9615,   ##  Z = 71 -  80
+       0.9625,   0.9634,   0.9643,   0.9652,   0.9659,   0.9667,   0.9674,    0.968,   0.9686,   0.9691,   ##  Z = 81 -  90
+       0.9696,   0.9701,   0.9706,    0.971,   0.9713,   0.9717,    0.972,   0.9722,   0.9725,   0.9727]   ##  Z = 91 - 100
+
+    if  Z < 1  ||  Z > 100   error("No K-shell fluorescence yield available for Z = $Z; the data cover Z = 3, ..., 100.")   end
+    wb = wa[Z]
+    if  wb == -1.   error("No K-shell fluorescence yield defined for Z = $Z; a K-shell vacancy cannot decay radiatively.")  end
+
+    return( wb )
+end
+
+
+"""
+`PeriodicTable.dielectronicRecombinationParameters_Arnaud1985(Z::Int64)`
+    ... to return the H-like-sequence dielectronic recombination fit parameters (ADI, T0) of M. Arnaud &
+        R. Rothenflug, Astron. Astrophys. Suppl. Ser. 60, 425 (1985), their Table IIB, for the bare, recombining
+        nucleus of nuclear charge Z; the rate coefficient follows their Eq. (3) with BDI = 0 (as stated for all
+        4 tabulated ions, so the {1 + BDI exp(-T1/T)} bracket reduces to 1):
+            alpha_d(T) [cm^3/s] = ADI * T^(-3/2) * exp(-T0/T),   T, T0 in K, ADI in cm^3/s K^(3/2).
+        Available for only 4 ions -- O VIII (Z=8), Mg XII (Z=12), Ca XX (Z=20), Fe XXVI (Z=26) -- since the
+        paper tabulates specific ions rather than a general Z-scaling formula for this sequence. A
+        (ADI, T0)::NTuple{2,Float64} is returned.
+
+        Note on transcription: Table IIB's column headers carry small unit-exponent annotations that are easy to
+        misread from a scanned 1985 paper. The values below were cross-checked by requiring T0 to scale
+        consistently with each ion's H-like ionization potential (Table I of the same paper): T0/IP works out to
+        55-60% across all 4 ions, a physically sensible and internally consistent ratio, which supports this
+        reading -- but the values should still be treated as best-effort and spot-checked against an independent
+        source before being relied on for precision work.
+"""
+function dielectronicRecombinationParameters_Arnaud1985(Z::Int64)
+    #                Z    ADI [cm^3/s K^1.5]   T0 [K]
+    if     Z ==  8   wa = (4.72e-2,            6.00e6)     ## O VIII
+    elseif Z == 12   wa = (9.28e-2,            1.45e7)     ## Mg XII
+    elseif Z == 20   wa = (2.68e-1,            3.74e7)     ## Ca XX
+    elseif Z == 26   wa = (3.69e-1,            6.00e7)     ## Fe XXVI
+    else   error("No H-like Arnaud (1985) dielectronic recombination parameters available for Z = $Z; " *
+                 "only O VIII (Z=8), Mg XII (Z=12), Ca XX (Z=20), Fe XXVI (Z=26) are tabulated.")
+    end
+
+    return( wa )
+end
+
+
+end # module

@@ -11,12 +11,6 @@ module Atomic
 using   ..Basics, ..Defaults, ..LSjj, ..Radial, ..ManyElectron, ..Nuclear, ..PhotoEmission, ..SelfConsistent
 export  perform
 
-#== using  ..Einstein, ..Hfs, ..IsotopeShift, ..LandeZeeman, ..AlphaVariation, ..FormFactor, ..DecayYield,
-       ..MultipolePolarizibility, ..PhotoIonization, ..PhotoExcitation, ..PhotoRecombination, 
-       ..AutoIonization, ..DoubleAutoIonization, ..DielectronicRecombination, ..ImpactExcitation, ..CoulombExcitation, ..CoulombIonization,
-       ..PhotoDoubleIonization, ..PhotoExcitationFluores, ..PhotoExcitationAutoion, ..RayleighCompton, ..MultiPhotonDeExcitation,
-       ..PhotoIonizationFluores, ..PhotoIonizationAutoion, ..ImpactExcitationAutoion, ..RadiativeAuger, 
-       ..MultiPhotonIonization, ..MultiPhotonDoubleIon, ..InternalConversion  ==#
 
 
 """
@@ -38,6 +32,12 @@ export  perform
     + intermediateAsfSettings        ::AsfSettings                     ... Provides the SCF settings for the intermediate-state multiplet.
     + finalConfigs                   ::Array{Configuration,1}          ... A list of final-state configurations.
     + finalAsfSettings               ::AsfSettings                     ... Provides the SCF and CI settings for the final-state multiplet.
+    + orbitalSource                  ::Basics.AbstractOrbitalSource    ... Says WHICH one-electron orbital set the initial, intermediate and final
+                                                                           multiplets are built on.  `SeparateOrbitals()` is the default and is what JAC
+                                                                           has always done -- every multiplet from its own SCF.  The alternatives exist
+                                                                           because an explicit SECOND-ORDER amplitude is valid only on ONE orthonormal
+                                                                           set:  `ManyElectron.matrixElement_HminusE` drops the overlap term `-E <r|s>`,
+                                                                           which vanishes identically only then.  See `Basics.AbstractOrbitalSource`.
     + processSettings                ::Basics.AbstractProcessSettings  ... Provides the settings for the selected process.
 """
 struct  Computation
@@ -53,6 +53,7 @@ struct  Computation
     intermediateAsfSettings        ::AsfSettings
     finalConfigs                   ::Array{Configuration,1}
     finalAsfSettings               ::AsfSettings
+    orbitalSource                  ::Basics.AbstractOrbitalSource
     processSettings                ::Basics.AbstractProcessSettings
 end 
 
@@ -65,18 +66,16 @@ function Computation()
                 Configuration[], AsfSettings(),
                 Configuration[], AsfSettings(),
                 Configuration[], AsfSettings(),
-                Configuration[], AsfSettings(), PhotoEmission.Settings() )
+                Configuration[], AsfSettings(), Basics.SeparateOrbitals(), PhotoEmission.Settings() )
 end
 
 
 """
 `Atomic.Computation(comp::Atomic.Computation;`
 
-    name=..,                nuclearModel=..,            grid=..,                    configs=..,                   asfSettings=..,     
-    initialConfigs=..,      initialAsfSettings=..,      intermediateConfigs=..,     intermediateAsfSettings=.., 
-    finalConfigs=..,        finalAsfSettings=..,        alphaSettings=..,           einsteinSettings=.., 
-    formSettings=..,        hfsSettings=..,             isotopeSettings=..,         plasmaSettings=..,
-    polaritySettings=..,    yieldSettings::=..,         zeemanSettings=..,
+    name=..,                nuclearModel=..,            grid=..,                    configs=..,                   asfSettings=..,
+    initialConfigs=..,      initialAsfSettings=..,      intermediateConfigs=..,     intermediateAsfSettings=..,
+    finalConfigs=..,        finalAsfSettings=..,        propertySettings=..,
     process=..,             processSettings=..,         printout::Bool=false)
                     
     ... constructor for modifying the given Atomic.Computation by 'overwriting' the previously selected parameters.
@@ -88,26 +87,30 @@ function Computation(comp::Atomic.Computation;
     initialConfigs::Union{Nothing,Array{Configuration,1}}=nothing,              initialAsfSettings::Union{Nothing,AsfSettings}=nothing, 
     intermediateConfigs::Union{Nothing,Array{Configuration,1}}=nothing,         intermediateAsfSettings::Union{Nothing,AsfSettings}=nothing, 
     finalConfigs::Union{Nothing,Array{Configuration,1}}=nothing,                finalAsfSettings::Union{Nothing,AsfSettings}=nothing, 
+    orbitalSource::Union{Nothing,Basics.AbstractOrbitalSource}=nothing,
     processSettings::Union{Nothing,Any}=nothing,            
     printout::Bool=false)
     
-    if  name                    == nothing  namex                    = comp.name                    else  namex                    = name                     end 
-    if  nuclearModel            == nothing  nuclearModelx            = comp.nuclearModel            else  nuclearModelx            = nuclearModel             end 
-    if  grid                    == nothing  gridx                    = comp.grid                    else  gridx                    = grid                     end 
-    if  propertySettings        == nothing  propertySettingsx        = comp.propertySettings        else  propertySettingsx        = propertySettings         end 
-    if  configs                 == nothing  configsx                 = comp.configs                 else  configsx                 = configs                  end 
-    if  asfSettings             == nothing  asfSettingsx             = comp.asfSettings             else  asfSettingsx             = asfSettings              end 
-    if  initialConfigs          == nothing  initialConfigsx          = comp.initialConfigs          else  initialConfigsx          = initialConfigs           end 
-    if  initialAsfSettings      == nothing  initialAsfSettingsx      = comp.initialAsfSettings      else  initialAsfSettingsx      = initialAsfSettings       end 
-    if  intermediateConfigs     == nothing  intermediateConfigsx     = comp.intermediateConfigs     else  intermediateConfigsx     = intermediateConfigs      end 
-    if  intermediateAsfSettings == nothing  intermediateAsfSettingsx = comp.intermediateAsfSettings else  intermediateAsfSettingsx = intermediateAsfSettings  end 
-    if  finalConfigs            == nothing  finalConfigsx            = comp.finalConfigs            else  finalConfigsx            = finalConfigs             end 
-    if  finalAsfSettings        == nothing  finalAsfSettingsx        = comp.finalAsfSettings        else  finalAsfSettingsx        = finalAsfSettings         end 
-    if  processSettings         == nothing  prsx                     = comp.processSettings         else  prsx                     = processSettings          end 
+    if  isnothing(name)                     namex                    = comp.name                    else  namex                    = name                     end 
+    if  isnothing(nuclearModel)             nuclearModelx            = comp.nuclearModel            else  nuclearModelx            = nuclearModel             end 
+    if  isnothing(grid)                     gridx                    = comp.grid                    else  gridx                    = grid                     end 
+    if  isnothing(propertySettings)         propertySettingsx        = comp.propertySettings        else  propertySettingsx        = propertySettings         end 
+    if  isnothing(configs)                  configsx                 = comp.configs                 else  configsx                 = configs                  end 
+    if  isnothing(asfSettings)              asfSettingsx             = comp.asfSettings             else  asfSettingsx             = asfSettings              end 
+    if  isnothing(initialConfigs)           initialConfigsx          = comp.initialConfigs          else  initialConfigsx          = initialConfigs           end 
+    if  isnothing(initialAsfSettings)       initialAsfSettingsx      = comp.initialAsfSettings      else  initialAsfSettingsx      = initialAsfSettings       end 
+    if  isnothing(intermediateConfigs)      intermediateConfigsx     = comp.intermediateConfigs     else  intermediateConfigsx     = intermediateConfigs      end 
+    if  isnothing(intermediateAsfSettings)  intermediateAsfSettingsx = comp.intermediateAsfSettings else  intermediateAsfSettingsx = intermediateAsfSettings  end 
+    if  isnothing(finalConfigs)             finalConfigsx            = comp.finalConfigs            else  finalConfigsx            = finalConfigs             end 
+    if  isnothing(finalAsfSettings)         finalAsfSettingsx        = comp.finalAsfSettings        else  finalAsfSettingsx        = finalAsfSettings         end 
+    if  isnothing(orbitalSource)            orbitalSourcex           = comp.orbitalSource           else  orbitalSourcex           = orbitalSource            end 
+    if  isnothing(processSettings)          prsx                     = comp.processSettings         else  prsx                     = processSettings          end 
     
     
+    Atomic.checkPropertySettings(propertySettingsx)
+
     cp = Computation(namex, nuclearModelx, gridx, propertySettingsx, configsx, asfSettingsx, initialConfigsx, initialAsfSettingsx,     
-                        intermediateConfigsx,  intermediateAsfSettingsx, finalConfigsx, finalAsfSettingsx,        
+                        intermediateConfigsx,  intermediateAsfSettingsx, finalConfigsx, finalAsfSettingsx, orbitalSourcex,        
                         prsx) 
                         
     if printout  Base.show(cp)      end
@@ -119,21 +122,12 @@ end
 `Atomic.Computation( ... example for SCF computations)`  
 
         grid     = Radial.Grid(true)
-        nuclearM = Nuclear.Model(18., "Fermi")
+        nuclearM = Nuclear.Model(18., FermiNucleus())
         settings = AsfSettings(AsfSettings(), selectLevelsCI = true, selectedLevelsCI = [1,2, 4,5, 7,8], jjLS = LSjjSettings(false) )
         configs  = [Configuration("[Ne] 3s^2 3p^5"), Configuration("[Ne] 3s 3p^6")]
         Atomic.Computation(Atomic.Computation(), name="Example", grid=grid, nuclearModel=nuclearM, configs=configs, asfSettings=settings )
-    
-`Atomic.Computation( ... example for the computation of atomic properties)`  
 
-        grid        = Radial.Grid(true)
-        nuclearM    = Nuclear.Model(26., "Fermi", 58., 3.81, AngularJ64(5//2), 1.0, 1.0)
-        hfsSettings = Hfs.Settings(true, true, false, false, false, false, false, Int64[] )
-        configs     = [Configuration("[Ne] 3s"), Configuration("[Ne] 3p"), Configuration("[Ne] 3d")]
-        Atomic.Computation(Atomic.Computation(), name="Example", grid=grid, nuclearModel=nuclearM, configs=configs, properties=[HFS()],
-                            hfsSettings=hfsSettings )
-    
-`Atomic.Computation( ... example for the computation of one atomic process)`  
+`Atomic.Computation( ... example for the computation of one atomic process)`
 
         grid           = Radial.Grid(true)
         initialConfigs = [Configuration("[Ne] 3s 3p^6"), Configuration("[Ne] 3s^2 3p^4 3d")]
@@ -161,7 +155,7 @@ function Base.string(comp::Atomic.Computation)
         end
         sa = sa * "\nfinal configurations:         "
         for  config  in  comp.finalConfigs     sa = sa * string(config) * ",  "         end
-    else                                sa = sa * "for the properties $(comp.properties) and with the \nconfigurations:        "
+    else                                sa = sa * "for the properties $(comp.propertySettings) and with the \nconfigurations:        "
         for  config  in  comp.configs   sa = sa * string(config) * ",  "                end
     end
     return( sa )
@@ -183,28 +177,104 @@ function Base.show(io::IO, comp::Atomic.Computation)
         println(io, "intermediateAsfSettings:      \n$(comp.intermediateAsfSettings)  ")    end
     if  comp.finalAsfSettings != AsfSettings()     
         println(io, "finalAsfSettings:             \n$(comp.finalAsfSettings)  ")           end
+    if  comp.orbitalSource != Basics.SeparateOrbitals()
+        println(io, "orbitalSource:                $(comp.orbitalSource)  ")                end
     #
     else
     # For the computation of no or several atomic properties
     if  comp.asfSettings != AsfSettings()     
         println(io, "asfSettings:                  \n$(comp.asfSettings)  ")                end
-    if  AlphaX in comp.properties     &&  comp.alphaSettings    != AlphaVariation.Settings()
-        println(io, "alphaSettings:                \n$(comp.alphaSettings)  ")              end
-    if  EinsteinX in comp.properties  &&  comp.einsteinSettings != Einstein.Settings()
-        println(io, "einsteinSettings:             \n$(comp.einsteinSettings)  ")           end
-    if  FormF in comp.properties      &&  comp.formSettings     != FormFactor.Settings()
-        println(io, "formSettings:                 \n$(comp.formSettings)  ")               end
-    if  HFS in comp.properties        &&  comp.hfsSettings      != Hfs.Settings()
-        println(io, "hfsSettings:                  \n$(comp.hfsSettings)  ")                end
     if  Isotope in comp.properties    &&  comp.isotopeSettings  != IsotopeShift.Settings()
         println(io, "isotopeSettings:              \n$(comp.isotopeSettings)  ")            end
-    if  Polarity in comp.properties   &&  comp.polaritySettings != MultipolePolarizibility.Settings()
-        println(io, "polaritySettings:             \n$(comp.polaritySettings)  ")           end
-    if  Yields in comp.properties     &&  comp.yieldSettings    != DecayYield.Settings()
-        println(io, "yieldSettings:                \n$(comp.yieldSettings)  ")              end
-    if  Zeeman in comp.properties     &&  comp.zeemanSettings   != LandeZeeman.Settings()
-        println(io, "zeemanSettings:               \n$(comp.zeemanSettings)  ")             end
     end
+end
+
+
+"""
+`Atomic.checkPropertySettings(propertySettings)`
+    ... refuses a `propertySettings` list that carries TWO settings OF THE SAME TYPE. Nothing is returned; the
+        offending case raises.
+
+        **THE ARGUMENT IS DELIBERATELY UNTYPED**, and the first version of this guard got it wrong in exactly
+        the way item 84 did: `[s1, s2]` written with two settings of ONE type has the concrete type
+        `Vector{NuclearShielding.Settings}`, not `Array{Basics.AbstractPropertySettings,1}`, so a signature
+        naming the abstract element type does not match the very case the guard exists for -- it raised a
+        `MethodError` instead of the explanation. Anything that is not an array is passed over silently, since
+        the keyword itself admits `Any`.
+
+        **A `Computation` RUNS ONE COMPUTATION, FOR ONE PROPERTY OR ONE PROCESS, and higher complexity is not
+        built on top of it** -- the maintainer's decision, 21-Oct-2026. A scan, a convergence study or a
+        comparison of models is a SCRIPT: one `perform` does the structure, and the loop or the arithmetic sits
+        around the terms it stored. The economics agree, measured on Th4+ [Rn] the same day: the
+        self-consistent field costs 65.1 s and one shielding property on it 0.6 s, so the structure is 99 % of
+        the work and six `Computation`s cost 5.8x what one field and a loop cost, for no physics.
+
+        **IT RAISES RATHER THAN WARNS, AND THAT IS THE POINT.** Until this guard existed the duplicate was
+        accepted and the result was LOST: every property branch of `Basics.perform` stores its outcome under a
+        constant string key, so the second write replaced the first and `Base.merge` said nothing -- measured,
+        two `NuclearShielding.Settings` differing only in `nVirtualMax` went in and ONE outcome came back, the
+        second. There is no use for which that is the wanted behaviour, so a warning would leave a wrong number
+        in circulation; this stops at construction, where the mistake is, rather than deep inside `perform`
+        where only the symptom shows.
+
+    + propertySettings  ::Array{Basics.AbstractPropertySettings,1}   ... the list as given to the Computation.
+"""
+function checkPropertySettings(propertySettings)
+    isa(propertySettings, AbstractArray)  ||  return( nothing )
+    seen = DataType[]
+    for  settings  in  propertySettings
+        T = typeof(settings)
+        if  T in seen
+            error("Atomic.Computation(): propertySettings carries TWO settings of the type $T, and a "        *
+                  "Computation runs ONE computation for one property -- the second would silently replace "   *
+                  "the first, since every property stores its result under one key.  A scan over settings "   *
+                  "(a convergence study, several field models, a frequency series) belongs in a SCRIPT: do "  *
+                  "ONE perform for the structure and then loop the property over the terms it stored, which " *
+                  "is also far cheaper -- the self-consistent field is the bulk of the work.")
+        end
+        push!( seen, T )
+    end
+
+    return( nothing )
+end
+
+
+"""
+`Atomic.warnAboutUnusedSettings(comp::Atomic.Computation)`
+    ... warns about every AsfSettings field of the given computation that the path it will actually take can NEVER
+        read, and whose value differs from the default. An Atomic.Computation carries FOUR such fields -- asfSettings
+        for the `configs` path, and initialAsfSettings / intermediateAsfSettings / finalAsfSettings for the
+        initial/final path -- deliberately, so that each multiplet may carry its own correlation model. Only the
+        fields of the chosen path are consulted, and a value placed in one of the others is silently ignored: someone
+        who sets eeInteractionCI = CoulombBreit(...) in `asfSettings` while giving initialConfigs gets a Coulomb-only
+        CI with no indication why.
+
+        THE COMPARISON AGAINST THE DEFAULT IS WHAT MAKES THIS USABLE. Every computation carries all four fields
+        whether or not the user touched them, so a check that merely asked "is this path reading the field" would
+        fire on every run and be ignored within a week. AsfSettings defines Base.:(==), so `!= AsfSettings()`
+        separates "the user set this" from "untouched".
+
+        IT IS A WARNING AND NEVER AN ERROR: one Computation may legitimately be built once and reused across paths.
+        And it catches only a field that is NEVER consulted -- it cannot catch someone who fills initialAsfSettings
+        where finalAsfSettings was meant, since both are read. Nothing is returned.
+"""
+function warnAboutUnusedSettings(comp::Atomic.Computation)
+    usesConfigs = length(comp.configs) != 0
+    unused      = usesConfigs ? [ ("initialAsfSettings",      comp.initialAsfSettings),
+                                  ("intermediateAsfSettings", comp.intermediateAsfSettings),
+                                  ("finalAsfSettings",        comp.finalAsfSettings) ] :
+                                [ ("asfSettings",             comp.asfSettings) ]
+    named       = usesConfigs ? "configs"       : "initialConfigs/finalConfigs"
+    reads       = usesConfigs ? "asfSettings"   : "initialAsfSettings, intermediateAsfSettings and finalAsfSettings"
+    for  (name, set)  in  unused
+        if  set != AsfSettings()
+            println(">> WARNING: this computation is built from $named, so it reads $reads;  the $name you gave " *
+                    "is NOT used and its contents -- an eeInteractionCI or scfRoute set there, for instance -- " *
+                    "will not reach the calculation.")
+        end
+    end
+
+    return( nothing )
 end
 
 end # module

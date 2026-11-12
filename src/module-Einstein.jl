@@ -32,26 +32,26 @@ end
 
 
 """
-`Einstein.Settings(settings::Einstein.Settings;`
-    
-            multipoles=..,            printBefore=..,      lineSelection=..,     
-            photonEnergyShift=..,     mimimumPhotonEnergy=..,         maximumPhotonEnergy=..)
-            
-    ... constructor for re-defining the settings::Einstein.Settings.
-"""
-function Settings(settings::Einstein.Settings;                            multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,    
-    printBefore::Union{Nothing,Bool}=nothing,                             lineSelection::Union{Nothing,LineSelection}=nothing, 
-    photonEnergyShift::Union{Nothing,Float64}=nothing,  
-    mimimumPhotonEnergy::Union{Nothing,Float64}=nothing,                  maximumPhotonEnergy::Union{Nothing,Float64}=nothing)
+`Einstein.Settings(set::Einstein.Settings;`
 
-    if  multipoles         == nothing   multipolesx          = settings.multipoles            else  multipolesx = multipoles                   end 
-    if  printBefore        == nothing   printBeforex         = settings.printBefore           else  printBeforex = printBefore                 end 
-    if  lineSelection      == nothing   lineSelectionx       = set.lineSelection              else  lineSelectionx = lineSelection             end 
-    if  photonEnergyShift  == nothing   photonEnergyShiftx   = settings.photonEnergyShift     else  photonEnergyShiftx = photonEnergyShift     end 
-    if  mimimumPhotonEnergy== nothing   mimimumPhotonEnergyx = settings.mimimumPhotonEnergy   else  mimimumPhotonEnergyx = mimimumPhotonEnergy end 
-    if  maximumPhotonEnergy== nothing   maximumPhotonEnergyx = settings.maximumPhotonEnergy   else  maximumPhotonEnergyx = maximumPhotonEnergy end 
-    
-    Settings(multipolesx, printBeforex, selectLinesx, selectedLinesx, photonEnergyShiftx, mimimumPhotonEnergyx, maximumPhotonEnergyx)
+        multipoles=..,        printBefore=..,      lineSelection=..,
+        photonEnergyShift=.., mimimumPhotonEnergy=..,  maximumPhotonEnergy=..)
+
+    ... keyword copy-constructor for re-defining selected values of a settings::Einstein.Settings.
+"""
+function Settings(set::Einstein.Settings;
+        multipoles::Union{Nothing,Array{EmMultipole,1}}=nothing,
+        printBefore::Union{Nothing,Bool}=nothing,            lineSelection::Union{Nothing,LineSelection}=nothing,
+        photonEnergyShift::Union{Nothing,Float64}=nothing,
+        mimimumPhotonEnergy::Union{Nothing,Float64}=nothing, maximumPhotonEnergy::Union{Nothing,Float64}=nothing)
+    if  isnothing(multipoles)            multipolesx          = set.multipoles          else   multipolesx          = multipoles          end
+    if  isnothing(printBefore)           printBeforex         = set.printBefore         else   printBeforex         = printBefore         end
+    if  isnothing(lineSelection)         lineSelectionx       = set.lineSelection       else   lineSelectionx       = lineSelection       end
+    if  isnothing(photonEnergyShift)     photonEnergyShiftx   = set.photonEnergyShift   else   photonEnergyShiftx   = photonEnergyShift   end
+    if  isnothing(mimimumPhotonEnergy)   mimimumPhotonEnergyx = set.mimimumPhotonEnergy else   mimimumPhotonEnergyx = mimimumPhotonEnergy end
+    if  isnothing(maximumPhotonEnergy)   maximumPhotonEnergyx = set.maximumPhotonEnergy else   maximumPhotonEnergyx = maximumPhotonEnergy end
+
+    Settings( multipolesx, printBeforex, lineSelectionx, photonEnergyShiftx, mimimumPhotonEnergyx, maximumPhotonEnergyx )
 end
 
 
@@ -63,18 +63,6 @@ function Settings()
 end
 
 
-#== """
-`Einstein.Settings(multipoles::Array{EmMultipole,1};` printBefore::Bool=false, 
-                    selectLines::Bool=false, selectedLines::Array{Tuple{Int64,Int64},1}=Tuple{Int64,Int64}[],
-                    photonEnergyShift::Float64=0., mimimumPhotonEnergy::Float64=0., maximumPhotonEnergy::Float64=0.) 
-    ... keyword constructor to overwrite selected value of Einstein line computations; DON'T use it anymore (11/2019).
-"""
-function Settings(multipoles::Array{EmMultipole,1}; printBefore::Bool=false, 
-                    selectLines::Bool=false, selectedLines::Array{Tuple{Int64,Int64},1}=Tuple{Int64,Int64}[],
-                    photonEnergyShift::Float64=0., mimimumPhotonEnergy::Float64=0., maximumPhotonEnergy::Float64=0.)
-    println("!!! UPDATE: Remove this call and use Einstein.Settings(settings::Einstein.Settings) instead.")
-    Settings(multipoles, printBefore, selectLines, selectedLines, photonEnergyShift, mimimumPhotonEnergy, maximumPhotonEnergy)
-end  ==#
 
 
 # `Base.show(io::IO, settings::Einstein.Settings)`  ... prepares a proper printout of the variable settings::Einstein.Settings.
@@ -130,7 +118,7 @@ end
 
 
 """
-`Einstein.Line(initialLevel::Level, finalLevel::Level, photonRate::Float64)`  
+`Einstein.Line(initialLevel::Level, finalLevel::Level, photonRate::EmProperty)`  
     ... constructor an Einstein line between a specified initial and final level.
 """
 function Line(initialLevel::Level, finalLevel::Level, photonRate::EmProperty)
@@ -190,7 +178,7 @@ function  computeAmplitudesProperties(line::Einstein.Line, grid::Radial.Grid, se
     newChannels = Einstein.Channel[];    rateC = rateB = 0.
     for channel in line.channels
         #
-        amplitude = PhotoEmission.amplitude("emission", channel.multipole, channel.gauge, line.omega, line.finalLevel, line.initialLevel, grid)
+        amplitude = PhotoEmission.amplitude(Emission(), channel.multipole, channel.gauge, line.omega, line.finalLevel, line.initialLevel, grid)
         #
         push!( newChannels, Einstein.Channel( channel.multipole, channel.gauge, amplitude) )
         if       channel.gauge == Basics.Coulomb     rateC = rateC + abs(amplitude)^2
@@ -253,33 +241,6 @@ function  determineLines(multiplet::Multiplet, settings::Einstein.Settings)
 end
 
 
-#== """
-`Einstein.determineLines(multiplet::Multiplet, settings::Einstein.Settings)`  
-    ... to determine a list of EinsteinLine's for transitions between the lines from the given multiplet and by taking 
-        into account the particular selections and settings of for this computation; an Array{Einstein.Line,1} is 
-        returned. Apart from the level specification, all physical properties are set to zero during the initialization 
-        process.
-"""
-function  determineLines(multiplet::Multiplet, settings::Einstein.Settings)
-    if    settings.selectLines    selectLines   = true
-        selectedLines = Basics.determineSelectedLines(settings.selectedLines, multiplet, multiplet)
-    else                          selectLines   = false
-    end
-
-    lines = Einstein.Line[]
-    for  i = 1:length(multiplet.levels)
-        for  f = 1:length(multiplet.levels)
-            if  selectLines  &&  !((i,f) in selectedLines )    continue   end
-            omega    = multiplet.levels[i].energy - multiplet.levels[f].energy + settings.photonEnergyShift
-            if  omega <= settings.mimimumPhotonEnergy  ||  omega > settings.maximumPhotonEnergy    continue   end  
-
-            channels = determineChannels(multiplet.levels[f], multiplet.levels[i], settings) 
-            push!( lines, Einstein.Line(multiplet.levels[i], multiplet.levels[f], omega, EmProperty(0., 0.), EmProperty(0., 0.),
-                                        true, channels) )
-        end
-    end
-    return( lines )
-end ==#
 
 
 """
@@ -407,7 +368,7 @@ function  displayRates(stream::IO, lines::Array{Einstein.Line,1})
     sa = sa * TableStrings.center(11, "Gauge"    ; na=4);                         sb = sb * TableStrings.hBlank(17)
     sa = sa * TableStrings.center(26, "A--Einstein--B"; na=2);       
     sb = sb * TableStrings.center(26, TableStrings.inUnits("rate")*"           "*TableStrings.inUnits("rate"); na=2)
-    sa = sa * TableStrings.center(11, "Osc. strength"    ; na=3);                 sb = sb * TableStrings.hBlank(17)
+    sa = sa * TableStrings.center(11, "gf"               ; na=3);                 sb = sb * TableStrings.hBlank(17)
     sa = sa * TableStrings.center(12, "Decay widths"; na=4);       
     sb = sb * TableStrings.center(12, TableStrings.inUnits("energy"); na=4)
     println(stream, sa);    println(stream, sb);    println(stream, "  ", TableStrings.hLine(nx)) 
@@ -421,16 +382,33 @@ function  displayRates(stream::IO, lines::Array{Einstein.Line,1})
             sa = sa * @sprintf("%.6e", Defaults.convertUnits("energy: from atomic", line.omega)) * "    "
             sa = sa * TableStrings.center(9,  string(ch.multipole); na=4)
             sa = sa * TableStrings.flushleft(11, string(ch.gauge);  na=2)
-            chRate =  8pi * Defaults.getDefaults("alpha") * line.omega / (Basics.twice(line.initialLevel.J) + 1) * (abs(ch.amplitude)^2) * 
-                                                                (Basics.twice(line.finalLevel.J) + 1)
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to Einstein A",  line, chRate)) * "  "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to Einstein B",  line, chRate)) * "    "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to f",           line, chRate)) * "    "
-            sa = sa * @sprintf("%.6e", Basics.recast("rate: radiative, to decay width", line, chRate)) * "    "
+            # A SPURIOUS (2J_f+1) WAS REMOVED HERE, 7-Sep-2026, and it made every number in this table too large.
+            # The Einstein A for emission out of an upper level is 8 pi alpha omega |<f||O||i>|^2 / (2J_i+1); there is no
+            # statistical weight of the LOWER level in it, and PhotoEmission.displayRates has always used exactly that.
+            # Measured on hydrogen Lyman-alpha, where A = 6.2649e8 1/s is known exactly for both 2p components: without
+            # the factor 6.2684e8 and 6.2682e8 (0.06 %), with it 1.2537e9 and 1.2536e9, i.e. high by exactly 2J_f+1 = 2.
+            # A, B, gf and the decay width are all built from chRate, so all four were wrong by that factor -- which is
+            # also why this module and PhotoEmission reported A values differing by exactly 4 for a 5/2 -> 3/2 line.
+            chRate =  8pi * Defaults.getDefaults("alpha") * line.omega / (Basics.twice(line.initialLevel.J) + 1) * (abs(ch.amplitude)^2)
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToEinsteinA(),  line, chRate)) * "  "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToEinsteinB(),  line, chRate)) * "    "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToOscillatorGf(),          line, chRate)) * "    "
+            sa = sa * @sprintf("%.6e", Basics.recast(RecastRateToDecayWidth(), line, chRate)) * "    "
             println(stream, sa)
         end
     end
     println(stream, "  ", TableStrings.hLine(nx))
+    # HOW FAR THE TWO GAUGES AGREE, printed beside the rates they qualify.  The indicator is free here: the rate
+    # is already held in both gauges, so this only reads what has been computed.  It is deliberately the same
+    # measure and the same thresholds PhotoEmission applies, through Basics.gaugeConsistency.
+    rows = Tuple{String,Float64,EmProperty}[]
+    for  line  in  lines
+        label = TableStrings.levels_if(line.initialLevel.index, line.finalLevel.index) * "  " *
+                TableStrings.symmetries_if(LevelSymmetry(line.initialLevel.J, line.initialLevel.parity),
+                                           LevelSymmetry(line.finalLevel.J, line.finalLevel.parity))
+        push!( rows, (label, Defaults.convertUnits("energy: from atomic", line.omega), line.photonRate) )
+    end
+    Basics.displayGaugeConsistency(stream, rows; caption="Einstein A coefficients")
     #
     return( nothing )
 end

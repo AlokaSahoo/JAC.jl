@@ -256,6 +256,23 @@ end
 
 
 """
+`TableStrings.MMffTupels(n::Int64, pList::Array{Tuple{AngularM64, AngularM64, Float64, Float64},1}, sc::String)`  
+        ... a list of Strings with maximal length n is returned; each string in this list comprises a number of 
+        '[M, M, float, float],  ' descriptors.
+"""
+function  MMffTupels(n::Int64, pList::Array{Tuple{AngularM64, AngularM64, Float64, Float64},1}, sc::String)
+    sa = "";   wa = String[]
+    for p in pList
+        sa = sa * sc * "[" * string(p[1]) * ", " * string(p[2]) * ", "  
+        sa = sa * @sprintf("%.2e", p[3]) * ", " * @sprintf("%.2e", p[4]) * "],  "
+        if  length(sa) + 20 > n    push!(wa, sa[1:end-3]);    sa = ""    end
+    end
+    if  sa != ""    push!(wa, sa[1:end-3])    end
+    return( wa )
+end
+
+
+"""
 `TableStrings.kappaSymmetryTupels(n::Int64, kappaList::Array{Tuple{Int64,LevelSymmetry},1})`  
     ... a string of shell (Symmetry) is returned.
 """
@@ -324,7 +341,7 @@ end
 
 
 """
-`TableStrings.symmetries_if()`  ... a string 'J^P --> J^P' is returned
+`TableStrings.symmetries_if(isym::LevelSymmetry, fsym::LevelSymmetry)`  ... a string 'J^P --> J^P' is returned
 """
 function  symmetries_if(isym::LevelSymmetry,  fsym::LevelSymmetry)
     sa = string(isym) * " --> " * string(fsym)
@@ -333,7 +350,7 @@ end
 
 
 """
-`TableStrings.symmetries_imf()`  ... a string 'J^P --> J^P --> J^P' is returned
+`TableStrings.symmetries_imf(isym::LevelSymmetry, msym::LevelSymmetry, fsym::LevelSymmetry)`  ... a string 'J^P --> J^P --> J^P' is returned
 """
 function  symmetries_imf(isym::LevelSymmetry, msym::LevelSymmetry, fsym::LevelSymmetry)
     sa = string(isym) * " --> " * string(msym) * " --> " * string(fsym)
